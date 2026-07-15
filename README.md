@@ -44,3 +44,19 @@ The internal JSON keeps detailed evidence for later retrieval, while the
 generated Issue renders eight compact sections. Log and stack excerpts are
 limited to 50 lines, and request or response summaries are limited to 4,000
 characters each.
+
+## Sanitize a raw Kibana event
+
+`examples/kibana_raw.json` is fully synthetic but follows the expected
+Elasticsearch hit shape. Set a local HMAC key and generate an AI-safe event:
+
+```bash
+export LOG_SANITIZER_HMAC_KEY="<local-test-key-at-least-32-bytes>"
+python3 -m src.kibana_sanitizer examples/kibana_raw.json \
+  --output sanitized/kibana-event.json
+```
+
+The sanitizer parses the Java log envelope, removes secret and identifier
+fields, converts event and trace identifiers to HMAC references, omits internal
+container identifiers, and performs a final secret scan. Unclassified
+high-entropy values block downstream AI and Issue processing.
