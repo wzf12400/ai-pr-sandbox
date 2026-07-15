@@ -1,169 +1,190 @@
-name: Engineering request
-description: Submit a structured request that can be reviewed and implemented safely.
-title: "[Request]: "
-labels: []
-assignees: []
+name: AI 工作项
+description: 提交可定位、可验证的需求或故障，供人工分诊及后续 AI 辅助处理
+title: "[待分诊] "
+labels:
+  - "needs-triage"
+  - "ai-input"
 body:
   - type: markdown
     attributes:
       value: |
-        Provide enough evidence for a developer or AI agent to understand,
-        reproduce, implement, and verify the request. Do not include passwords,
-        tokens, cookies, private keys, or personal data.
+        Issue 应能支持独立初步判断，同时保持简洁。完整日志、堆栈和检索过程请提供 Jira、Kibana 或定位报告链接。
+        关键日志仅保留故障前后 20～50 行，并移除密码、Token、Cookie、个人信息及客户敏感数据。
+
+  - type: textarea
+    id: source_context
+    attributes:
+      label: 来源
+      description: 用于回溯原始需求、告警或工单，并作为后续去重依据。
+      placeholder: |
+        来源类型：人工 / Jira / Kibana / 其他
+        来源编号：Jira Key / 告警 ID / 事件 ID
+        原始链接：https://...
+    validations:
+      required: true
 
   - type: dropdown
     id: request_type
     attributes:
-      label: Request type
+      label: 工作项类型
       options:
-        - Bug
-        - Feature
-        - Refactor
-        - Documentation
+        - 缺陷 Bug
+        - 功能需求 Feature
+        - 性能问题 Performance
+        - 安全问题 Security
+        - 重构 Refactor
+        - 文档 Documentation
+        - 待确认 Unknown
     validations:
       required: true
 
-  - type: input
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 严重程度
+      description: 无法判断时选择“待评估”，不得仅由 AI 提升或降低生产事故等级。
+      options:
+        - S0 - 生产不可用或重大安全事故
+        - S1 - 核心功能严重受损
+        - S2 - 部分功能异常或存在稳定规避方式
+        - S3 - 轻微问题或体验优化
+        - 待评估
+    validations:
+      required: true
+
+  - type: textarea
     id: target_object
     attributes:
-      label: Target object
-      description: Repository, service, page, module, class, function, or configuration affected.
-      placeholder: "src/calculator.py - calculator functions"
-    validations:
-      required: true
-
-  - type: textarea
-    id: background
-    attributes:
-      label: Background
-      description: Explain the user or business scenario and why the change is needed.
-    validations:
-      required: true
-
-  - type: textarea
-    id: current_behavior
-    attributes:
-      label: Current behavior
-      description: Describe what the system does now. Use "Not implemented" for a new feature.
-    validations:
-      required: true
-
-  - type: textarea
-    id: expected_behavior
-    attributes:
-      label: Expected behavior
-      description: Describe the result after the change in observable terms.
-    validations:
-      required: true
-
-  - type: textarea
-    id: interface
-    attributes:
-      label: Interface or function
-      description: Include endpoint, HTTP method, function signature, request fields, and response format. Enter "Not applicable" when unrelated.
+      label: 目标对象
+      description: 说明问题属于哪个项目、仓库和代码对象；未知位置可写“待检索定位”。
       placeholder: |
-        Function: divide(left: float, right: float) -> float
-        Error: ValueError("Cannot divide by zero")
+        项目或业务线：
+        GitHub 仓库：
+        服务或应用：
+        模块或页面：
+        文件 / 类 / 方法：
+        责任团队：
     validations:
       required: true
 
   - type: textarea
-    id: reproduction
+    id: interface_context
     attributes:
-      label: Reproduction steps
-      description: List the smallest repeatable sequence. Enter "Not applicable" for a new feature.
+      label: 接口与调用链
+      description: 保留定位所需的接口入口和上下游关系；非接口问题填“不适用”。
       placeholder: |
-        1. Start from...
-        2. Call or click...
-        3. Observe...
+        协议及方法：POST
+        接口路径或 Topic：/api/register
+        上游调用方：
+        下游依赖：
+        请求摘要（已脱敏）：
+        实际响应摘要：
+        期望响应摘要：
     validations:
       required: true
 
   - type: textarea
-    id: error_logs
+    id: error_evidence
     attributes:
-      label: Error message and logs
-      description: Paste relevant status codes, stack traces, or logs after removing sensitive data. Enter "None" if there is no error.
-      render: shell
-    validations:
-      required: true
-
-  - type: textarea
-    id: screenshots
-    attributes:
-      label: Screenshots or attachments
-      description: Drag screenshots or supporting files here. Enter "None" if not applicable.
-    validations:
-      required: true
-
-  - type: textarea
-    id: environment
-    attributes:
-      label: Environment
-      description: Include application version, operating system, browser, runtime, and other relevant versions.
+      label: 报错与关键证据
+      description: 提供足够定位的信息，不要粘贴完整日志。可直接拖拽脱敏截图或附件。
       placeholder: |
-        Application/commit:
-        OS:
-        Runtime:
-        Browser/device:
+        错误码：
+        异常类型：
+        错误消息：
+        Trace ID：
+        Request ID：
+        发生次数或频率：
+
+        关键日志（故障前后 20～50 行，已脱敏）：
+
+        截图或附件：
+        完整日志链接：
     validations:
       required: true
 
   - type: textarea
-    id: acceptance
+    id: behavior
     attributes:
-      label: Acceptance criteria
-      description: List observable and testable completion conditions.
+      label: 当前行为与期望行为
+      description: 让处理人无需打开外部系统也能理解问题及最短复现路径。
       placeholder: |
-        - [ ] The expected behavior is implemented.
-        - [ ] Error and boundary cases are covered.
-        - [ ] Existing tests still pass.
+        当前行为：
+        期望行为：
+        前置条件：
+        最短复现步骤：
+        临时规避方式：
     validations:
       required: true
 
   - type: textarea
-    id: tests
+    id: runtime_location
     attributes:
-      label: Suggested tests
-      description: Include normal, boundary, error, and regression cases.
+      label: 环境与代码定位
+      description: 文件和行号必须绑定 Commit SHA；自动定位结果应同时给出置信度和证据。
+      placeholder: |
+        环境：生产 / 预发 / 测试 / 本地
+        版本或镜像 Tag：
+        Commit SHA：
+        发生时间及时区：
+        初步定位：src/example.py:87
+        定位置信度：
+        定位证据：堆栈 / 错误码 / 接口映射 / 代码检索
+        完整定位报告：
     validations:
       required: true
 
   - type: textarea
     id: impact_scope
     attributes:
-      label: Impact scope
-      description: List potentially affected modules, APIs, data, compatibility, or users.
+      label: 影响范围
+      description: 用于确定优先级和审批范围；不确定的影响必须明确标记“待评估”。
+      placeholder: |
+        受影响用户 / 客户 / 租户：
+        受影响功能或业务流程：
+        影响数量或比例：
+        数据正确性影响：
+        资金 / 权限 / 隐私 / 合规影响：
+        业务损失或潜在风险：
     validations:
       required: true
 
   - type: textarea
-    id: out_of_scope
+    id: acceptance_criteria
     attributes:
-      label: Out of scope
-      description: State what must not be changed in this request.
+      label: 验收标准
+      description: 每条标准应可测试，并覆盖原始失败场景和必要回归场景。
+      placeholder: |
+        - [ ] 原始问题已修复或需求已实现
+        - [ ] 异常及边界场景已覆盖
+        - [ ] 现有核心流程没有回归
+        - [ ] 日志或监控结果符合预期
     validations:
       required: true
 
   - type: dropdown
-    id: risk
+    id: automation_scope
     attributes:
-      label: Risk level
+      label: 自动化处理范围
+      description: 仅表示允许进入的最高阶段，不能绕过 Code Owner、分支保护或发布审批。
       options:
-        - Low
-        - Medium
-        - High
+        - 仅允许自动分类和补充信息
+        - 允许生成分析与修复建议
+        - 允许创建草稿 PR，必须人工审核
+        - 仅人工处理
     validations:
       required: true
 
   - type: checkboxes
-    id: confirmation
+    id: safety_confirmation
     attributes:
-      label: Confirmation
+      label: 数据与操作安全确认
       options:
-        - label: I removed secrets and personal or confidential data.
+        - label: 已移除密码、Token、密钥、Cookie 和其他认证信息。
           required: true
-        - label: The acceptance criteria are specific and testable.
+        - label: 已脱敏个人信息、客户标识和业务敏感数据。
           required: true
-        - label: I understand that AI may create a branch and draft pull request, but cannot merge automatically.
+        - label: 完整日志和附件的访问范围符合当前仓库权限。
+          required: true
+        - label: 涉及生产、资金、权限、数据库或安全策略时将由责任人单独审批。
           required: true
