@@ -39,3 +39,8 @@ The command validates required fields, scans for common secret and personal
 data patterns, and records the source reference in `.issue-draft-state.json`.
 Running the same source record twice is rejected. Generated drafts and local
 state are ignored by Git.
+
+The internal JSON keeps detailed evidence for later retrieval, while the
+generated Issue renders eight compact sections. Log and stack excerpts are
+limited to 50 lines, and request or response summaries are limited to 4,000
+characters each.

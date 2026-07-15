@@ -17,10 +17,13 @@ class IssueDraftTest(unittest.TestCase):
                 record = load_intake(ROOT / "examples" / f"{name}.json")
                 self.assertTrue(record.validate().valid, record.validate().errors)
                 markdown = render_markdown(record)
-                self.assertIn("## 输入来源", markdown)
+                self.assertIn("## 来源与分类", markdown)
                 self.assertIn("## 目标对象", markdown)
-                self.assertIn("## 报错信息与日志", markdown)
-                self.assertIn("## 验收标准", markdown)
+                self.assertIn("## 接口与调用链", markdown)
+                self.assertIn("## 报错与关键证据", markdown)
+                self.assertIn("## 验收标准与处理权限", markdown)
+                self.assertEqual(8, markdown.count("## "))
+                self.assertNotIn("待确认", markdown)
 
     def test_missing_critical_field_stops_generation(self) -> None:
         payload = json.loads((ROOT / "examples" / "manual.json").read_text(encoding="utf-8"))
@@ -30,6 +33,27 @@ class IssueDraftTest(unittest.TestCase):
 
         self.assertFalse(result.valid)
         self.assertIn("problem.expected_behavior is required", result.errors)
+
+    def test_log_excerpt_is_limited_to_fifty_lines(self) -> None:
+        payload = json.loads((ROOT / "examples" / "kibana.json").read_text(encoding="utf-8"))
+        payload["error"]["log_excerpt"] = "\n".join(f"line {index}" for index in range(51))
+
+        result = IntakeRecord.from_dict(payload).validate()
+
+        self.assertFalse(result.valid)
+        self.assertIn("error.log_excerpt must not exceed 50 lines", result.errors)
+
+    def test_interface_summary_has_a_context_limit(self) -> None:
+        payload = json.loads((ROOT / "examples" / "jira.json").read_text(encoding="utf-8"))
+        payload["interface"]["actual_response"] = "x" * 4001
+
+        result = IntakeRecord.from_dict(payload).validate()
+
+        self.assertFalse(result.valid)
+        self.assertIn(
+            "interface.actual_response must not exceed 4000 characters",
+            result.errors,
+        )
 
     def test_unreviewed_input_is_rejected(self) -> None:
         payload = json.loads((ROOT / "examples" / "jira.json").read_text(encoding="utf-8"))
