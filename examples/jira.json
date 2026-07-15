@@ -1,0 +1,74 @@
+{
+  "schema_version": "issue-intake/v1",
+  "source_type": "jira",
+  "source_reference": "CALC-101",
+  "source_url": "https://jira.example.invalid/browse/CALC-101",
+  "project_key": "CALC",
+  "summary": "Calculator division must reject a zero divisor",
+  "request_type": "Bug",
+  "severity": "S2",
+  "target": {
+    "product": "AI PR Sandbox",
+    "repository": "wzf12400/ai-pr-sandbox",
+    "service": "calculator",
+    "module": "division",
+    "code_object": "divide(left, right)",
+    "owner": "sandbox maintainer"
+  },
+  "problem": {
+    "background": "A simulated Jira report describes unsafe division behavior.",
+    "current_behavior": "The proposed division behavior does not define zero-divisor handling.",
+    "expected_behavior": "A zero divisor raises ValueError with a clear message.",
+    "first_observed_at": "2026-07-15T14:10:00+08:00"
+  },
+  "interface": {
+    "protocol": "Python",
+    "method": "function call",
+    "path_or_topic": "src.calculator.divide",
+    "upstream": "unit tests",
+    "downstream": "none",
+    "request_sample": "divide(8, 0)",
+    "actual_response": "zero-divisor behavior is undefined",
+    "expected_response": "ValueError"
+  },
+  "reproduction": {
+    "preconditions": "Use the simulated division implementation.",
+    "steps": [
+      "Import the calculator module.",
+      "Call divide(8, 0).",
+      "Observe the zero-divisor result."
+    ],
+    "frequency": "always",
+    "reproducible": "yes",
+    "workaround": "Validate the divisor before calling the function."
+  },
+  "error": {
+    "error_code": "DIVISION_BY_ZERO",
+    "exception_type": "ValueError",
+    "message": "Zero divisor must be rejected.",
+    "log_excerpt": "simulated Jira attachment: divisor=0, operation=divide"
+  },
+  "runtime": {
+    "environment": "local test",
+    "version": "sandbox main",
+    "occurred_at": "2026-07-15T14:10:00+08:00"
+  },
+  "attachments": [
+    "Simulated Jira reproduction note"
+  ],
+  "impact": {
+    "affected_subjects": "sandbox test users",
+    "affected_flow": "calculator division",
+    "quantity_or_ratio": "all zero-divisor calls",
+    "data_correctness": "incorrect result is possible without validation",
+    "regulated_areas": "none",
+    "business_risk": "low in sandbox"
+  },
+  "acceptance_criteria": [
+    "A zero divisor raises ValueError.",
+    "The error message identifies the invalid divisor.",
+    "Normal division behavior remains correct."
+  ],
+  "automation_scope": "analysis_only",
+  "data_safety_status": "sanitized"
+}

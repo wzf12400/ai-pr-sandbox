@@ -1,0 +1,67 @@
+{
+  "schema_version": "issue-intake/v1",
+  "source_type": "manual",
+  "source_reference": "manual-20260715-001",
+  "summary": "Add safe division support to the calculator",
+  "request_type": "Feature",
+  "severity": "S3",
+  "target": {
+    "product": "AI PR Sandbox",
+    "repository": "wzf12400/ai-pr-sandbox",
+    "service": "local calculator",
+    "module": "src/calculator.py",
+    "code_object": "divide(left, right)",
+    "owner": "sandbox maintainer"
+  },
+  "problem": {
+    "background": "The sandbox needs a small feature for validating the Issue-to-PR workflow.",
+    "current_behavior": "The calculator supports addition and subtraction only.",
+    "expected_behavior": "The calculator returns a quotient and rejects a zero divisor.",
+    "first_observed_at": "2026-07-15T14:00:00+08:00"
+  },
+  "interface": {
+    "protocol": "Python",
+    "method": "function call",
+    "path_or_topic": "src.calculator.divide",
+    "upstream": "unit tests",
+    "downstream": "none",
+    "request_sample": "divide(10, 2)",
+    "actual_response": "function is not implemented",
+    "expected_response": "5.0"
+  },
+  "reproduction": {
+    "preconditions": "Use Python 3.11.",
+    "steps": [
+      "Import divide from src.calculator.",
+      "Call divide(10, 2).",
+      "Observe that the function does not exist."
+    ],
+    "frequency": "always",
+    "reproducible": "yes",
+    "workaround": "Perform division outside the calculator module."
+  },
+  "error": {
+    "message": "No runtime error; the capability is not implemented."
+  },
+  "runtime": {
+    "environment": "local",
+    "version": "sandbox main",
+    "os_or_device": "Python 3.11"
+  },
+  "attachments": [],
+  "impact": {
+    "affected_subjects": "sandbox developers",
+    "affected_flow": "AI-assisted feature workflow",
+    "quantity_or_ratio": "one demonstration flow",
+    "data_correctness": "no existing data impact",
+    "regulated_areas": "none",
+    "business_risk": "low"
+  },
+  "acceptance_criteria": [
+    "Normal division returns the quotient.",
+    "Division by zero raises ValueError.",
+    "Existing addition and subtraction tests still pass."
+  ],
+  "automation_scope": "analysis_only",
+  "data_safety_status": "sanitized"
+}

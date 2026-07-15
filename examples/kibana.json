@@ -1,0 +1,79 @@
+{
+  "schema_version": "issue-intake/v1",
+  "source_type": "kibana",
+  "source_reference": "kibana-simulated-doc-001",
+  "source_url": "https://kibana.example.invalid/app/discover",
+  "summary": "Division endpoint emitted a zero-divisor error",
+  "request_type": "Bug",
+  "severity": "S2",
+  "target": {
+    "product": "AI PR Sandbox",
+    "repository": "wzf12400/ai-pr-sandbox",
+    "service": "simulated calculator API",
+    "module": "division endpoint",
+    "code_object": "divide(left, right)",
+    "owner": "sandbox maintainer"
+  },
+  "problem": {
+    "background": "A simulated Kibana event represents a production-style application error.",
+    "current_behavior": "A zero-divisor request reaches the calculation layer and emits an error.",
+    "expected_behavior": "The request is rejected predictably and covered by a regression test.",
+    "first_observed_at": "2026-07-15T14:20:00+08:00"
+  },
+  "interface": {
+    "protocol": "HTTP",
+    "method": "POST",
+    "path_or_topic": "/calculate/divide",
+    "upstream": "simulated web client",
+    "downstream": "calculator module",
+    "request_sample": "{\"left\": 8, \"right\": 0}",
+    "actual_response": "{\"error\": \"division failed\"}",
+    "expected_response": "{\"error_code\": \"DIVISION_BY_ZERO\"}"
+  },
+  "reproduction": {
+    "preconditions": "Run the simulated calculator API locally.",
+    "steps": [
+      "Send a division request with right set to zero.",
+      "Observe the error response.",
+      "Correlate the event using the trace identifier."
+    ],
+    "frequency": "once in the simulated event set",
+    "reproducible": "yes",
+    "workaround": "Reject zero before invoking the calculator."
+  },
+  "error": {
+    "error_code": "DIVISION_BY_ZERO",
+    "exception_type": "ValueError",
+    "message": "Cannot divide by zero",
+    "stack_trace": "ValueError: Cannot divide by zero",
+    "log_excerpt": "level=ERROR service=calculator operation=divide right=0"
+  },
+  "runtime": {
+    "environment": "simulated production",
+    "version": "sandbox-v1",
+    "commit_sha": "0123456789abcdef",
+    "image_tag": "calculator:sandbox-v1",
+    "region": "local",
+    "cluster": "simulated-cluster",
+    "node": "simulated-node-1",
+    "occurred_at": "2026-07-15T14:20:00+08:00",
+    "trace_id": "trace-simulated-001",
+    "request_id": "request-simulated-001"
+  },
+  "attachments": [],
+  "impact": {
+    "affected_subjects": "simulated API clients",
+    "affected_flow": "division requests",
+    "quantity_or_ratio": "one aggregated error group",
+    "data_correctness": "no stored data impact",
+    "regulated_areas": "none",
+    "business_risk": "low in sandbox"
+  },
+  "acceptance_criteria": [
+    "The zero-divisor failure has a deterministic error code.",
+    "A regression test covers the original failure.",
+    "Normal division requests remain successful."
+  ],
+  "automation_scope": "triage_only",
+  "data_safety_status": "sanitized"
+}
