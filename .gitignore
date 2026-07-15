@@ -5,3 +5,5 @@ __pycache__/
 drafts/
 .issue-draft-state.json
 sanitized/
+.trial-data/
+.trial-repos/

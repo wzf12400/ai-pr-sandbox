@@ -463,7 +463,7 @@ def sanitize_hit(payload: Dict[str, Any], hmac_key: bytes) -> Dict[str, Any]:
     return result
 
 
-def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+def write_sanitized_event(path: Path, payload: Dict[str, Any]) -> None:
     if path.exists():
         raise FileExistsError(f"output already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -501,7 +501,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         result = sanitize_hit(load_hit(args.input), raw_key.encode("utf-8"))
-        _atomic_write_json(args.output, result)
+        write_sanitized_event(args.output, result)
     except (FileExistsError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
