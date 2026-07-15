@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from src import kibana_sanitizer, repo_locator, triage_issue
+from src import ai_issue_generator, kibana_sanitizer, repo_locator, triage_issue
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +29,14 @@ def build_parser() -> argparse.ArgumentParser:
     locate.add_argument("--repo", required=True)
     locate.add_argument("--output", required=True)
     locate.add_argument("--top-k", type=int, default=10)
+
+    ai_issue = commands.add_parser(
+        "ai-issue",
+        help="Generate and review a local Issue through the configured AI gateway.",
+    )
+    ai_issue.add_argument("input")
+    ai_issue.add_argument("--output-json", required=True)
+    ai_issue.add_argument("--output-md", required=True)
     return parser
 
 
@@ -75,6 +83,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     if args.command == "kibana-to-issue":
         return triage_issue.main([args.input, "--output", args.output])
+    if args.command == "ai-issue":
+        return ai_issue_generator.main(
+            [
+                args.input,
+                "--output-json",
+                args.output_json,
+                "--output-md",
+                args.output_md,
+            ]
+        )
     return repo_locator.main(
         [args.issue_json, "--repo", args.repo, "--output", args.output, "--top-k", str(args.top_k)]
     )

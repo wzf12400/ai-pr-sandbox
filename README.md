@@ -19,8 +19,8 @@ be introduced through GitHub issues and pull requests.
 
 ## Generate a local Issue draft
 
-This phase uses synthetic, sanitized input only. It does not call an AI model,
-Jira, Kibana, or the GitHub API.
+The deterministic draft command uses synthetic, sanitized input only. It does
+not call an AI model, Jira, Kibana, or the GitHub API.
 
 Three sample sources are available under `examples/`:
 
@@ -95,3 +95,39 @@ See [`docs/real-project-trial.md`](docs/real-project-trial.md) for the pinned
 inputs, safety boundary, reproduction commands, and measured result. The
 machine-readable output is stored in
 [`reports/real-project-sympy-20567.json`](reports/real-project-sympy-20567.json).
+
+## Generate an Issue with AI
+
+The AI command accepts a sanitized `issue-intake/v1` record, a
+`sanitized-kibana-event/v1` event, or a public GitHub Issue API response. Raw
+Jira and Kibana payloads are not accepted at the model boundary.
+
+Configure an OpenAI-compatible Chat Completions gateway locally. Never commit
+the real values from `.env`:
+
+```bash
+export AI_BASE_URL="https://example.invalid/api/v1"
+export AI_API_KEY="<local-secret>"
+export AI_MODEL="ailemac/gpt-5-mini"
+export AI_REVIEW_MODEL="ailemac/gpt-5-mini"
+export AI_SAFETY_IDENTIFIER="<local-stable-identifier>"
+```
+
+Generate and review a local draft:
+
+```bash
+python3 -m src.phase_one ai-issue .trial-data/issue.json \
+  --output-json reports/ai-issue.json \
+  --output-md drafts/ai-issue.md
+```
+
+The gateway request uses strict JSON Schema and `max_completion_tokens`. A
+second model call reviews claims against the minimized evidence. Local code
+then rejects extra fields, unknown evidence paths, unsupported claims, and
+sensitive output. The persisted result contains an input hash instead of the
+raw source. Phase one always requires human confirmation and keeps both GitHub
+publication and AI implementation disabled.
+
+The live public-project AI trial uses SymPy Issue #20567. See
+[`docs/ai-issue-trial.md`](docs/ai-issue-trial.md) for its safety boundary,
+observed blocked iterations, final guarded result, and limitations.

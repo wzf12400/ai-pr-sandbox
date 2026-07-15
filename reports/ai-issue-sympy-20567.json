@@ -1,0 +1,60 @@
+{
+  "schema_version": "real-ai-issue-trial/v1",
+  "tested_at": "2026-07-15",
+  "source": {
+    "type": "github",
+    "reference": "sympy/sympy#20567",
+    "url": "https://github.com/sympy/sympy/issues/20567",
+    "input_sha256": "ddb3614f3dcdf10e75bcc27b8b453ebf73d64fc6631ff68fb417508beea53516"
+  },
+  "model": {
+    "generator": "gpt-5-mini-2025-08-07",
+    "reviewer": "gpt-5-mini-2025-08-07",
+    "generator_total_tokens": 4231,
+    "reviewer_total_tokens": 2837
+  },
+  "result": {
+    "state": "needs_human_context",
+    "title": "Symbol instances have __dict__ since 1.7?",
+    "request_type": "Bug",
+    "severity": "Unknown",
+    "object_repository": "sympy/sympy",
+    "object_code_object": "Symbol",
+    "interface_protocol": "unknown",
+    "interface_method": "unknown",
+    "interface_path_or_topic": "unknown",
+    "error_exception_type": "AttributeError",
+    "error_message": "'Symbol' object has no attribute '__dict__'",
+    "expected_behavior": "unknown",
+    "reported_hypothesis_isolated": true,
+    "acceptance_criteria_count": 0,
+    "missing_information_count": 3,
+    "confidence": 0.8
+  },
+  "review": {
+    "verdict": "needs_clarification",
+    "unsupported_claim_count": 0,
+    "sensitive_data_detected": false,
+    "local_validation_valid": true,
+    "local_validation_error_count": 0
+  },
+  "policy": {
+    "human_confirmation_required": true,
+    "publication_allowed": false,
+    "implementation_allowed": false
+  },
+  "verified": {
+    "strict_json_schema": true,
+    "second_model_review": true,
+    "exact_evidence_paths": true,
+    "unknown_values_preserved": true,
+    "speculation_separated_from_facts": true,
+    "raw_source_not_persisted_in_result": true,
+    "credentials_or_request_ids_persisted": false
+  },
+  "limitations": [
+    "This is one real public Issue trial and is not a general accuracy measurement.",
+    "The source Issue does not provide an explicit expected behavior, so the draft correctly remains blocked on human context.",
+    "No GitHub Issue was created and no repository code was modified by the AI flow."
+  ]
+}
