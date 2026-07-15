@@ -15,6 +15,8 @@ SOURCE_TYPES = {"manual", "jira", "kibana"}
 REQUEST_TYPES = {"Bug", "Feature", "Performance", "Security", "Refactor", "Documentation", "Unknown"}
 SEVERITIES = {"S0", "S1", "S2", "S3", "Unknown"}
 AUTOMATION_SCOPES = {"triage_only", "analysis_only", "draft_pr", "manual_only"}
+MAX_EVIDENCE_LINES = 50
+MAX_INTERFACE_SUMMARY_CHARS = 4000
 
 
 @dataclass(frozen=True)
@@ -232,6 +234,23 @@ class IntakeRecord:
             errors.append("at least one reproduction step is required")
         if len(self.acceptance_criteria) < 3:
             errors.append("at least three acceptance criteria are required")
+
+        evidence_fields = {
+            "error.stack_trace": self.error.stack_trace,
+            "error.log_excerpt": self.error.log_excerpt,
+        }
+        for name, value in evidence_fields.items():
+            if len(value.splitlines()) > MAX_EVIDENCE_LINES:
+                errors.append(f"{name} must not exceed {MAX_EVIDENCE_LINES} lines")
+
+        interface_summaries = {
+            "interface.request_sample": self.interface.request_sample,
+            "interface.actual_response": self.interface.actual_response,
+            "interface.expected_response": self.interface.expected_response,
+        }
+        for name, value in interface_summaries.items():
+            if len(value) > MAX_INTERFACE_SUMMARY_CHARS:
+                errors.append(f"{name} must not exceed {MAX_INTERFACE_SUMMARY_CHARS} characters")
 
         if self.source_type == "jira":
             if not self.project_key:

@@ -1,0 +1,37 @@
+{
+  "_index": "logstash-2099.01.01",
+  "_type": "_doc",
+  "_id": "synthetic-document-id-001",
+  "_version": 1,
+  "_score": null,
+  "_source": {
+    "@timestamp": "2099-01-01T01:02:03.004Z",
+    "stream": "stdout",
+    "logtag": "F",
+    "message": "[2099-01-01 09:02:03.004] [TID: 0123456789abcdef0123456789abcdef.1.2]  INFO [http-worker-1] com.example.wallpaper.aop.TimeAspect:56 - commonParams:CommonParams(appName=com.example.synthetic, appVersion=9999, duid=synthetic-device-id-0001, appKey=synthetic-api-key-value-that-must-not-leak, country=US, language=en, system=android, apiLevel=35),pageTitle:synthetic_page,: com.example.wallpaper.controller.WidgetController: pageResourcesNew: : end... cost time: 14 ms",
+    "kubernetes": {
+      "pod_name": "synthetic-backend-pod-001",
+      "namespace_name": "synthetic-backend",
+      "pod_id": "synthetic-pod-id-001",
+      "labels": {
+        "app_kubernetes_io/instance": "synthetic-backend",
+        "app_kubernetes_io/name": "synthetic-backend",
+        "topology_kubernetes_io/region": "test-region-1",
+        "topology_kubernetes_io/zone": "test-region-1a"
+      },
+      "host": "ip-10-0-0-1.example.internal",
+      "container_name": "synthetic-backend",
+      "docker_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "container_hash": "000000000000.dkr.ecr.test-region-1.example.invalid/synthetic-backend@sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      "container_image": "000000000000.dkr.ecr.test-region-1.example.invalid/synthetic-backend:9999999999"
+    }
+  },
+  "fields": {
+    "@timestamp": [
+      "2099-01-01T01:02:03.004Z"
+    ]
+  },
+  "sort": [
+    4070902923004
+  ]
+}

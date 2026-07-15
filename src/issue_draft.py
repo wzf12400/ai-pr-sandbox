@@ -72,7 +72,7 @@ def _atomic_write_json(path: Path, payload: Dict[str, object]) -> None:
 
 
 def _lines(values: Dict[str, str]) -> str:
-    return "\n".join(f"{label}：{value or '待确认'}" for label, value in values.items())
+    return "\n".join(f"{label}：{value}" for label, value in values.items() if value)
 
 
 def _numbered(items: List[str]) -> str:
@@ -86,16 +86,26 @@ def _checklist(items: List[str]) -> str:
 def _code_block(value: str) -> str:
     longest = max((len(match) for match in re.findall(r"`+", value)), default=0)
     fence = "`" * max(3, longest + 1)
-    return f"{fence}text\n{value or '无'}\n{fence}"
+    return f"{fence}text\n{value}\n{fence}"
+
+
+def _with_code_sections(content: str, values: Dict[str, str]) -> str:
+    parts = [content] if content else []
+    for label, value in values.items():
+        if value:
+            parts.append(f"{label}：\n{_code_block(value)}")
+    return "\n\n".join(parts)
 
 
 def render_markdown(record: IntakeRecord) -> str:
     source = _lines(
         {
-            "输入来源": SOURCE_LABELS[record.source_type],
+            "来源类型": SOURCE_LABELS[record.source_type],
             "来源编号": record.source_reference,
-            "来源链接": record.source_url or "无",
-            "Jira Project Key": record.project_key or "无",
+            "原始链接": record.source_url,
+            "Jira Project Key": record.project_key,
+            "工作项类型": record.request_type,
+            "严重程度": record.severity,
         }
     )
     target = _lines(
@@ -104,16 +114,8 @@ def render_markdown(record: IntakeRecord) -> str:
             "GitHub 仓库": record.target.repository,
             "服务或应用": record.target.service,
             "模块或页面": record.target.module,
-            "类 / 方法 / 任务名称": record.target.code_object,
-            "责任团队或维护人": record.target.owner,
-        }
-    )
-    problem = _lines(
-        {
-            "背景": record.problem.background,
-            "当前行为": record.problem.current_behavior,
-            "期望行为": record.problem.expected_behavior,
-            "首次发现时间": record.problem.first_observed_at,
+            "文件 / 类 / 方法": record.target.code_object,
+            "责任团队": record.target.owner,
         }
     )
     interface = _lines(
@@ -125,46 +127,60 @@ def render_markdown(record: IntakeRecord) -> str:
             "下游依赖": record.interface.downstream,
         }
     )
-    interface += "\n\n请求参数或消息体：\n" + _code_block(record.interface.request_sample)
-    interface += "\n\n实际响应：\n" + _code_block(record.interface.actual_response)
-    interface += "\n\n期望响应：\n" + _code_block(record.interface.expected_response)
-    reproduction = _lines(
+    interface = _with_code_sections(
+        interface,
         {
+            "请求摘要": record.interface.request_sample,
+            "实际响应摘要": record.interface.actual_response,
+            "期望响应摘要": record.interface.expected_response,
+        },
+    )
+    error = _lines(
+        {
+            "错误码": record.error.error_code,
+            "异常类型": record.error.exception_type,
+            "错误消息": record.error.message,
+            "Trace ID": record.runtime.trace_id,
+            "Request ID": record.runtime.request_id,
+            "发生次数或频率": record.reproduction.frequency,
+        }
+    )
+    error = _with_code_sections(
+        error,
+        {
+            "关键堆栈": record.error.stack_trace,
+            "关键日志": record.error.log_excerpt,
+        },
+    )
+    if record.attachments:
+        error += "\n\n截图或附件：\n" + "\n".join(f"- {item}" for item in record.attachments)
+
+    behavior = _lines(
+        {
+            "背景": record.problem.background,
+            "当前行为": record.problem.current_behavior,
+            "期望行为": record.problem.expected_behavior,
+            "首次发现时间": record.problem.first_observed_at,
             "前置条件": record.reproduction.preconditions,
-            "发生频率": record.reproduction.frequency,
             "是否稳定复现": record.reproduction.reproducible,
             "临时规避方式": record.reproduction.workaround,
         }
     )
-    reproduction += "\n\n" + _numbered(record.reproduction.steps)
-    error = _code_block(
-        _lines(
-            {
-                "错误码": record.error.error_code,
-                "异常类型": record.error.exception_type,
-                "错误消息": record.error.message,
-                "堆栈信息": record.error.stack_trace,
-                "相关日志片段": record.error.log_excerpt,
-            }
-        )
+    behavior += "\n\n最短复现步骤：\n" + _numbered(record.reproduction.steps)
+
+    initial_location = " / ".join(
+        value for value in (record.target.module, record.target.code_object) if value
     )
     runtime = _lines(
         {
             "环境": record.runtime.environment,
             "版本": record.runtime.version,
-            "Commit SHA": record.runtime.commit_sha,
             "镜像 Tag": record.runtime.image_tag,
-            "部署区域": record.runtime.region,
-            "集群": record.runtime.cluster,
-            "节点": record.runtime.node,
-            "操作系统 / 浏览器 / 设备": record.runtime.os_or_device,
+            "Commit SHA": record.runtime.commit_sha,
             "发生时间及时区": record.runtime.occurred_at,
-            "Trace ID": record.runtime.trace_id,
-            "Request ID": record.runtime.request_id,
-            "Session / Job ID": record.runtime.session_or_job_id,
+            "初步定位": initial_location,
         }
     )
-    attachments = "\n".join(f"- {item}" for item in record.attachments) or "无"
     impact = _lines(
         {
             "受影响用户 / 客户 / 租户": record.impact.affected_subjects,
@@ -175,22 +191,23 @@ def render_markdown(record: IntakeRecord) -> str:
             "业务损失或潜在风险": record.impact.business_risk,
         }
     )
+    acceptance = _checklist(record.acceptance_criteria)
+    acceptance += "\n\n" + _lines(
+        {
+            "自动化处理范围": AUTOMATION_LABELS[record.automation_scope],
+            "数据安全状态": "已完成脱敏，可用于本地草稿生成",
+        }
+    )
 
     sections = [
-        ("输入来源", source),
-        ("工作项类型", record.request_type),
-        ("严重程度", record.severity),
+        ("来源与分类", source),
         ("目标对象", target),
-        ("问题描述与期望结果", problem),
         ("接口与调用链", interface),
-        ("复现步骤与触发条件", reproduction),
-        ("报错信息与日志", error),
-        ("运行环境与关联标识", runtime),
-        ("截图、录屏与附件", attachments),
+        ("报错与关键证据", error),
+        ("当前行为与期望行为", behavior),
+        ("环境与代码定位", runtime),
         ("影响范围", impact),
-        ("验收标准", _checklist(record.acceptance_criteria)),
-        ("自动化处理范围", AUTOMATION_LABELS[record.automation_scope]),
-        ("数据安全确认", "- [x] 输入已完成脱敏，可用于本地草稿生成。"),
+        ("验收标准与处理权限", acceptance),
     ]
     body = "\n\n".join(f"## {heading}\n\n{content}" for heading, content in sections)
     return f"# [待分诊] {record.summary}\n\n{body}\n"

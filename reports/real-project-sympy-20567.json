@@ -1,0 +1,228 @@
+{
+  "schema_version": "real-project-trial/v1",
+  "source": {
+    "repository": "sympy/sympy",
+    "repository_url": "https://github.com/sympy/sympy",
+    "issue_url": "https://github.com/sympy/sympy/issues/20567",
+    "issue_number": 20567,
+    "issue_title": "Symbol instances have __dict__ since 1.7?",
+    "fix_pr_url": "https://github.com/sympy/sympy/pull/20590",
+    "base_commit": "cffd4e0f86fefd4802349a9f9b19ed70934ea354",
+    "issue_input_sha256": "2c46a245f1bda378cbc18e1aa0f0b3bd51a5ea56a34d4d6349dddcade26ac601",
+    "pr_input_sha256": "162b107117568fe95d6bb4f1f009faf87b69e615e76867110e795bc76a088be2",
+    "pr_files_input_sha256": "c1670dd4dce6096241406f88cfa6bf21f4c2ce57ad9933561a2d18a14857f25e",
+    "issue_referenced_by_pr": true
+  },
+  "safety": {
+    "third_party_code_executed": false,
+    "dependencies_installed": false,
+    "scan_mode": "tracked source files read-only"
+  },
+  "evaluation": {
+    "gold_files": [
+      "sympy/core/_print_helpers.py",
+      "sympy/core/tests/test_basic.py"
+    ],
+    "candidate_paths": [
+      "sympy/core/_print_helpers.py",
+      "sympy/core/tests/test_symbol.py",
+      "sympy/core/tests/test_expr.py",
+      "sympy/core/tests/test_basic.py",
+      "sympy/core/symbol.py",
+      "sympy/core/basic.py",
+      "sympy/core/expr.py",
+      "sympy/utilities/tests/test_lambdify.py",
+      "sympy/parsing/latex/_parse_latex_antlr.py",
+      "sympy/logic/boolalg.py"
+    ],
+    "gold_file_ranks": {
+      "sympy/core/_print_helpers.py": 1,
+      "sympy/core/tests/test_basic.py": 4
+    },
+    "gold_recall_at_k": 1.0,
+    "implementation_gold_files": [
+      "sympy/core/_print_helpers.py"
+    ],
+    "implementation_hits": {
+      "sympy/core/_print_helpers.py": 1
+    },
+    "implementation_recall_at_k": 1.0
+  },
+  "location": {
+    "schema_version": "repo-location/v1",
+    "repository_path": ".trial-repos/sympy",
+    "commit": "cffd4e0f86fefd4802349a9f9b19ed70934ea354",
+    "query": {
+      "title": "Symbol instances have __dict__ since 1.7?",
+      "body_sha256": "5416d642249b9d39f33850b90e041d06affcd0a097a8796fdc746fb2db3bcfa5",
+      "code_terms": [
+        "sympy.Symbol",
+        "__slots__",
+        "__dict__",
+        "Symbol"
+      ],
+      "keywords": [
+        "accidentally",
+        "assume",
+        "attributeerror",
+        "call",
+        "changes",
+        "defining",
+        "dict",
+        "introduced",
+        "last",
+        "misinterpret",
+        "module",
+        "most",
+        "name",
+        "object",
+        "parent",
+        "python",
+        "recent",
+        "slots",
+        "stopped",
+        "symbol",
+        "sympy",
+        "traceback"
+      ],
+      "query_classes": [
+        "Symbol"
+      ],
+      "safety": {
+        "status": "passed_with_redactions",
+        "handled_categories": [
+          "public_notebook_frame"
+        ],
+        "findings": [
+          {
+            "path": "issue.body",
+            "category": "public_notebook_frame",
+            "action": "normalized",
+            "rule_id": "notebook-frame"
+          }
+        ]
+      }
+    },
+    "index": {
+      "source_files": 1446,
+      "python_classes": 1959
+    },
+    "candidates": [
+      {
+        "path": "sympy/core/_print_helpers.py",
+        "score": 74.0,
+        "line_start": 8,
+        "line_end": 12,
+        "symbol": "Printable",
+        "reasons": [
+          "文本命中：module",
+          "Symbol 的第 3 层父类 Printable",
+          "结构异常：父类 Printable 未定义 __slots__"
+        ]
+      },
+      {
+        "path": "sympy/core/tests/test_symbol.py",
+        "score": 68.49,
+        "line_start": 1,
+        "line_end": 5,
+        "symbol": "",
+        "reasons": [
+          "文本命中：Symbol, symbol, sympy",
+          "相关回归测试候选：Symbol",
+          "测试模块名对应继承链类：Symbol"
+        ]
+      },
+      {
+        "path": "sympy/core/tests/test_expr.py",
+        "score": 63.564,
+        "line_start": 1,
+        "line_end": 5,
+        "symbol": "",
+        "reasons": [
+          "文本命中：Symbol, symbol, sympy",
+          "相关回归测试候选：Basic, Expr, Symbol",
+          "测试模块名对应继承链类：Expr"
+        ]
+      },
+      {
+        "path": "sympy/core/tests/test_basic.py",
+        "score": 63.192,
+        "line_start": 2,
+        "line_end": 6,
+        "symbol": "",
+        "reasons": [
+          "文本命中：Symbol, symbol, sympy",
+          "相关回归测试候选：Atom, Basic, Expr, Symbol",
+          "测试模块名对应继承链类：Basic"
+        ]
+      },
+      {
+        "path": "sympy/core/symbol.py",
+        "score": 61.031,
+        "line_start": 182,
+        "line_end": 186,
+        "symbol": "Symbol",
+        "reasons": [
+          "文本命中：__slots__, name, slots",
+          "Issue 直接引用类 Symbol"
+        ]
+      },
+      {
+        "path": "sympy/core/basic.py",
+        "score": 50.672,
+        "line_start": 28,
+        "line_end": 32,
+        "symbol": "Basic",
+        "reasons": [
+          "文本命中：__dict__, call, dict",
+          "Symbol 的第 2 层父类 Atom",
+          "Symbol 的第 2 层父类 Basic"
+        ]
+      },
+      {
+        "path": "sympy/core/expr.py",
+        "score": 47.7,
+        "line_start": 17,
+        "line_end": 21,
+        "symbol": "Expr",
+        "reasons": [
+          "文本命中：Symbol, name, symbol",
+          "Symbol 的第 1 层父类 AtomicExpr",
+          "Symbol 的第 2 层父类 Expr"
+        ]
+      },
+      {
+        "path": "sympy/utilities/tests/test_lambdify.py",
+        "score": 39.333,
+        "line_start": 21,
+        "line_end": 25,
+        "symbol": "",
+        "reasons": [
+          "文本命中：sympy.Symbol, Symbol, symbol, sympy",
+          "相关回归测试候选：Symbol"
+        ]
+      },
+      {
+        "path": "sympy/parsing/latex/_parse_latex_antlr.py",
+        "score": 34.675,
+        "line_start": 305,
+        "line_end": 309,
+        "symbol": "",
+        "reasons": [
+          "文本命中：sympy.Symbol, Symbol, name, symbol, sympy"
+        ]
+      },
+      {
+        "path": "sympy/logic/boolalg.py",
+        "score": 34.67,
+        "line_start": 63,
+        "line_end": 67,
+        "symbol": "Boolean",
+        "reasons": [
+          "文本命中：Symbol, symbol, sympy",
+          "Symbol 的第 1 层父类 Boolean"
+        ]
+      }
+    ]
+  }
+}
