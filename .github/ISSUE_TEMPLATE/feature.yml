@@ -1,5 +1,5 @@
 name: AI 工作项
-description: 提交需求、缺陷、Jira 工单或系统日志事件，供统一分诊和后续自动化处理
+description: 提交可定位、可验证的需求或故障，供人工分诊及后续 AI 辅助处理
 title: "[待分诊] "
 labels:
   - "needs-triage"
@@ -8,29 +8,18 @@ body:
   - type: markdown
     attributes:
       value: |
-        请尽量提供可验证的事实。人工提交、Jira 同步和日志平台自动建单均使用本结构。
-        不适用的必填项请填写“无”或“不适用”；禁止提交密码、Token、密钥、完整手机号、身份证号及客户隐私数据。
+        Issue 应能支持独立初步判断，同时保持简洁。完整日志、堆栈和检索过程请提供 Jira、Kibana 或定位报告链接。
+        关键日志仅保留故障前后 20～50 行，并移除密码、Token、Cookie、个人信息及客户敏感数据。
 
-  - type: dropdown
-    id: source_type
+  - type: textarea
+    id: source_context
     attributes:
-      label: 输入来源
-      description: 标识此工作项最初来自哪里，便于追踪和去重。
-      options:
-        - 人工提交
-        - Jira 工单
-        - 日志或监控告警
-        - 客户反馈
-        - 其他系统
-    validations:
-      required: true
-
-  - type: input
-    id: source_reference
-    attributes:
-      label: 来源编号或链接
-      description: Jira Key、告警 ID、事件 ID、客服工单号或原始页面链接；人工提交可填“无”。
-      placeholder: "例如：PROJ-1234 / alert-20260715-001 / https://..."
+      label: 来源
+      description: 用于回溯原始需求、告警或工单，并作为后续去重依据。
+      placeholder: |
+        来源类型：人工 / Jira / Kibana / 其他
+        来源编号：Jira Key / 告警 ID / 事件 ID
+        原始链接：https://...
     validations:
       required: true
 
@@ -53,7 +42,7 @@ body:
     id: severity
     attributes:
       label: 严重程度
-      description: 按实际影响选择；无法判断时选择“待评估”。
+      description: 无法判断时选择“待评估”，不得仅由 AI 提升或降低生产事故等级。
       options:
         - S0 - 生产不可用或重大安全事故
         - S1 - 核心功能严重受损
@@ -67,30 +56,14 @@ body:
     id: target_object
     attributes:
       label: 目标对象
-      description: 明确问题落在哪个产品、仓库、服务、模块和代码对象；未知项写“待定位”。
-      value: |
-        产品或业务线：
+      description: 说明问题属于哪个项目、仓库和代码对象；未知位置可写“待检索定位”。
+      placeholder: |
+        项目或业务线：
         GitHub 仓库：
         服务或应用：
         模块或页面：
-        类 / 方法 / 任务名称：
-        责任团队或维护人：
-    validations:
-      required: true
-
-  - type: textarea
-    id: problem_description
-    attributes:
-      label: 问题描述与期望结果
-      description: 描述背景、当前行为和期望行为，避免只写“报错了”或“需要优化”。
-      value: |
-        背景：
-
-        当前行为：
-
-        期望行为：
-
-        首次发现时间：
+        文件 / 类 / 方法：
+        责任团队：
     validations:
       required: true
 
@@ -98,72 +71,66 @@ body:
     id: interface_context
     attributes:
       label: 接口与调用链
-      description: 接口问题请提供协议、方法、路径、上下游和脱敏后的请求响应；非接口问题填“不适用”。
-      value: |
-        协议及方法：
-        接口路径或 Topic：
+      description: 保留定位所需的接口入口和上下游关系；非接口问题填“不适用”。
+      placeholder: |
+        协议及方法：POST
+        接口路径或 Topic：/api/register
         上游调用方：
         下游依赖：
-        请求参数或消息体（已脱敏）：
-        实际响应（已脱敏）：
-        期望响应：
+        请求摘要（已脱敏）：
+        实际响应摘要：
+        期望响应摘要：
     validations:
       required: true
 
   - type: textarea
-    id: reproduction
+    id: error_evidence
     attributes:
-      label: 复现步骤与触发条件
-      description: 写出最短可复现路径、前置数据、账号角色和发生频率；无法复现时说明原因。
-      value: |
-        前置条件：
-        1.
-        2.
-        3.
+      label: 报错与关键证据
+      description: 提供足够定位的信息，不要粘贴完整日志。可直接拖拽脱敏截图或附件。
+      placeholder: |
+        错误码：
+        异常类型：
+        错误消息：
+        Trace ID：
+        Request ID：
+        发生次数或频率：
 
-        发生频率：
-        是否稳定复现：
+        关键日志（故障前后 20～50 行，已脱敏）：
+
+        截图或附件：
+        完整日志链接：
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 当前行为与期望行为
+      description: 让处理人无需打开外部系统也能理解问题及最短复现路径。
+      placeholder: |
+        当前行为：
+        期望行为：
+        前置条件：
+        最短复现步骤：
         临时规避方式：
     validations:
       required: true
 
   - type: textarea
-    id: error_details
+    id: runtime_location
     attributes:
-      label: 报错信息与日志
-      description: 提供原始错误消息、异常类型、堆栈和必要上下文。仅保留故障前后相关片段，并完成脱敏。
-      value: |
-        错误码：
-        异常类型：
-        错误消息：
-        堆栈信息：
-        相关日志片段：
-    validations:
-      required: true
-
-  - type: textarea
-    id: runtime_context
-    attributes:
-      label: 运行环境与关联标识
-      description: 这些信息用于关联日志、定位发布版本并区分环境问题。
-      value: |
-        环境（生产 / 预发 / 测试 / 本地）：
-        版本 / Commit SHA / 镜像 Tag：
-        部署区域 / 集群 / 节点：
-        操作系统 / 浏览器 / 设备：
+      label: 环境与代码定位
+      description: 文件和行号必须绑定 Commit SHA；自动定位结果应同时给出置信度和证据。
+      placeholder: |
+        环境：生产 / 预发 / 测试 / 本地
+        版本或镜像 Tag：
+        Commit SHA：
         发生时间及时区：
-        Trace ID：
-        Request ID：
-        Session / Job ID（已脱敏）：
-    validations:
-      required: true
-
-  - type: textarea
-    id: screenshots
-    attributes:
-      label: 截图、录屏与附件
-      description: 可拖拽上传截图、录屏或脱敏后的附件。请标注截图对应的步骤或时间点；没有则填“无”。
-      placeholder: "在此粘贴或拖拽文件，并说明附件内容。"
+        初步定位：src/example.py:87
+        定位置信度：
+        定位证据：堆栈 / 错误码 / 接口映射 / 代码检索
+        完整定位报告：
     validations:
       required: true
 
@@ -171,13 +138,13 @@ body:
     id: impact_scope
     attributes:
       label: 影响范围
-      description: 说明受影响对象和业务后果，为优先级及风险评估提供依据。
-      value: |
+      description: 用于确定优先级和审批范围；不确定的影响必须明确标记“待评估”。
+      placeholder: |
         受影响用户 / 客户 / 租户：
         受影响功能或业务流程：
         影响数量或比例：
-        是否影响数据正确性：
-        是否影响资金、权限、隐私或合规：
+        数据正确性影响：
+        资金 / 权限 / 隐私 / 合规影响：
         业务损失或潜在风险：
     validations:
       required: true
@@ -186,12 +153,12 @@ body:
     id: acceptance_criteria
     attributes:
       label: 验收标准
-      description: 每条标准应可测试、可判断通过或失败；建议同时覆盖正常、异常和回归场景。
-      value: |
-        - [ ] 正常场景：
-        - [ ] 异常场景：
-        - [ ] 回归场景：
-        - [ ] 监控或日志验证：
+      description: 每条标准应可测试，并覆盖原始失败场景和必要回归场景。
+      placeholder: |
+        - [ ] 原始问题已修复或需求已实现
+        - [ ] 异常及边界场景已覆盖
+        - [ ] 现有核心流程没有回归
+        - [ ] 日志或监控结果符合预期
     validations:
       required: true
 
@@ -199,7 +166,7 @@ body:
     id: automation_scope
     attributes:
       label: 自动化处理范围
-      description: 此选择仅代表允许进入的最高阶段，不代表系统可绕过审批直接修改或发布。
+      description: 仅表示允许进入的最高阶段，不能绕过 Code Owner、分支保护或发布审批。
       options:
         - 仅允许自动分类和补充信息
         - 允许生成分析与修复建议
@@ -211,14 +178,13 @@ body:
   - type: checkboxes
     id: safety_confirmation
     attributes:
-      label: 数据安全确认
-      description: 未满足以下条件时，不应提交或进入自动化处理。
+      label: 数据与操作安全确认
       options:
         - label: 已移除密码、Token、密钥、Cookie 和其他认证信息。
           required: true
         - label: 已脱敏个人信息、客户标识和业务敏感数据。
           required: true
-        - label: 已确认附件和日志允许在当前 GitHub 仓库的可见范围内共享。
+        - label: 完整日志和附件的访问范围符合当前仓库权限。
           required: true
-        - label: 涉及生产、资金、权限、数据库或安全策略时，将由责任人单独审批。
+        - label: 涉及生产、资金、权限、数据库或安全策略时将由责任人单独审批。
           required: true
