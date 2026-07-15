@@ -1,41 +1,150 @@
-name: Feature request
-description: Propose a small, testable change for the sandbox project.
-title: "[Feature]: "
-labels:
-  - enhancement
+name: Engineering request
+description: Submit a structured request that can be reviewed and implemented safely.
+title: "[Request]: "
+labels: []
+assignees: []
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Provide enough evidence for a developer or AI agent to understand,
+        reproduce, implement, and verify the request. Do not include passwords,
+        tokens, cookies, private keys, or personal data.
+
+  - type: dropdown
+    id: request_type
+    attributes:
+      label: Request type
+      options:
+        - Bug
+        - Feature
+        - Refactor
+        - Documentation
+    validations:
+      required: true
+
+  - type: input
+    id: target_object
+    attributes:
+      label: Target object
+      description: Repository, service, page, module, class, function, or configuration affected.
+      placeholder: "src/calculator.py - calculator functions"
+    validations:
+      required: true
+
   - type: textarea
     id: background
     attributes:
       label: Background
-      description: Explain why this change is needed.
+      description: Explain the user or business scenario and why the change is needed.
     validations:
       required: true
+
   - type: textarea
-    id: requirement
+    id: current_behavior
     attributes:
-      label: Requirement
-      description: Describe the expected behavior clearly.
+      label: Current behavior
+      description: Describe what the system does now. Use "Not implemented" for a new feature.
     validations:
       required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: Describe the result after the change in observable terms.
+    validations:
+      required: true
+
+  - type: textarea
+    id: interface
+    attributes:
+      label: Interface or function
+      description: Include endpoint, HTTP method, function signature, request fields, and response format. Enter "Not applicable" when unrelated.
+      placeholder: |
+        Function: divide(left: float, right: float) -> float
+        Error: ValueError("Cannot divide by zero")
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: List the smallest repeatable sequence. Enter "Not applicable" for a new feature.
+      placeholder: |
+        1. Start from...
+        2. Call or click...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: error_logs
+    attributes:
+      label: Error message and logs
+      description: Paste relevant status codes, stack traces, or logs after removing sensitive data. Enter "None" if there is no error.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or attachments
+      description: Drag screenshots or supporting files here. Enter "None" if not applicable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include application version, operating system, browser, runtime, and other relevant versions.
+      placeholder: |
+        Application/commit:
+        OS:
+        Runtime:
+        Browser/device:
+    validations:
+      required: true
+
   - type: textarea
     id: acceptance
     attributes:
       label: Acceptance criteria
       description: List observable and testable completion conditions.
       placeholder: |
-        - [ ] Expected behavior is implemented.
-        - [ ] Error cases are covered.
-        - [ ] Automated tests pass.
+        - [ ] The expected behavior is implemented.
+        - [ ] Error and boundary cases are covered.
+        - [ ] Existing tests still pass.
     validations:
       required: true
+
   - type: textarea
     id: tests
     attributes:
       label: Suggested tests
-      description: Describe normal, boundary, and error cases.
+      description: Include normal, boundary, error, and regression cases.
     validations:
       required: true
+
+  - type: textarea
+    id: impact_scope
+    attributes:
+      label: Impact scope
+      description: List potentially affected modules, APIs, data, compatibility, or users.
+    validations:
+      required: true
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: State what must not be changed in this request.
+    validations:
+      required: true
+
   - type: dropdown
     id: risk
     attributes:
@@ -46,3 +155,15 @@ body:
         - High
     validations:
       required: true
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I removed secrets and personal or confidential data.
+          required: true
+        - label: The acceptance criteria are specific and testable.
+          required: true
+        - label: I understand that AI may create a branch and draft pull request, but cannot merge automatically.
+          required: true
