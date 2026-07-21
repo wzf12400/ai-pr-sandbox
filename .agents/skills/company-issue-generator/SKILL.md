@@ -1,6 +1,6 @@
 ---
 name: company-issue-generator
-description: Generate evidence-grounded, company-safe GitHub Issue drafts from manual reports, sanitized Jira records, sanitized Kibana or Elasticsearch events, public GitHub Issue exports, error logs, or screenshots. Use when structuring, validating, reviewing, or locating code for an Issue in this repository. Preserve unknown facts, separate reported hypotheses, sanitize before model calls, and keep publication behind explicit human confirmation.
+description: Generate evidence-grounded, company-safe GitHub Issue drafts from manual reports, sanitized Jira records, sanitized Kibana or Elasticsearch events, public platform records, error logs, or screenshots. Use when structuring, validating, or reviewing information before it becomes the canonical Issue that later code work consumes. Preserve unknown facts, separate reported hypotheses, sanitize before model calls, and keep publication behind explicit human confirmation.
 ---
 
 # Company Issue Generator
@@ -17,6 +17,7 @@ Use this repository's deterministic intake, sanitization, AI review, and code-lo
 - Keep severity as `待评估` unless an authorized human or source system supplied it.
 - Stop when secret scanning, high-entropy detection, schema validation, model review, or local validation blocks the input.
 - Never create or update a remote Issue in this skill. Produce local review artifacts only.
+- Never start code localization, implementation, testing, or PR creation from raw Jira, Kibana, platform, log, or draft input.
 
 Use `.github/ISSUE_TEMPLATE/feature.yml` as the canonical human-facing field contract. Read [references/upstream-adaptation.md](references/upstream-adaptation.md) only when auditing the Microsoft source or revising the writing format.
 
@@ -74,24 +75,42 @@ Inspect the JSON result before the Markdown draft. Report:
 - missing human context;
 - blocked reasons or reviewer findings;
 - grounded object, interface, and error fields;
-- whether code localization was run;
 - paths to local artifacts.
 
 Do not weaken a failed gate to make a draft pass. Fix the input or preserve the missing field. A `needs_human_context` result is a valid safe outcome.
 
-## Locate Candidate Code
+## Issue Handoff Contract
 
-Run localization only against a checked-out repository and one GitHub Issue API JSON object:
+Treat Jira, Kibana, monitoring systems, support platforms, screenshots, and manual reports only as Issue source evidence. Complete the generation stage when an authorized human has reviewed the draft and a GitHub Issue has been created through a separately authorized operation.
+
+Before handing work to a downstream coding workflow, require:
+
+- a stable GitHub repository, Issue number, and Issue URL;
+- an approved Issue body using `.github/ISSUE_TEMPLATE/feature.yml`;
+- source references for Jira, logs, alerts, screenshots, or other platforms;
+- visible `unknown` fields and unresolved human questions;
+- an explicit automation scope;
+- no raw credentials, personal data, customer data, or unrestricted logs.
+
+The approved GitHub Issue is the only downstream task entry. Jira keys, Kibana links, alerts, and platform records remain evidence references inside the Issue; they do not independently authorize code work.
+
+## Downstream Code Boundary
+
+Do not run code localization or modification from a local Issue draft. A later Issue-to-Code workflow must first fetch the approved GitHub Issue and use that Issue snapshot as its input. If the Issue changes materially, refresh the snapshot and repeat the human gate before continuing.
+
+The existing read-only locator can consume an approved GitHub Issue API object:
 
 ```bash
-python3 -m src.phase_one locate-github-issue ISSUE.json \
+python3 -m src.phase_one locate-github-issue APPROVED_ISSUE.json \
   --repo /path/to/repository \
   --output reports/location.json \
   --top-k 10
 ```
 
-Treat returned files, symbols, and lines as ranked candidates rather than facts. Bind line references to the reported commit SHA. Do not execute third-party repository code during localization.
+Treat returned files, symbols, and lines as ranked candidates rather than facts. Bind line references to the reported commit SHA. Record the Issue number on later branches, commits, tests, and draft PRs so the audit chain remains intact.
+
+This repository does not yet implement the full Issue-to-Code, test, and draft-PR workflow. Do not describe those stages as available until their code and gates exist.
 
 ## Publication Boundary
 
-End with local JSON and Markdown artifacts. If a user later requests publication, re-read the artifacts, show unresolved context and safety state, obtain explicit confirmation, and use a separately authorized GitHub operation. Never let model output authorize publication, implementation, or production actions.
+End with local JSON and Markdown artifacts. If a user later requests publication, re-read the artifacts, show unresolved context and safety state, obtain explicit confirmation, and use a separately authorized GitHub operation. Once created, return the GitHub Issue repository, number, and URL as the downstream handoff record. Never let model output authorize publication, implementation, or production actions.

@@ -25,5 +25,6 @@
 - Reject raw Jira payloads until a trusted connector produces `issue-intake/v1`.
 - Add strict schema generation, second-pass model review, and local fail-closed validation.
 - Disable remote Issue creation and implementation inside the skill.
+- Make the approved GitHub Issue the sole entry for later localization, code changes, tests, and draft PRs.
 
 The upstream file is a writing-oriented reference. This adapted skill uses the repository's existing safety and validation implementation as the executable contract.
