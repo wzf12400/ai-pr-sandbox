@@ -178,7 +178,10 @@ authorization to modify code.
 
 `bin/kibana-to-issues` accepts a complete Discover URL, resolves its data view,
 and performs a bounded read-only error search. The default run only writes
-sanitized local candidates:
+sanitized local incident candidates. Deterministic grouping runs before the
+candidate limit and before AI: equal HMAC trace references take priority, while
+trace-less fallback grouping requires the same service, a bounded time window,
+and auditable software-semantic signatures.
 
 ```bash
 export LOG_SANITIZER_HMAC_KEY="<stable-local-secret-at-least-32-bytes>"

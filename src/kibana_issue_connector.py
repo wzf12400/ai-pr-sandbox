@@ -17,9 +17,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src import ai_issue_generator, kibana_sanitizer
+from src import ai_issue_generator, kibana_incident_grouper, kibana_sanitizer
 from src.issue_draft import _atomic_write_json
 from src.issue_entry import _gateway_config, _infer_repository, publish_issue
+from src.issue_intake import find_sensitive_data
 
 
 USERNAME_ENV = "OPENSEARCH_USERNAME"
@@ -28,6 +29,7 @@ TENANT_ENV = "OPENSEARCH_TENANT"
 MAX_CANDIDATES = 20
 MAX_PUBLISH_CANDIDATES = 3
 MAX_FETCH_SIZE = 100
+MAX_BLOCKED_ERROR_PREVIEWS = 10
 DATA_VIEW_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 INDEX_PATTERN = re.compile(r"^[A-Za-z0-9._*,-]{1,500}$")
 RELATIVE_TIME_PATTERN = re.compile(r"^now(?:-\d+[mhdw])?$|^now$")
@@ -248,6 +250,34 @@ def _load_published(path: Path) -> Dict[str, Any]:
     return payload
 
 
+def _blocked_error_preview(sanitized: Dict[str, Any]) -> Dict[str, Any]:
+    event = sanitized.get("event", {})
+    target = sanitized.get("target", {})
+    summary = str(event.get("summary", ""))[:1000]
+    if find_sensitive_data({"summary": summary}):
+        summary = "[REDACTED:sensitive_preview]"
+    findings = sanitized.get("sanitization", {}).get("findings", [])
+    blocked_categories = sorted(
+        {
+            str(item.get("category", "unknown"))
+            for item in findings
+            if isinstance(item, dict) and item.get("action") == "blocked"
+        }
+    )
+    return {
+        "event_ref": sanitized.get("source", {}).get("event_ref", ""),
+        "timestamp": sanitized.get("source", {}).get("timestamp", ""),
+        "service": target.get("service", ""),
+        "level": event.get("level", "UNKNOWN"),
+        "logger_class": target.get("logger_class", ""),
+        "logger_line": target.get("logger_line"),
+        "business_class": target.get("business_class", ""),
+        "business_method": target.get("business_method", ""),
+        "blocked_categories": blocked_categories,
+        "sanitized_summary": summary,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Fetch bounded OpenSearch error candidates and optionally create reviewed Issues."
@@ -306,21 +336,74 @@ def main(argv: Optional[List[str]] = None) -> int:
         published_state = _load_published(args.state_file)
         seen = published_state.setdefault("published", {})
 
-        candidates: List[Dict[str, Any]] = []
+        eligible_events: List[Dict[str, Any]] = []
         candidate_refs = set()
+        selection: Dict[str, Any] = {
+            "scanned_hits": 0,
+            "parsed_levels": {},
+            "sanitization_statuses": {},
+            "accepted": 0,
+            "accepted_events": 0,
+            "eligible_events": 0,
+            "grouped_incidents": 0,
+            "rejected_not_error": 0,
+            "rejected_blocked": 0,
+            "rejected_already_published": 0,
+            "rejected_duplicate_in_run": 0,
+            "rejected_missing_event_ref": 0,
+            "rejected_candidate_limit": 0,
+            "blocked_error_previews": [],
+        }
         for hit in hits:
             sanitized = kibana_sanitizer.sanitize_hit(hit, raw_key)
+            selection["scanned_hits"] += 1
+            level = str(sanitized.get("event", {}).get("level", "UNKNOWN"))
+            status = str(sanitized.get("sanitization", {}).get("status", "unknown"))
+            selection["parsed_levels"][level] = selection["parsed_levels"].get(level, 0) + 1
+            selection["sanitization_statuses"][status] = (
+                selection["sanitization_statuses"].get(status, 0) + 1
+            )
             event_ref = str(sanitized.get("source", {}).get("event_ref", ""))
-            if (
-                sanitized.get("event", {}).get("is_issue_candidate")
-                and event_ref
-                and event_ref not in seen
-                and event_ref not in candidate_refs
-            ):
-                candidates.append(sanitized)
-                candidate_refs.add(event_ref)
-            if len(candidates) >= args.max_candidates:
-                break
+            if not sanitized.get("sanitization", {}).get("ai_allowed", False):
+                selection["rejected_blocked"] += 1
+                if level in {"ERROR", "FATAL"} and len(
+                    selection["blocked_error_previews"]
+                ) < MAX_BLOCKED_ERROR_PREVIEWS:
+                    selection["blocked_error_previews"].append(
+                        _blocked_error_preview(sanitized)
+                    )
+                continue
+            if not sanitized.get("event", {}).get("is_error", False):
+                selection["rejected_not_error"] += 1
+                continue
+            if not event_ref:
+                selection["rejected_missing_event_ref"] += 1
+                continue
+            if event_ref in candidate_refs:
+                selection["rejected_duplicate_in_run"] += 1
+                continue
+            eligible_events.append(sanitized)
+            candidate_refs.add(event_ref)
+            selection["eligible_events"] += 1
+
+        grouped_incidents = kibana_incident_grouper.group_sanitized_events(eligible_events)
+        selection["grouped_incidents"] = len(grouped_incidents)
+        unpublished_incidents: List[Dict[str, Any]] = []
+        for incident in grouped_incidents:
+            source = incident["source"]
+            deduplication_refs = [source["incident_ref"], *source["event_refs"]]
+            if any(reference in seen for reference in deduplication_refs):
+                selection["rejected_already_published"] += 1
+                continue
+            unpublished_incidents.append(incident)
+        candidates = unpublished_incidents[: args.max_candidates]
+        selection["accepted"] = len(candidates)
+        selection["accepted_events"] = sum(
+            incident["incident"]["event_count"] for incident in candidates
+        )
+        selection["rejected_candidate_limit"] = max(
+            0, len(unpublished_incidents) - len(candidates)
+        )
 
         config = _gateway_config(args.prompt_api_key) if args.generate else None
         repository = args.repository or _infer_repository() if args.publish else ""
@@ -328,7 +411,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise ValueError("--repository is required when origin is not a GitHub repository")
 
         summary: Dict[str, Any] = {
-            "schema_version": "kibana-issue-connector/v1",
+            "schema_version": "kibana-issue-connector/v2",
             "source": {
                 "base_url": target.base_url,
                 "data_view_id": target.data_view_id,
@@ -339,26 +422,39 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "resolved_index_pattern": index_pattern,
                 "fetch_size": args.fetch_size,
                 "returned_hits": len(hits),
-                "candidate_limit": args.max_candidates,
+                "incident_candidate_limit": args.max_candidates,
             },
             "mode": "publish" if args.publish else "generate" if args.generate else "dry_run",
+            "selection": selection,
             "candidates": [],
         }
-        for position, sanitized in enumerate(candidates, start=1):
+        for position, incident in enumerate(candidates, start=1):
             candidate_dir = run_dir / f"candidate-{position:02d}"
-            sanitized_path = candidate_dir / "sanitized-event.json"
-            _atomic_write_json(sanitized_path, sanitized)
+            sanitized_path = candidate_dir / "sanitized-incident.json"
+            _atomic_write_json(sanitized_path, incident)
+            incident_source = incident["source"]
+            members = incident["members"]
+            services = sorted(
+                {
+                    str(member.get("target", {}).get("service", ""))
+                    for member in members
+                    if member.get("target", {}).get("service")
+                }
+            )
             item: Dict[str, Any] = {
-                "event_ref": sanitized["source"]["event_ref"],
-                "timestamp": sanitized["source"]["timestamp"],
-                "service": sanitized["target"]["service"],
-                "level": sanitized["event"]["level"],
+                "incident_ref": incident_source["incident_ref"],
+                "event_refs": incident_source["event_refs"],
+                "event_count": incident["incident"]["event_count"],
+                "first_seen_at": incident_source["first_seen_at"],
+                "last_seen_at": incident_source["last_seen_at"],
+                "services": services,
+                "grouping_strategy": incident["grouping"]["strategy"],
                 "status": "sanitized",
                 "artifact": str(sanitized_path),
             }
             if args.generate and config is not None:
                 result = ai_issue_generator.generate_issue(
-                    sanitized,
+                    incident,
                     ai_issue_generator.OpenAICompatibleChatProvider(config, config.model),
                     ai_issue_generator.OpenAICompatibleChatProvider(config, config.review_model),
                 )
@@ -373,15 +469,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                     }
                 )
                 if args.publish:
-                    if not sanitized.get("sanitization", {}).get("github_issue_allowed", False):
-                        raise ValueError("sanitized event requires security review before publication")
-                    issue_url = publish_issue(result, markdown_path, repository, sanitized)
+                    if not incident.get("sanitization", {}).get("github_issue_allowed", False):
+                        raise ValueError("sanitized incident requires security review before publication")
+                    issue_url = publish_issue(result, markdown_path, repository, incident)
                     item["status"] = "published"
                     item["issue_url"] = issue_url
-                    seen[item["event_ref"]] = {
+                    publication_record = {
                         "issue_url": issue_url,
                         "published_at": datetime.now(timezone.utc).isoformat(),
+                        "incident_ref": item["incident_ref"],
+                        "event_refs": item["event_refs"],
                     }
+                    for reference in [item["incident_ref"], *item["event_refs"]]:
+                        seen[reference] = publication_record
                     _atomic_write_json(args.state_file, published_state)
             summary["candidates"].append(item)
         _atomic_write_json(run_dir / "summary.json", summary)

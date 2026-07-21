@@ -21,12 +21,15 @@ supplied through `OPENSEARCH_PASSWORD` by a secret manager for automation.
 
 - The Discover URL must use HTTPS and contain a relative time range such as
   `now-2h` to `now`.
-- One run fetches at most 100 remote hits and accepts at most 20 local
+- One run fetches at most 100 remote hits and accepts at most 20 local incident
   candidates.
 - Only selected source fields are requested. The full OpenSearch document is
   not requested or persisted.
 - Raw hits exist only in process memory. Each hit is sanitized before an
   artifact is written or an AI call is made.
+- Eligible sanitized events are grouped by deterministic local rules before
+  the candidate limit or any AI call is applied. The model cannot decide which
+  events belong to the same incident.
 - The default mode is a dry run. AI generation requires `--generate`.
 - GitHub publication requires `--generate --publish --confirm` and is limited
   to three candidates per run.
@@ -48,10 +51,46 @@ export LOG_SANITIZER_HMAC_KEY="<stable-local-secret-at-least-32-bytes>"
   --prompt-password
 ```
 
-The command writes a summary and sanitized candidate events under
+The command writes a summary and sanitized incident candidates under
 `.kibana-issue-output/`. It does not call AI or GitHub.
 When no `OPENSEARCH_USERNAME` is set, the command prompts for the username and
 then reads the password without echoing it.
+The summary includes aggregate selection diagnostics such as parsed log levels,
+blocked events, non-error events, and duplicates. It never includes rejected
+raw log messages. For blocked `ERROR` or `FATAL` events, it may include up to
+ten minimized previews containing only HMAC event references, timestamps,
+software object fields, blocked categories, and a twice-scanned sanitized
+summary.
+
+Sanitization minimizes request URLs to a checked route plus query-key names;
+the host, fragment, and every query value are removed. Credential-like keys
+such as `appKey`, `sign`, and `signature` still mark the incident as requiring
+security review, so the connector cannot publish it. Client application and
+instance descriptors are removed using their explicit log syntax. Long Java
+identifiers bypass the entropy rule only in narrow exception, stack-frame, or
+XML class-path contexts. An unexplained high-entropy value anywhere else still
+blocks AI and GitHub processing.
+
+### Incident grouping policy
+
+Each candidate contains a `sanitized-incident.json` audit artifact. Grouping
+uses the versioned `kibana-incident-grouping/v1` policy:
+
+- equal non-empty HMAC `trace_ref` values take priority, even across services;
+- placeholder trace values such as `-`, `null`, and `unknown` are treated as
+  missing rather than shared traces;
+- without a trace, events must have the same non-empty service, timestamps no
+  more than five seconds apart, and a shared software-semantic signature;
+- the narrow exact-timestamp fallback can use a shared fixed system anchor
+  such as `S3`; a wider time match also requires matching exception/frame or
+  frame/system evidence;
+- a multi-event fallback group uses complete-link matching: every new member
+  must match every existing member, preventing transitive bridge merges.
+
+The artifact records the strategy, criteria, member HMAC references, pairwise
+time deltas, and matched signatures. `--max-candidates` limits incidents after
+all returned hits have been sanitized and grouped; it no longer truncates the
+event scan before grouping.
 
 ## 2. Generate local Issue drafts
 
@@ -65,7 +104,8 @@ Configure the existing AI gateway variables, then run:
   --generate
 ```
 
-Review each generated `candidate-*/issue.md` before publication.
+Review each `candidate-*/sanitized-incident.json` and generated
+`candidate-*/issue.md` before publication.
 
 ## 3. Publish reviewed Issues
 
@@ -85,8 +125,9 @@ retrieval, modification, testing, and pull-request work.
 
 ## Current boundary
 
-This phase implements one bounded query per run. Scheduling, durable retries,
-cursor pagination beyond the first 100 hits, alert grouping, and Jira API
-retrieval remain separate future work. A production rollout should add those
+This phase implements one bounded query and in-process deterministic grouping
+per run. It does not implement a durable alert-grouping service, cross-window
+incident lifecycle, scheduling, durable retries, cursor pagination beyond the
+first 100 hits, or Jira API retrieval. A production rollout should add those
 capabilities only after a read-only live trial confirms the data-view API,
 permissions, query volume, and field mappings.

@@ -52,6 +52,15 @@ separately authorized publication may add `--publish --confirm`, but must keep
 OpenSearch password, or claim that scheduling, durable retries, or pagination
 beyond the first bounded result page exists.
 
+The connector deterministically groups eligible sanitized events before the
+candidate limit and before any AI call. Inspect each
+`candidate-*/sanitized-incident.json`: equal non-empty HMAC trace references
+take priority; trace-less fallback grouping requires the same service, a
+bounded time window, software-semantic signatures, and complete-link matching.
+Never let the model decide incident membership. Do not describe this bounded
+in-process step as a durable alert-grouping service or cross-window incident
+lifecycle.
+
 ### Raw Kibana Or Elasticsearch Hit
 
 Require `LOG_SANITIZER_HMAC_KEY` to contain at least 32 bytes. Run:

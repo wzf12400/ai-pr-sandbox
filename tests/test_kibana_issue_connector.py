@@ -13,10 +13,12 @@ from src.kibana_issue_connector import (
     DashboardCredentials,
     DiscoverTarget,
     OpenSearchDashboardsClient,
+    _blocked_error_preview,
     _credentials,
     main,
     parse_discover_url,
 )
+from src.kibana_sanitizer import sanitize_hit
 
 
 DISCOVER_URL = (
@@ -89,6 +91,22 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertNotIn("password", repr(credentials))
         input_prompt.assert_called_once_with("OpenSearch username: ")
         password_prompt.assert_called_once_with("OpenSearch password: ")
+
+    def test_blocked_error_preview_is_sanitized_again(self):
+        hit = error_hit()
+        hit["_source"]["message"] += (
+            " mystery=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 "
+            "contact=person@example.test"
+        )
+        sanitized = sanitize_hit(hit, HMAC_KEY.encode())
+
+        preview = _blocked_error_preview(sanitized)
+
+        encoded = json.dumps(preview)
+        self.assertIn("unclassified_high_entropy", preview["blocked_categories"])
+        self.assertEqual(preview["sanitized_summary"], "[REDACTED:sensitive_preview]")
+        self.assertNotIn("AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", encoded)
+        self.assertNotIn("person@example.test", encoded)
 
     def test_parses_discover_target(self):
         target = parse_discover_url(DISCOVER_URL)
@@ -163,15 +181,83 @@ class KibanaIssueConnectorTest(unittest.TestCase):
                         ]
                     )
             summary = json.loads((output / "trial" / "summary.json").read_text())
-            event_text = (output / "trial" / "candidate-01" / "sanitized-event.json").read_text()
+            event_text = (output / "trial" / "candidate-01" / "sanitized-incident.json").read_text()
             persisted_text = "".join(path.read_text() for path in output.rglob("*.json"))
 
         self.assertEqual(code, 0)
+        self.assertEqual(summary["schema_version"], "kibana-issue-connector/v2")
         self.assertEqual(summary["mode"], "dry_run")
         self.assertEqual(summary["candidates"][0]["status"], "sanitized")
+        self.assertEqual(summary["candidates"][0]["event_count"], 1)
+        self.assertEqual(summary["selection"]["parsed_levels"], {"ERROR": 1})
+        self.assertEqual(summary["selection"]["accepted"], 1)
         self.assertNotIn("raw-document-id", event_text)
         self.assertNotIn("password", persisted_text)
         self.assertFalse(state.exists())
+
+    @mock.patch("src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits")
+    @mock.patch("src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern")
+    def test_candidate_limit_applies_after_incident_grouping(self, resolve, fetch):
+        resolve.return_value = ("logs-*", "@timestamp")
+        first = error_hit()
+        first["_id"] = "aws-access-error"
+        first["_source"]["@timestamp"] = "2026-07-21T07:34:44.765Z"
+        first["_source"]["message"] = (
+            "[2026-07-21 15:34:44.765] [TID: -] ERROR [worker-1] "
+            "com.example.ObjectStorageUtils:248 - Amazon S3 returned 403 InvalidAccessKeyId"
+        )
+        second = error_hit()
+        second["_id"] = "icon-upload-error"
+        second["_source"]["@timestamp"] = "2026-07-21T07:34:44.765Z"
+        second["_source"]["message"] = (
+            "[2026-07-21 15:34:44.765] [TID: -] ERROR [worker-1] "
+            "com.example.AssetUploadServiceImpl:108 - Fail to upload icon to S3"
+        )
+        unrelated = error_hit()
+        unrelated["_id"] = "unrelated-error"
+        unrelated["_source"]["@timestamp"] = "2026-07-21T07:34:43.000Z"
+        unrelated["_source"]["message"] = (
+            "[2026-07-21 15:34:43.000] [TID: -] ERROR [worker-1] "
+            "com.example.PaymentService:90 - java.lang.NullPointerException"
+        )
+        fetch.return_value = [first, second, unrelated]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            with mock.patch.dict(
+                os.environ,
+                {"LOG_SANITIZER_HMAC_KEY": HMAC_KEY, "OPENSEARCH_PASSWORD": "password"},
+                clear=True,
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = main(
+                        [
+                            "--discover-url",
+                            DISCOVER_URL,
+                            "--username",
+                            "reader",
+                            "--max-candidates",
+                            "1",
+                            "--output-dir",
+                            str(output),
+                            "--state-file",
+                            str(root / "state.json"),
+                            "--name",
+                            "grouping-trial",
+                        ]
+                    )
+            summary = json.loads((output / "grouping-trial" / "summary.json").read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["selection"]["scanned_hits"], 3)
+        self.assertEqual(summary["selection"]["eligible_events"], 3)
+        self.assertEqual(summary["selection"]["grouped_incidents"], 2)
+        self.assertEqual(summary["selection"]["accepted"], 1)
+        self.assertEqual(summary["selection"]["accepted_events"], 2)
+        self.assertEqual(summary["selection"]["rejected_candidate_limit"], 1)
+        self.assertEqual(summary["candidates"][0]["event_count"], 2)
+        self.assertEqual(summary["candidates"][0]["grouping_strategy"], "fallback_similarity")
 
     def test_publish_requires_generation_and_confirmation(self):
         with mock.patch.dict(

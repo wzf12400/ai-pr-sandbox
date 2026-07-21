@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -363,6 +364,119 @@ def compact_evidence(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "client": _mapping(event.get("client")),
             },
             "runtime": _mapping(payload.get("runtime")),
+        }
+    elif payload.get("schema_version") == "sanitized-kibana-incident/v1":
+        sanitization = _mapping(payload.get("sanitization"))
+        if not sanitization.get("ai_allowed", False):
+            raise ValueError("sanitized Kibana incident is not allowed to enter the AI flow")
+        members = payload.get("members")
+        if not isinstance(members, list) or not members:
+            raise ValueError("sanitized Kibana incident must contain member events")
+        if any(
+            not isinstance(member, dict)
+            or member.get("schema_version") != "sanitized-kibana-event/v1"
+            or not _mapping(member.get("sanitization")).get("ai_allowed", False)
+            for member in members
+        ):
+            raise ValueError("sanitized Kibana incident contains an ineligible member")
+
+        source = _mapping(payload.get("source"))
+        incident = _mapping(payload.get("incident"))
+        grouping = _mapping(payload.get("grouping"))
+        allowed_strategies = {"trace_ref", "fallback_similarity", "single_event"}
+        strategy = _text(grouping.get("strategy"))
+        if strategy not in allowed_strategies:
+            raise ValueError("sanitized Kibana incident has an unsupported grouping strategy")
+        if _text(grouping.get("policy_version")) != "kibana-incident-grouping/v1":
+            raise ValueError("sanitized Kibana incident has an unsupported grouping policy")
+        expected_criteria = {
+            "trace_ref": ["equal_nonempty_trace_ref"],
+            "fallback_similarity": [
+                "same_nonempty_service",
+                "bounded_timestamp",
+                "shared_software_signature",
+                "complete_link",
+            ],
+            "single_event": ["no_deterministic_match"],
+        }[strategy]
+        criteria = grouping.get("criteria") if isinstance(grouping.get("criteria"), list) else []
+        if criteria != expected_criteria:
+            raise ValueError("sanitized Kibana incident has inconsistent grouping criteria")
+        allowed_rules = {
+            "same_service_time_exception_and_frame",
+            "same_service_time_frame_and_system",
+            "same_service_exact_timestamp_and_signature",
+        }
+        links = grouping.get("links") if isinstance(grouping.get("links"), list) else []
+        rules = sorted(
+            {
+                _text(link.get("rule"))
+                for link in links
+                if isinstance(link, dict) and _text(link.get("rule")) in allowed_rules
+            }
+        )
+        signatures = sorted(
+            {
+                signature
+                for link in links
+                if isinstance(link, dict) and isinstance(link.get("shared_signatures"), list)
+                for signature in link["shared_signatures"]
+                if isinstance(signature, str)
+                and re.fullmatch(r"(?:exception|frame|system):[a-z0-9_.$-]{1,120}", signature)
+            }
+        )
+
+        observations = []
+        for member in members[:MAX_LIST_ITEMS]:
+            member_source = _mapping(member.get("source"))
+            member_event = _mapping(member.get("event"))
+            observations.append(
+                {
+                    "event_ref": _text(member_source.get("event_ref")),
+                    "timestamp": _text(member_source.get("timestamp")),
+                    "target": _mapping(member.get("target")),
+                    "level": _text(member_event.get("level")),
+                    "summary": _truncate(member_event.get("summary"), 2000),
+                    "duration_ms": member_event.get("duration_ms"),
+                    "client": _mapping(member_event.get("client")),
+                    "runtime": _mapping(member.get("runtime")),
+                }
+            )
+        services = sorted(
+            {
+                _text(_mapping(member.get("target")).get("service"))
+                for member in members
+                if _text(_mapping(member.get("target")).get("service"))
+            }
+        )
+        compact = {
+            "schema_version": EVIDENCE_SCHEMA_VERSION,
+            "source": {
+                "type": "kibana",
+                "reference": _text(source.get("incident_ref")),
+                "url": "",
+            },
+            "safety": {"status": "sanitized", "ai_allowed": True},
+            "target": {"services": services},
+            "event": {
+                "level": "ERROR",
+                "trace_ref": _text(incident.get("trace_ref")),
+                "event_count": len(members),
+                "observations_included": len(observations),
+                "observations_truncated": len(members) > len(observations),
+                "grouping": {
+                    "policy_version": _text(grouping.get("policy_version")),
+                    "strategy": strategy,
+                    "criteria": criteria,
+                    "rules": rules,
+                    "shared_signatures": signatures,
+                },
+                "observations": observations,
+            },
+            "runtime": {
+                "first_seen_at": _text(source.get("first_seen_at")),
+                "last_seen_at": _text(source.get("last_seen_at")),
+            },
         }
     elif payload.get("schema_version") == "issue-intake/v1":
         if payload.get("data_safety_status") != "sanitized":
