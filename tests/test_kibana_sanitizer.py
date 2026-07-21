@@ -175,6 +175,30 @@ class KibanaSanitizerTest(unittest.TestCase):
                 self.assertEqual(sanitized, sample)
                 self.assertFalse(any(item.action == "blocked" for item in findings))
 
+    def test_sql_statement_is_removed_before_entropy_detection(self) -> None:
+        statement = (
+            "### SQL: select very_long_internal_column_name from private_table "
+            "where api_token = 'QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ==' "
+            "| ### Cause: java.sql.SQLException: Illegal mix of collations"
+        )
+
+        sanitized, findings = redact_free_text(statement)
+
+        self.assertEqual(
+            sanitized,
+            "### SQL: [REDACTED:sql_statement] "
+            "| ### Cause: java.sql.SQLException: Illegal mix of collations",
+        )
+        self.assertTrue(
+            any(
+                item.category == "sql_statement" and item.action == "removed"
+                for item in findings
+            )
+        )
+        self.assertFalse(any(item.action == "blocked" for item in findings))
+        self.assertNotIn("private_table", sanitized)
+        self.assertNotIn("QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ==", sanitized)
+
     def test_error_level_is_selected_after_sanitization(self) -> None:
         payload = raw_hit()
         payload["_source"]["message"] = payload["_source"]["message"].replace(" INFO ", " ERROR ")

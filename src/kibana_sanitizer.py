@@ -128,6 +128,9 @@ CLIENT_DESCRIPTOR_PATTERN = re.compile(
     r"(?P<application>(?:[A-Za-z0-9_-]+\.){2,}[A-Za-z0-9_.-]+(?:/\d+)?)\s+"
     r"\((?P<identifiers>[^)\r\n]{1,300})\)(?=\s+Country/)"
 )
+SQL_STATEMENT_PATTERN = re.compile(
+    r"(?is)(?P<prefix>###\s*SQL:\s*).*?(?=(?:\s*\|\s*###\s*[A-Za-z ]+:)|$)"
+)
 
 
 @dataclass(frozen=True)
@@ -313,6 +316,18 @@ def _remove_client_descriptors(text: str, path: str) -> Tuple[str, List[Finding]
     return CLIENT_DESCRIPTOR_PATTERN.sub(replace, text), findings
 
 
+def _remove_sql_statements(text: str, path: str) -> Tuple[str, List[Finding]]:
+    findings: List[Finding] = []
+
+    def replace(match: re.Match[str]) -> str:
+        findings.append(
+            Finding(f"{path}.sql", "sql_statement", "removed", "sql-statement")
+        )
+        return f"{match.group('prefix')}[REDACTED:sql_statement]"
+
+    return SQL_STATEMENT_PATTERN.sub(replace, text), findings
+
+
 def _redact_unclassified_entropy(text: str, path: str) -> Tuple[str, List[Finding]]:
     findings: List[Finding] = []
 
@@ -356,6 +371,8 @@ def redact_free_text(text: str, path: str = "message") -> Tuple[str, List[Findin
     findings.extend(url_findings)
     sanitized, client_findings = _remove_client_descriptors(sanitized, path)
     findings.extend(client_findings)
+    sanitized, sql_findings = _remove_sql_statements(sanitized, path)
+    findings.extend(sql_findings)
     pattern_rules = (
         (PRIVATE_KEY_PATTERN, "private_key", "private-key-block"),
         (AUTHORIZATION_PATTERN, "authorization", "authorization-header"),

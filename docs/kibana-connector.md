@@ -76,6 +76,11 @@ identifiers bypass the entropy rule only in narrow exception, stack-frame, or
 XML class-path contexts. An unexplained high-entropy value anywhere else still
 blocks AI and GitHub processing.
 
+MyBatis-style `### SQL:` statements are removed as a whole before entropy
+analysis. The surrounding mapper, exception, and database error evidence is
+retained, but query text, schema details, literals, and bound values do not
+enter local artifacts or AI evidence.
+
 ### Incident grouping policy
 
 Each candidate contains a `sanitized-incident.json` audit artifact. Grouping
