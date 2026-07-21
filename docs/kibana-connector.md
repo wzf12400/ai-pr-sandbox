@@ -30,13 +30,18 @@ supplied through `OPENSEARCH_PASSWORD` by a secret manager for automation.
 - Eligible sanitized events are grouped by deterministic local rules before
   the candidate limit or any AI call is applied. The model cannot decide which
   events belong to the same incident.
+- Separate incidents with different traces are compared using a conservative,
+  versioned Issue signature. Exact service, request path, exception, system,
+  and top-frame components suppress repeat Issue candidates without merging
+  their incident audit records. The model does not decide this signature.
 - The default mode is a dry run. AI generation requires `--generate`.
 - GitHub publication requires `--generate --publish --confirm` and is limited
   to three candidates per run.
 - Events containing credential evidence require separate security review and
   cannot be published by this command.
 - Successfully published event references are recorded using HMAC identifiers
-  so later runs do not create duplicate Issues.
+  together with the Issue signature so later runs do not create duplicate
+  Issues for the same event or the same deterministic failure shape.
 
 Use a stable `LOG_SANITIZER_HMAC_KEY` from a local secret manager. Changing the
 key changes event references and disables cross-run deduplication.
@@ -135,11 +140,71 @@ Review each `candidate-*/sanitized-incident.json` and generated
 The generated GitHub Issue remains the sole downstream entry for later code
 retrieval, modification, testing, and pull-request work.
 
+## 4. Policy-approved automatic publication
+
+Unattended publication uses a secret-free routing policy rather than a
+hard-coded repository. Copy
+`examples/auto-publish-policy.example.json`, define exact sanitized service
+names and their target GitHub `owner/repository` values, then review the file.
+Only the `github_cli` provider exists today; other providers fail closed.
+
+Bind the command to the reviewed bytes of that policy:
+
+```bash
+POLICY_SHA256=$(shasum -a 256 path/to/auto-publish-policy.json | awk '{print $1}')
+
+./bin/kibana-to-issues \
+  --discover-url '<full-discover-url>' \
+  --username "$OPENSEARCH_USERNAME" \
+  --generate \
+  --auto-publish-policy path/to/auto-publish-policy.json \
+  --confirm-policy-sha256 "$POLICY_SHA256" \
+  --max-candidates 5
+```
+
+Changing any policy byte invalidates the confirmed SHA-256 and stops
+publication. A route matches exactly one sanitized service. Missing or
+ambiguous routes, blocked/invalid AI results, credential security review, and
+the per-run publication limit produce auditable blocked publication results;
+they do not authorize a fallback repository. One blocked candidate does not
+prevent an independent safe candidate from being published.
+
+The policy is an operator authorization boundary, not model authorization.
+AI output cannot add routes, change repositories, increase the run limit, or
+make an ineligible event publishable.
+
+### Foreground polling
+
+For continuous operation in one process, inject secrets from a secret manager
+or a protected process environment and run:
+
+```bash
+export OPENSEARCH_PASSWORD='<injected-secret>'
+export AI_API_KEY='<injected-secret>'
+export LOG_SANITIZER_HMAC_KEY='<stable-secret-at-least-32-bytes>'
+
+./bin/kibana-issue-watch \
+  --interval-seconds 300 \
+  -- \
+  --discover-url '<full-discover-url>' \
+  --username "$OPENSEARCH_USERNAME" \
+  --generate \
+  --auto-publish-policy path/to/auto-publish-policy.json \
+  --confirm-policy-sha256 "$POLICY_SHA256" \
+  --max-candidates 5
+```
+
+Watch mode rejects interactive password/API-key prompts. Secrets remain
+outside the policy and repository. The HMAC key must remain stable across
+restarts or event and Issue-signature state cannot provide cross-run
+deduplication.
+
 ## Current boundary
 
-This phase implements one bounded query and in-process deterministic grouping
-per run. It does not implement a durable alert-grouping service, cross-window
-incident lifecycle, scheduling, durable retries, cursor pagination beyond the
-first 100 hits, or Jira API retrieval. A production rollout should add those
-capabilities only after a read-only live trial confirms the data-view API,
-permissions, query volume, and field mappings.
+Each poll still implements one bounded query and in-process deterministic
+grouping. The watcher is a foreground polling loop, not a scheduler, durable
+queue, durable retry system, or cross-window incident lifecycle. There is no
+cursor pagination beyond the first 100 hits and no Jira API retrieval. A
+production rollout should add durable supervision, backoff, metrics, policy
+deployment, and cursor semantics only after a read-only live trial confirms
+the data-view API, permissions, query volume, and field mappings.

@@ -2,7 +2,11 @@ import copy
 import unittest
 
 from src.ai_issue_generator import compact_evidence
-from src.kibana_incident_grouper import event_signatures, group_sanitized_events
+from src.kibana_incident_grouper import (
+    event_signatures,
+    group_sanitized_events,
+    issue_signature,
+)
 from src.kibana_sanitizer import sanitize_hit
 
 
@@ -154,6 +158,98 @@ class KibanaIncidentGrouperTest(unittest.TestCase):
         self.assertEqual(len(incidents), 1)
         self.assertEqual(incidents[0]["grouping"]["strategy"], "trace_ref")
         self.assertEqual(incidents[0]["incident"]["event_count"], 2)
+
+    def test_cross_trace_issue_signature_is_deterministic_but_keeps_incidents_separate(self):
+        events = [
+            sanitize_hit(
+                incident_hit(
+                    "first-request",
+                    "2026-07-21T09:03:08.757Z",
+                    "assistant-service",
+                    "BusinessExceptionHandler",
+                    43,
+                    (
+                        "request_path=/v3/api/assistant/chat "
+                        "java.lang.NullPointerException: null | "
+                        "at com.example.AssistantChatCommand.execute"
+                        "(AssistantChatCommand.java:140)"
+                    ),
+                    trace="trace-first",
+                ),
+                TEST_KEY,
+            ),
+            sanitize_hit(
+                incident_hit(
+                    "second-request",
+                    "2026-07-21T09:02:59.144Z",
+                    "assistant-service",
+                    "BusinessExceptionHandler",
+                    43,
+                    (
+                        "request_path=/v3/api/assistant/chat "
+                        "java.lang.NullPointerException: null | "
+                        "at com.example.AssistantChatCommand.execute"
+                        "(AssistantChatCommand.java:140)"
+                    ),
+                    trace="trace-second",
+                ),
+                TEST_KEY,
+            ),
+        ]
+
+        incidents = group_sanitized_events(events)
+        signatures = [issue_signature(incident) for incident in incidents]
+
+        self.assertEqual(len(incidents), 2)
+        self.assertTrue(all(item["eligible"] for item in signatures))
+        self.assertEqual(signatures[0]["fingerprint"], signatures[1]["fingerprint"])
+        self.assertEqual(
+            signatures[0]["components"]["top_frames"],
+            ["assistantchatcommand.execute"],
+        )
+
+    def test_issue_signature_does_not_collapse_unrelated_exception(self):
+        first = sanitize_hit(
+            incident_hit(
+                "first-request",
+                "2026-07-21T09:03:08.757Z",
+                "assistant-service",
+                "BusinessExceptionHandler",
+                43,
+                (
+                    "request_path=/v3/api/assistant/chat "
+                    "java.lang.NullPointerException | "
+                    "at com.example.AssistantChatCommand.execute"
+                    "(AssistantChatCommand.java:140)"
+                ),
+                trace="trace-first",
+            ),
+            TEST_KEY,
+        )
+        second = sanitize_hit(
+            incident_hit(
+                "second-request",
+                "2026-07-21T09:03:09.000Z",
+                "assistant-service",
+                "BusinessExceptionHandler",
+                43,
+                (
+                    "request_path=/v3/api/assistant/chat "
+                    "java.lang.IllegalStateException | "
+                    "at com.example.AssistantChatCommand.execute"
+                    "(AssistantChatCommand.java:140)"
+                ),
+                trace="trace-second",
+            ),
+            TEST_KEY,
+        )
+
+        signatures = [
+            issue_signature(incident)
+            for incident in group_sanitized_events([first, second])
+        ]
+
+        self.assertNotEqual(signatures[0]["fingerprint"], signatures[1]["fingerprint"])
 
     def test_complete_link_prevents_transitive_bridge_grouping(self):
         first = sanitize_hit(

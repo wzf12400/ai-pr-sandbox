@@ -17,7 +17,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src import ai_issue_generator, kibana_incident_grouper, kibana_sanitizer
+from src import (
+    ai_issue_generator,
+    issue_publication_policy,
+    kibana_incident_grouper,
+    kibana_sanitizer,
+)
 from src.issue_draft import _atomic_write_json
 from src.issue_entry import _gateway_config, _infer_repository, publish_issue
 from src.issue_intake import find_sensitive_data
@@ -326,6 +331,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--publish", action="store_true", help="Publish valid generated drafts with gh.")
     parser.add_argument("--confirm", action="store_true", help="Confirm human-approved GitHub publication.")
     parser.add_argument("--repository", help="GitHub owner/name; defaults to origin.")
+    parser.add_argument(
+        "--auto-publish-policy",
+        type=Path,
+        help="Operator-approved JSON policy that routes sanitized services to GitHub repositories.",
+    )
+    parser.add_argument(
+        "--confirm-policy-sha256",
+        default="",
+        help="Exact SHA-256 of --auto-publish-policy; binds unattended publication to reviewed policy bytes.",
+    )
     parser.add_argument("--prompt-api-key", action="store_true", help="Read AI_API_KEY without echoing it.")
     parser.add_argument("--output-dir", type=Path, default=Path(".kibana-issue-output"))
     parser.add_argument("--state-file", type=Path, default=Path(".issue-entry-state/kibana.json"))
@@ -335,6 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    auto_publish = args.auto_publish_policy is not None
     if not 1 <= args.max_candidates <= MAX_CANDIDATES:
         print(f"error: --max-candidates must be between 1 and {MAX_CANDIDATES}", file=sys.stderr)
         return 2
@@ -353,6 +369,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if auto_publish and not args.generate:
+        print("error: --auto-publish-policy requires --generate", file=sys.stderr)
+        return 2
+    if auto_publish and (args.publish or args.confirm or args.repository):
+        print(
+            "error: automatic publication policy cannot be combined with --publish, --confirm, or --repository",
+            file=sys.stderr,
+        )
+        return 2
+    if args.confirm_policy_sha256 and not auto_publish:
+        print("error: --confirm-policy-sha256 requires --auto-publish-policy", file=sys.stderr)
+        return 2
 
     run_name = args.name or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = args.output_dir / run_name
@@ -361,6 +389,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     try:
+        auto_policy = (
+            issue_publication_policy.load_policy(
+                args.auto_publish_policy, args.confirm_policy_sha256
+            )
+            if auto_publish
+            else None
+        )
         target = parse_discover_url(args.discover_url)
         raw_key = os.environ.get(kibana_sanitizer.HMAC_KEY_ENV, "").encode("utf-8")
         if len(raw_key) < kibana_sanitizer.MIN_HMAC_KEY_BYTES:
@@ -391,10 +426,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             "rejected_not_error": 0,
             "rejected_blocked": 0,
             "rejected_already_published": 0,
+            "rejected_already_published_issue_signature": 0,
             "rejected_duplicate_in_run": 0,
+            "rejected_duplicate_issue_signature": 0,
             "rejected_missing_event_ref": 0,
             "rejected_candidate_limit": 0,
+            "publication_blocked": 0,
+            "publication_failed": 0,
+            "published": 0,
             "blocked_error_previews": [],
+            "issue_signature_duplicates": [],
         }
         for hit in hits:
             sanitized = kibana_sanitizer.sanitize_hit(hit, raw_key)
@@ -431,12 +472,34 @@ def main(argv: Optional[List[str]] = None) -> int:
         grouped_incidents = kibana_incident_grouper.group_sanitized_events(eligible_events)
         selection["grouped_incidents"] = len(grouped_incidents)
         unpublished_incidents: List[Dict[str, Any]] = []
+        signature_by_incident_ref: Dict[str, Dict[str, Any]] = {}
+        current_signatures: Dict[str, str] = {}
         for incident in grouped_incidents:
             source = incident["source"]
-            deduplication_refs = [source["incident_ref"], *source["event_refs"]]
-            if any(reference in seen for reference in deduplication_refs):
+            incident_ref = source["incident_ref"]
+            signature = kibana_incident_grouper.issue_signature(incident)
+            signature_by_incident_ref[incident_ref] = signature
+            fingerprint = signature["fingerprint"]
+            event_deduplication_refs = [incident_ref, *source["event_refs"]]
+            if any(reference in seen for reference in event_deduplication_refs):
                 selection["rejected_already_published"] += 1
                 continue
+            if fingerprint and fingerprint in seen:
+                selection["rejected_already_published_issue_signature"] += 1
+                continue
+            if fingerprint and fingerprint in current_signatures:
+                selection["rejected_duplicate_issue_signature"] += 1
+                selection["issue_signature_duplicates"].append(
+                    {
+                        "incident_ref": incident_ref,
+                        "duplicate_of_incident_ref": current_signatures[fingerprint],
+                        "issue_fingerprint": fingerprint,
+                        "components": signature["components"],
+                    }
+                )
+                continue
+            if fingerprint:
+                current_signatures[fingerprint] = incident_ref
             unpublished_incidents.append(incident)
         candidates = unpublished_incidents[: args.max_candidates]
         selection["accepted"] = len(candidates)
@@ -467,7 +530,25 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "returned_hits": len(hits),
                 "incident_candidate_limit": args.max_candidates,
             },
-            "mode": "publish" if args.publish else "generate" if args.generate else "dry_run",
+            "mode": (
+                "auto_publish"
+                if auto_publish
+                else "publish"
+                if args.publish
+                else "generate"
+                if args.generate
+                else "dry_run"
+            ),
+            "publication": {
+                "requested": bool(args.publish or auto_publish),
+                "provider": "github_cli" if args.publish or auto_publish else "",
+                "repository": repository,
+                "automatic_policy": (
+                    issue_publication_policy.policy_summary(auto_policy)
+                    if auto_policy is not None
+                    else None
+                ),
+            },
             "selection": selection,
             "candidates": [],
         }
@@ -492,6 +573,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "last_seen_at": incident_source["last_seen_at"],
                 "services": services,
                 "grouping_strategy": incident["grouping"]["strategy"],
+                "issue_signature": signature_by_incident_ref[
+                    incident_source["incident_ref"]
+                ],
                 "status": "sanitized",
                 "artifact": str(sanitized_path),
             }
@@ -511,21 +595,79 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "validation_valid": result["validation"]["valid"],
                     }
                 )
-                if args.publish:
-                    if not incident.get("sanitization", {}).get("github_issue_allowed", False):
-                        raise ValueError("sanitized incident requires security review before publication")
-                    issue_url = publish_issue(result, markdown_path, repository, incident)
-                    item["status"] = "published"
-                    item["issue_url"] = issue_url
-                    publication_record = {
-                        "issue_url": issue_url,
-                        "published_at": datetime.now(timezone.utc).isoformat(),
-                        "incident_ref": item["incident_ref"],
-                        "event_refs": item["event_refs"],
+                if args.publish or auto_policy is not None:
+                    route = auto_policy.resolve(incident) if auto_policy is not None else None
+                    target_repository = route.repository if route is not None else repository
+                    publication = {
+                        "status": "pending",
+                        "provider": route.provider if route is not None else "github_cli",
+                        "repository": target_repository,
+                        "route_id": route.route_id if route is not None else "manual",
+                        "authorization": (
+                            {
+                                "mode": "operator_approved_policy",
+                                "policy_id": auto_policy.policy_id,
+                                "policy_sha256": auto_policy.policy_sha256,
+                            }
+                            if auto_policy is not None
+                            else {"mode": "explicit_cli_confirmation"}
+                        ),
                     }
-                    for reference in [item["incident_ref"], *item["event_refs"]]:
-                        seen[reference] = publication_record
-                    _atomic_write_json(args.state_file, published_state)
+                    block_reason = ""
+                    if auto_policy is not None and route is None:
+                        block_reason = "no_approved_repository_route"
+                    elif auto_policy is not None and result.get("state") not in auto_policy.allowed_states:
+                        block_reason = "workflow_state_not_allowed_by_policy"
+                    elif result.get("state") == "blocked" or not result.get(
+                        "validation", {}
+                    ).get("valid", False):
+                        block_reason = "blocked_or_invalid_ai_output"
+                    elif (
+                        auto_policy is not None
+                        and selection["published"] >= auto_policy.max_issues_per_run
+                    ):
+                        block_reason = "automatic_publication_run_limit_reached"
+                    elif not incident.get("sanitization", {}).get(
+                        "github_issue_allowed", False
+                    ):
+                        block_reason = "security_review_required"
+
+                    if block_reason:
+                        publication.update({"status": "blocked", "reason": block_reason})
+                        selection["publication_blocked"] += 1
+                    else:
+                        try:
+                            issue_url = publish_issue(
+                                result, markdown_path, target_repository, incident
+                            )
+                        except ValueError as exc:
+                            publication.update(
+                                {"status": "failed", "reason": str(exc)}
+                            )
+                            selection["publication_failed"] += 1
+                        else:
+                            publication.update({"status": "published", "issue_url": issue_url})
+                            item["status"] = "published"
+                            item["issue_url"] = issue_url
+                            selection["published"] += 1
+                            publication_record = {
+                                "issue_url": issue_url,
+                                "published_at": datetime.now(timezone.utc).isoformat(),
+                                "incident_ref": item["incident_ref"],
+                                "event_refs": item["event_refs"],
+                                "issue_fingerprint": item["issue_signature"]["fingerprint"],
+                                "repository": target_repository,
+                                "provider": publication["provider"],
+                                "authorization": publication["authorization"],
+                            }
+                            references = [item["incident_ref"], *item["event_refs"]]
+                            fingerprint = item["issue_signature"]["fingerprint"]
+                            if fingerprint:
+                                references.append(fingerprint)
+                            for reference in references:
+                                seen[reference] = publication_record
+                            _atomic_write_json(args.state_file, published_state)
+                    item["publication"] = publication
             summary["candidates"].append(item)
         _atomic_write_json(run_dir / "summary.json", summary)
     except (FileExistsError, OSError, ValueError) as exc:

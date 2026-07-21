@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
@@ -10,6 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 INCIDENT_SCHEMA_VERSION = "sanitized-kibana-incident/v1"
 GROUPING_POLICY_VERSION = "kibana-incident-grouping/v1"
+ISSUE_SIGNATURE_POLICY_VERSION = "kibana-issue-signature/v1"
 FALLBACK_WINDOW_SECONDS = 5.0
 
 EXCEPTION_PATTERN = re.compile(
@@ -22,6 +24,11 @@ METHOD_FRAME_PATTERN = re.compile(
 LINE_FRAME_PATTERN = re.compile(
     r"\b(?P<class>(?:[A-Za-z_$][\w$]*\.)*[A-Z][A-Za-z0-9_$]*):\d+\b"
 )
+JAVA_STACK_FRAME_PATTERN = re.compile(
+    r"\bat\s+(?P<class>(?:[A-Za-z_$][\w$]*\.)*[A-Z][A-Za-z0-9_$]*)"
+    r"\.(?P<method>[A-Za-z_$][\w$]*)\([^\r\n)]*\)"
+)
+REQUEST_PATH_PATTERN = re.compile(r"\brequest_path\s*=\s*(?P<path>/[^\s?;,|]+)")
 SYSTEM_ANCHORS = {
     "s3": re.compile(r"(?i)\b(?:amazon\s+)?s3\b"),
     "dynamodb": re.compile(r"(?i)\bdynamodb\b"),
@@ -34,6 +41,8 @@ SYSTEM_ANCHORS = {
     "rabbitmq": re.compile(r"(?i)\brabbitmq\b"),
     "redis": re.compile(r"(?i)\bredis\b"),
 }
+
+
 def _mapping(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -98,10 +107,84 @@ def event_signatures(event: Dict[str, Any]) -> Set[str]:
         signatures.add(f"frame:{class_name}.{method_name.lower()}")
     for match in LINE_FRAME_PATTERN.finditer(summary):
         signatures.add(f"frame:{_simple_name(match.group('class'))}")
+    for match in JAVA_STACK_FRAME_PATTERN.finditer(summary):
+        class_name = _simple_name(match.group("class"))
+        method_name = _text(match.group("method"))
+        signatures.add(f"frame:{class_name}")
+        signatures.add(f"frame:{class_name}.{method_name.lower()}")
     for name, pattern in SYSTEM_ANCHORS.items():
         if pattern.search(summary):
             signatures.add(f"system:{name}")
     return signatures
+
+
+def issue_signature(incident: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a conservative, auditable cross-trace Issue deduplication key."""
+    if incident.get("schema_version") != INCIDENT_SCHEMA_VERSION:
+        raise ValueError("Issue signature requires a sanitized Kibana incident")
+    members = incident.get("members")
+    if not isinstance(members, list) or not members:
+        raise ValueError("Issue signature requires incident members")
+
+    services = sorted({_service(member) for member in members if _service(member)})
+    paths: Set[str] = set()
+    exceptions: Set[str] = set()
+    systems: Set[str] = set()
+    top_frames: Set[str] = set()
+    for member in members:
+        summary = _text(_mapping(member.get("event")).get("summary"))
+        paths.update(match.group("path") for match in REQUEST_PATH_PATTERN.finditer(summary))
+        signatures = event_signatures(member)
+        exceptions.update(
+            item.removeprefix("exception:")
+            for item in signatures
+            if item.startswith("exception:")
+        )
+        systems.update(
+            item.removeprefix("system:")
+            for item in signatures
+            if item.startswith("system:")
+        )
+        first_frame = JAVA_STACK_FRAME_PATTERN.search(summary)
+        if first_frame:
+            top_frames.add(
+                f"{_simple_name(first_frame.group('class'))}."
+                f"{_text(first_frame.group('method')).lower()}"
+            )
+
+    semantic_dimensions = sum(
+        bool(values) for values in (paths, exceptions, systems, top_frames)
+    )
+    eligible = len(services) == 1 and semantic_dimensions >= 2
+    components = {
+        "services": services,
+        "paths": sorted(paths),
+        "exceptions": sorted(exceptions),
+        "systems": sorted(systems),
+        "top_frames": sorted(top_frames),
+    }
+    fingerprint = ""
+    if eligible:
+        encoded = json.dumps(
+            {
+                "policy_version": ISSUE_SIGNATURE_POLICY_VERSION,
+                **components,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        fingerprint = "issue_ref:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:20]
+    return {
+        "policy_version": ISSUE_SIGNATURE_POLICY_VERSION,
+        "eligible": eligible,
+        "fingerprint": fingerprint,
+        "criteria": [
+            "one_nonempty_service",
+            "at_least_two_semantic_dimensions",
+            "exact_signature_equality",
+        ],
+        "components": components,
+    }
 
 
 def _fallback_match(
