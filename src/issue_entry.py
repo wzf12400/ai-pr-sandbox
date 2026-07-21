@@ -132,7 +132,10 @@ def publish_issue(
         raise ValueError("repository must use owner/name format")
     if result.get("state") == "blocked" or not result.get("validation", {}).get("valid", False):
         raise ValueError("blocked or invalid AI output cannot be published")
-    if evidence.get("safety", {}).get("security_review_required", False):
+    security_review_required = evidence.get("safety", {}).get(
+        "security_review_required", False
+    ) or evidence.get("sanitization", {}).get("security_review_required", False)
+    if security_review_required:
         raise ValueError("redacted credential evidence requires a separate security review before publication")
 
     try:

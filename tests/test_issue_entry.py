@@ -106,6 +106,19 @@ class IssueEntryTest(unittest.TestCase):
             publish_issue(result, Path("issue.md"), "acme/project", evidence)
         run.assert_not_called()
 
+    @mock.patch("src.issue_entry.subprocess.run")
+    def test_sanitized_event_security_review_blocks_publication(self, run):
+        result = {
+            "state": "ready_for_human_review",
+            "validation": {"valid": True},
+            "draft": {"title": "Demo issue"},
+        }
+        evidence = {"sanitization": {"security_review_required": True}}
+
+        with self.assertRaisesRegex(ValueError, "security review"):
+            publish_issue(result, Path("issue.md"), "acme/project", evidence)
+        run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

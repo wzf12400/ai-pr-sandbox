@@ -33,6 +33,25 @@ Inspect the generated Markdown before publication. A separately authorized human
 
 ## Select The Input Path
 
+### OpenSearch Dashboards Discover URL
+
+Use the bounded connector when a complete Discover URL and a dedicated
+read-only Basic account are available:
+
+```bash
+./bin/kibana-to-issues \
+  --discover-url 'FULL_DISCOVER_URL' \
+  --username READ_ONLY_USER \
+  --prompt-password
+```
+
+The default mode only fetches bounded candidates and writes sanitized local
+artifacts. Add `--generate --prompt-api-key` for AI-reviewed local drafts. A
+separately authorized publication may add `--publish --confirm`, but must keep
+`--max-candidates` at three or fewer. Never reuse browser cookies, persist the
+OpenSearch password, or claim that scheduling, durable retries, or pagination
+beyond the first bounded result page exists.
+
 ### Raw Kibana Or Elasticsearch Hit
 
 Require `LOG_SANITIZER_HMAC_KEY` to contain at least 32 bytes. Run:

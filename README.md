@@ -173,3 +173,26 @@ same strict local schema and evidence validation still run before publication.
 The command rejects blocked AI output and prevents publication when credentials
 were present in the source, even after redaction. It never uses model output as
 authorization to modify code.
+
+## Pull error candidates from OpenSearch Dashboards
+
+`bin/kibana-to-issues` accepts a complete Discover URL, resolves its data view,
+and performs a bounded read-only error search. The default run only writes
+sanitized local candidates:
+
+```bash
+export LOG_SANITIZER_HMAC_KEY="<stable-local-secret-at-least-32-bytes>"
+export OPENSEARCH_USERNAME="<read-only-user>"
+
+./bin/kibana-to-issues \
+  --discover-url '<full-discover-url>' \
+  --prompt-password
+```
+
+Add `--generate --prompt-api-key` for locally reviewed AI drafts. Publishing
+also requires `--publish --confirm`, a GitHub repository, and a maximum of
+three candidates per run. Raw OpenSearch responses, passwords, and AI keys are
+not persisted.
+
+See [`docs/kibana-connector.md`](docs/kibana-connector.md) for access
+requirements, the complete commands, safety gates, and current phase boundary.
