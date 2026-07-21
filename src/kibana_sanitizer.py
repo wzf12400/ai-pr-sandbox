@@ -10,6 +10,7 @@ import math
 import os
 import re
 import sys
+import urllib.parse
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -54,6 +55,8 @@ SECRET_KEY_CATEGORIES = {
     "jsessionid": "cookie",
     "apikey": "api_key_candidate",
     "appkey": "api_key_candidate",
+    "sign": "credential",
+    "signature": "credential",
     "secretkey": "api_key_candidate",
     "clientsecret": "api_key_candidate",
     "privatekey": "private_key",
@@ -81,9 +84,11 @@ HIGH_ENTROPY_CONTEXT_ALLOWLIST = {
     "containerhash",
     "traceid",
     "requestid",
+    "requestpath",
     "podid",
     "imagedigest",
 }
+MISSING_TRACE_VALUES = {"", "-", "0", "n/a", "na", "none", "null", "unknown"}
 
 PRIVATE_KEY_PATTERN = re.compile(
     r"-----BEGIN (?P<key_type>[A-Z0-9 ]*PRIVATE KEY)-----.*?"
@@ -112,11 +117,17 @@ KNOWN_TOKEN_PATTERN = re.compile(
 SECRET_ASSIGNMENT_PATTERN = re.compile(
     r"(?i)\b(?P<key>password|passwd|pwd|passphrase|token|access[_-]?token|"
     r"refresh[_-]?token|id[_-]?token|api[_-]?key|app[_-]?key|secret[_-]?key|"
-    r"client[_-]?secret|private[_-]?key|database[_-]?url|connection[_-]?string|"
+    r"client[_-]?secret|private[_-]?key|sign(?:ature)?|database[_-]?url|connection[_-]?string|"
     r"datasource[_-]?password)[\"']?\s*[:=]\s*[\"']?"
     r"(?P<value>[^\s,;)\]}\"']+)"
 )
-HIGH_ENTROPY_CANDIDATE_PATTERN = re.compile(r"[A-Za-z0-9+/_=-]{20,}")
+HIGH_ENTROPY_CANDIDATE_PATTERN = re.compile(r"[A-Za-z0-9+/_-]{20,}={0,2}")
+REQUEST_URL_PATTERN = re.compile(r"https?://[^\s]+")
+SAFE_ROUTE_SEGMENT_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,40}$")
+CLIENT_DESCRIPTOR_PATTERN = re.compile(
+    r"(?P<application>(?:[A-Za-z0-9_-]+\.){2,}[A-Za-z0-9_.-]+(?:/\d+)?)\s+"
+    r"\((?P<identifiers>[^)\r\n]{1,300})\)(?=\s+Country/)"
+)
 
 
 @dataclass(frozen=True)
@@ -136,6 +147,11 @@ def _hmac_ref(key: bytes, namespace: str, value: str) -> str:
         return ""
     digest = hmac.new(key, f"{namespace}:{value}".encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{namespace}_ref:{digest[:16]}"
+
+
+def _trace_ref(key: bytes, value: str) -> str:
+    normalized = value.strip().lower()
+    return "" if normalized in MISSING_TRACE_VALUES else _hmac_ref(key, "trace", value)
 
 
 def _mapping(value: Any) -> Dict[str, Any]:
@@ -196,6 +212,107 @@ def _preceding_assignment_key(text: str, start: int) -> str:
     return _canonical_key(match.group(1)) if match else ""
 
 
+def _is_allowlisted_code_identifier(text: str, match: re.Match[str]) -> bool:
+    candidate = match.group(0)
+    prefix = text[max(0, match.start() - 300):match.start()]
+    suffix = text[match.end():match.end() + 160]
+    if "class path resource [" in prefix and re.match(r"\.xml\]", suffix):
+        if re.fullmatch(
+            r"(?:[A-Za-z_$][A-Za-z0-9_$]*/)*[A-Za-z_$][A-Za-z0-9_$]*",
+            candidate,
+        ):
+            return True
+    if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]{19,}", candidate):
+        return False
+    if candidate.endswith(("Exception", "Error")):
+        if re.search(r"(?:[A-Za-z_$][\w$]*\.)+$", prefix) and re.match(r"\s*:", suffix):
+            return True
+    if re.search(r"\bat\s+(?:[A-Za-z_$][\w$]*\.)+$", prefix):
+        if re.match(r"(?:\.[A-Za-z_$][\w$]*)?\([^\r\n)]*\)", suffix):
+            return True
+    return False
+
+
+def _minimize_request_urls(text: str, path: str) -> Tuple[str, List[Finding]]:
+    findings: List[Finding] = []
+
+    def replace(match: re.Match[str]) -> str:
+        raw_url = match.group(0)
+        url = raw_url.rstrip(".,;:")
+        trailing = raw_url[len(url):]
+        try:
+            parsed = urllib.parse.urlsplit(url)
+        except ValueError:
+            findings.append(
+                Finding(f"{path}.url", "malformed_url", "blocked", "request-url")
+            )
+            return f"[REDACTED:malformed_url]{trailing}"
+        findings.append(Finding(f"{path}.url.host", "internal_host", "removed", "request-url"))
+        if parsed.fragment:
+            findings.append(
+                Finding(f"{path}.url.fragment", "url_fragment", "removed", "request-url")
+            )
+
+        safe_segments: List[str] = []
+        for segment in parsed.path.split("/"):
+            if not segment:
+                continue
+            if (
+                SAFE_ROUTE_SEGMENT_PATTERN.fullmatch(segment)
+                and (len(segment) < 20 or _entropy(segment) < 4.0)
+            ):
+                safe_segments.append(segment)
+            else:
+                safe_segments.append("[REDACTED:path_segment]")
+                findings.append(
+                    Finding(f"{path}.url.path", "path_identifier", "removed", "request-url")
+                )
+
+        safe_keys: List[str] = []
+        for part in parsed.query.split("&")[:50]:
+            if not part:
+                continue
+            raw_key = urllib.parse.unquote_plus(part.split("=", 1)[0]).strip()
+            canonical = _canonical_key(raw_key)
+            category = SECRET_KEY_CATEGORIES.get(canonical)
+            if category:
+                safe_keys.append(f"[REDACTED:{category}]")
+                findings.append(
+                    Finding(f"{path}.url.query.{raw_key}", category, "removed", "request-url")
+                )
+            elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,40}", raw_key):
+                safe_keys.append(raw_key)
+                findings.append(
+                    Finding(f"{path}.url.query.{raw_key}", "url_parameter", "removed", "request-url")
+                )
+            else:
+                safe_keys.append("[REDACTED:query_key]")
+                findings.append(
+                    Finding(f"{path}.url.query", "query_key", "removed", "request-url")
+                )
+
+        safe_path = "/" + "/".join(safe_segments)
+        query_summary = f" query_keys={','.join(safe_keys)}" if safe_keys else ""
+        return f"request_path={safe_path}{query_summary}{trailing}"
+
+    return REQUEST_URL_PATTERN.sub(replace, text), findings
+
+
+def _remove_client_descriptors(text: str, path: str) -> Tuple[str, List[Finding]]:
+    findings: List[Finding] = []
+
+    def replace(_: re.Match[str]) -> str:
+        findings.extend(
+            [
+                Finding(path, "application_identifier", "removed", "client-descriptor"),
+                Finding(path, "client_identifier", "removed", "client-descriptor"),
+            ]
+        )
+        return "[REDACTED:client_descriptor]"
+
+    return CLIENT_DESCRIPTOR_PATTERN.sub(replace, text), findings
+
+
 def _redact_unclassified_entropy(text: str, path: str) -> Tuple[str, List[Finding]]:
     findings: List[Finding] = []
 
@@ -203,6 +320,8 @@ def _redact_unclassified_entropy(text: str, path: str) -> Tuple[str, List[Findin
         candidate = match.group(0)
         context_key = _preceding_assignment_key(text, match.start())
         if context_key in HIGH_ENTROPY_CONTEXT_ALLOWLIST:
+            return candidate
+        if _is_allowlisted_code_identifier(text, match):
             return candidate
         is_hex = bool(re.fullmatch(r"[A-Fa-f0-9]+", candidate))
         threshold = 3.2 if is_hex and len(candidate) >= 32 else 4.0
@@ -233,6 +352,10 @@ def _apply_pattern(
 def redact_free_text(text: str, path: str = "message") -> Tuple[str, List[Finding]]:
     sanitized = text.replace("\x00", "[NUL]").replace("\r", "\\r")
     findings: List[Finding] = []
+    sanitized, url_findings = _minimize_request_urls(sanitized, path)
+    findings.extend(url_findings)
+    sanitized, client_findings = _remove_client_descriptors(sanitized, path)
+    findings.extend(client_findings)
     pattern_rules = (
         (PRIVATE_KEY_PATTERN, "private_key", "private-key-block"),
         (AUTHORIZATION_PATTERN, "authorization", "authorization-header"),
@@ -264,7 +387,7 @@ def _parse_message(message: str, key: bytes) -> Tuple[Dict[str, Any], List[Findi
     if match:
         parsed = match.groupdict()
         body = parsed["body"]
-        trace_ref = _hmac_ref(key, "trace", parsed["trace"])
+        trace_ref = _trace_ref(key, parsed["trace"])
         level = parsed["level"]
         logger_class = parsed["logger"]
         logger_line = int(parsed["line"])

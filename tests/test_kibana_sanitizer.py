@@ -57,6 +57,16 @@ class KibanaSanitizerTest(unittest.TestCase):
         self.assertEqual(first["source"]["event_ref"], second["source"]["event_ref"])
         self.assertNotEqual(first["source"]["event_ref"], third["source"]["event_ref"])
 
+    def test_placeholder_trace_is_not_treated_as_a_shared_trace(self) -> None:
+        payload = raw_hit()
+        payload["_source"]["message"] = payload["_source"]["message"].replace(
+            "TID: 0123456789abcdef0123456789abcdef.1.2", "TID: -"
+        )
+
+        result = sanitize_hit(payload, TEST_KEY)
+
+        self.assertEqual(result["event"]["trace_ref"], "")
+
     def test_known_secret_formats_are_removed_without_echoing_values(self) -> None:
         samples = {
             "password": ("password=very-simple-password", "very-simple-password"),
@@ -113,6 +123,57 @@ class KibanaSanitizerTest(unittest.TestCase):
         self.assertFalse(result["sanitization"]["ai_allowed"])
         self.assertFalse(result["event"]["is_issue_candidate"])
         self.assertNotIn("QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ==", serialized)
+
+    def test_request_context_is_minimized_without_relaxing_entropy_gate(self) -> None:
+        payload = raw_hit()
+        payload["_source"]["message"] = (
+            "[2026-07-21 15:34:35.853] [TID: -] ERROR [worker-1] "
+            "com.example.BusinessExceptionHandler:43 - Throws while processing request: "
+            "https://internal.example.test/v1/api/user/block/resourceList?"
+            "sign=b3da3d22b9e1383d439d4fd92359724b&"
+            "appKey=private-application-key&"
+            "opaque=QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ== "
+            "com.example.sample.application/4197 "
+            "(f88d4d215f074792971543c8f1f94a08/4108130a5ef56b6ae98e14d03b1b274a) "
+            "Country/US org.springframework.jdbc.UncategorizedSQLException: failed | "
+            "at com.example.command.SensitiveTextCommand.execute"
+            "(SensitiveTextCommand.java:119) | "
+            "class path resource [com/example/VeryLongAssetResourceMapper.xml]"
+        )
+
+        result = sanitize_hit(payload, TEST_KEY)
+        serialized = json.dumps(result, ensure_ascii=False)
+
+        self.assertTrue(result["sanitization"]["ai_allowed"])
+        self.assertTrue(result["sanitization"]["security_review_required"])
+        self.assertFalse(result["sanitization"]["github_issue_allowed"])
+        self.assertNotIn("unclassified_high_entropy", serialized)
+        self.assertIn("request_path=/v1/api/user/block/resourceList", serialized)
+        self.assertIn("UncategorizedSQLException", serialized)
+        self.assertIn("VeryLongAssetResourceMapper.xml", serialized)
+        for forbidden in (
+            "internal.example.test",
+            "b3da3d22b9e1383d439d4fd92359724b",
+            "private-application-key",
+            "QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ==",
+            "f88d4d215f074792971543c8f1f94a08",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_java_identifiers_are_allowed_only_in_code_contexts(self) -> None:
+        samples = (
+            "java.lang.StringIndexOutOfBoundsException: index -2",
+            "org.springframework.jdbc.UncategorizedSQLException: failed",
+            "at com.example.command.SensitiveTextCommand.execute"
+            "(SensitiveTextCommand.java:119)",
+            "class path resource [com/example/VeryLongAssetResourceMapper.xml]",
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                sanitized, findings = redact_free_text(sample)
+
+                self.assertEqual(sanitized, sample)
+                self.assertFalse(any(item.action == "blocked" for item in findings))
 
     def test_error_level_is_selected_after_sanitization(self) -> None:
         payload = raw_hit()
