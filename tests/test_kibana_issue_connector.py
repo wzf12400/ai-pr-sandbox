@@ -131,13 +131,16 @@ class KibanaIssueConnectorTest(unittest.TestCase):
             time_to="now",
         )
         credentials = DashboardCredentials("reader", "password")
-        client = OpenSearchDashboardsClient(target, credentials, opener=opener)
+        client = OpenSearchDashboardsClient(
+            target, credentials, timeout_seconds=45, opener=opener
+        )
 
         index_pattern, time_field = client.resolve_index_pattern()
         hits = client.fetch_error_hits(index_pattern, time_field, 25)
 
         self.assertEqual(index_pattern, "logs-*")
         self.assertEqual(len(hits), 1)
+        self.assertTrue(all(timeout == 45 for _, timeout in opener.requests))
         self.assertNotIn("password", repr(credentials))
         request = opener.requests[1][0]
         expected_auth = "Basic " + base64.b64encode(b"reader:password").decode()
@@ -150,6 +153,42 @@ class KibanaIssueConnectorTest(unittest.TestCase):
             payload["query"]["bool"]["filter"][0]["range"]["@timestamp"],
             {"gte": "now-2h", "lte": "now"},
         )
+
+    def test_client_reports_read_timeout_without_remote_details(self):
+        target = DiscoverTarget(
+            base_url="https://logs.example.test/_dashboards",
+            data_view_id="data-view-1",
+            time_from="now-2h",
+            time_to="now",
+        )
+
+        def timeout_opener(request, timeout):
+            raise TimeoutError("synthetic transport detail")
+
+        client = OpenSearchDashboardsClient(
+            target,
+            DashboardCredentials("reader", "password"),
+            timeout_seconds=60,
+            opener=timeout_opener,
+        )
+
+        with self.assertRaisesRegex(ValueError, "timed out after 60 seconds") as raised:
+            client.resolve_index_pattern()
+
+        self.assertNotIn("synthetic transport detail", str(raised.exception))
+
+    def test_rejects_out_of_range_timeout_before_credentials(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = main(
+                [
+                    "--discover-url",
+                    DISCOVER_URL,
+                    "--timeout-seconds",
+                    "121",
+                ]
+            )
+
+        self.assertEqual(code, 2)
 
     @mock.patch("src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits")
     @mock.patch("src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern")
@@ -187,6 +226,7 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(summary["schema_version"], "kibana-issue-connector/v2")
         self.assertEqual(summary["mode"], "dry_run")
+        self.assertEqual(summary["query"]["timeout_seconds"], 30)
         self.assertEqual(summary["candidates"][0]["status"], "sanitized")
         self.assertEqual(summary["candidates"][0]["event_count"], 1)
         self.assertEqual(summary["selection"]["parsed_levels"], {"ERROR": 1})

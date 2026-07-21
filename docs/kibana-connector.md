@@ -48,7 +48,8 @@ export LOG_SANITIZER_HMAC_KEY="<stable-local-secret-at-least-32-bytes>"
 
 ./bin/kibana-to-issues \
   --discover-url '<full-discover-url>' \
-  --prompt-password
+  --prompt-password \
+  --timeout-seconds 60
 ```
 
 The command writes a summary and sanitized incident candidates under
@@ -61,6 +62,10 @@ raw log messages. For blocked `ERROR` or `FATAL` events, it may include up to
 ten minimized previews containing only HMAC event references, timestamps,
 software object fields, blocked categories, and a twice-scanned sanitized
 summary.
+
+The per-request timeout defaults to 30 seconds and can be raised with
+`--timeout-seconds` up to 120 seconds for a slow read-only endpoint. A timeout
+stops the run safely; it does not trigger automatic retries or partial output.
 
 Sanitization minimizes request URLs to a checked route plus query-key names;
 the host, fragment, and every query value are removed. Credential-like keys

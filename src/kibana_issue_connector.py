@@ -30,6 +30,7 @@ MAX_CANDIDATES = 20
 MAX_PUBLISH_CANDIDATES = 3
 MAX_FETCH_SIZE = 100
 MAX_BLOCKED_ERROR_PREVIEWS = 10
+MAX_TIMEOUT_SECONDS = 120
 DATA_VIEW_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 INDEX_PATTERN = re.compile(r"^[A-Za-z0-9._*,-]{1,500}$")
 RELATIVE_TIME_PATTERN = re.compile(r"^now(?:-\d+[mhdw])?$|^now$")
@@ -144,6 +145,10 @@ class OpenSearchDashboardsClient:
             detail = _safe_http_detail(exc)
             suffix = f": {detail}" if detail else ""
             raise ValueError(f"OpenSearch Dashboards returned HTTP {exc.code}{suffix}") from exc
+        except TimeoutError as exc:
+            raise ValueError(
+                f"OpenSearch Dashboards read timed out after {self.timeout_seconds:g} seconds"
+            ) from exc
         except urllib.error.URLError as exc:
             raise ValueError("OpenSearch Dashboards request failed") from exc
         if "/app/login" in final_url:
@@ -287,6 +292,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-password", action="store_true", help="Read the password without echoing it.")
     parser.add_argument("--max-candidates", type=int, default=5, help=f"Candidate limit, maximum {MAX_CANDIDATES}.")
     parser.add_argument("--fetch-size", type=int, default=50, help=f"Remote hit limit, maximum {MAX_FETCH_SIZE}.")
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=30,
+        help=f"Per-request OpenSearch timeout, maximum {MAX_TIMEOUT_SECONDS} seconds.",
+    )
     parser.add_argument("--generate", action="store_true", help="Generate locally reviewed AI Issue drafts.")
     parser.add_argument("--publish", action="store_true", help="Publish valid generated drafts with gh.")
     parser.add_argument("--confirm", action="store_true", help="Confirm human-approved GitHub publication.")
@@ -302,6 +313,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     if not 1 <= args.max_candidates <= MAX_CANDIDATES:
         print(f"error: --max-candidates must be between 1 and {MAX_CANDIDATES}", file=sys.stderr)
+        return 2
+    if not 1 <= args.timeout_seconds <= MAX_TIMEOUT_SECONDS:
+        print(
+            f"error: --timeout-seconds must be between 1 and {MAX_TIMEOUT_SECONDS}",
+            file=sys.stderr,
+        )
         return 2
     if args.publish and (not args.generate or not args.confirm):
         print("error: --publish requires --generate and --confirm", file=sys.stderr)
@@ -330,6 +347,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         client = OpenSearchDashboardsClient(
             target,
             _credentials(args.prompt_password, args.username),
+            timeout_seconds=args.timeout_seconds,
         )
         index_pattern, time_field = client.resolve_index_pattern()
         hits = client.fetch_error_hits(index_pattern, time_field, args.fetch_size)
@@ -421,6 +439,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "query": {
                 "resolved_index_pattern": index_pattern,
                 "fetch_size": args.fetch_size,
+                "timeout_seconds": args.timeout_seconds,
                 "returned_hits": len(hits),
                 "incident_candidate_limit": args.max_candidates,
             },
