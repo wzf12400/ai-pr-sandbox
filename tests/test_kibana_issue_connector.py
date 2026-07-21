@@ -108,6 +108,19 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertNotIn("AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", encoded)
         self.assertNotIn("person@example.test", encoded)
 
+    def test_blocked_error_preview_reports_only_redacted_entropy_context(self):
+        hit = error_hit()
+        secret = "QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ=="
+        hit["_source"]["message"] += " safe-prefix" * 120 + f" mystery={secret} tail"
+        sanitized = sanitize_hit(hit, HMAC_KEY.encode())
+
+        preview = _blocked_error_preview(sanitized)
+        encoded = json.dumps(preview)
+
+        self.assertEqual(len(preview["blocked_contexts"]), 1)
+        self.assertIn("[REDACTED:unclassified_high_entropy]", encoded)
+        self.assertNotIn(secret, encoded)
+
     def test_parses_discover_target(self):
         target = parse_discover_url(DISCOVER_URL)
 

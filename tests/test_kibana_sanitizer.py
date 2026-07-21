@@ -160,6 +160,20 @@ class KibanaSanitizerTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, serialized)
 
+    def test_high_entropy_url_path_identifier_is_removed(self) -> None:
+        identifier = "c3de2802001e4cb9a76c5124df1dfd2f"
+
+        sanitized, findings = redact_free_text(
+            f"https://internal.example.test/v1/api/category/{identifier}/resources"
+        )
+
+        self.assertEqual(
+            sanitized,
+            "request_path=/v1/api/category/[REDACTED:path_segment]/resources",
+        )
+        self.assertNotIn(identifier, sanitized)
+        self.assertTrue(any(item.category == "path_identifier" for item in findings))
+
     def test_java_identifiers_are_allowed_only_in_code_contexts(self) -> None:
         samples = (
             "java.lang.StringIndexOutOfBoundsException: index -2",

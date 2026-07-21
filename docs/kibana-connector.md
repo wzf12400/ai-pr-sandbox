@@ -61,7 +61,9 @@ blocked events, non-error events, and duplicates. It never includes rejected
 raw log messages. For blocked `ERROR` or `FATAL` events, it may include up to
 ten minimized previews containing only HMAC event references, timestamps,
 software object fields, blocked categories, and a twice-scanned sanitized
-summary.
+summary. Each preview may also contain up to three short contexts around an
+already-redacted high-entropy marker. The original candidate value is never
+included; each context is sanitized again before it is written.
 
 The per-request timeout defaults to 30 seconds and can be raised with
 `--timeout-seconds` up to 120 seconds for a slow read-only endpoint. A timeout

@@ -31,6 +31,9 @@ MAX_PUBLISH_CANDIDATES = 3
 MAX_FETCH_SIZE = 100
 MAX_BLOCKED_ERROR_PREVIEWS = 10
 MAX_TIMEOUT_SECONDS = 120
+MAX_BLOCKED_CONTEXTS = 3
+BLOCKED_CONTEXT_RADIUS = 160
+HIGH_ENTROPY_REDACTION = "[REDACTED:unclassified_high_entropy]"
 DATA_VIEW_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 INDEX_PATTERN = re.compile(r"^[A-Za-z0-9._*,-]{1,500}$")
 RELATIVE_TIME_PATTERN = re.compile(r"^now(?:-\d+[mhdw])?$|^now$")
@@ -258,9 +261,29 @@ def _load_published(path: Path) -> Dict[str, Any]:
 def _blocked_error_preview(sanitized: Dict[str, Any]) -> Dict[str, Any]:
     event = sanitized.get("event", {})
     target = sanitized.get("target", {})
-    summary = str(event.get("summary", ""))[:1000]
+    full_summary = str(event.get("summary", ""))
+    summary = full_summary[:1000]
     if find_sensitive_data({"summary": summary}):
         summary = "[REDACTED:sensitive_preview]"
+    blocked_contexts: List[str] = []
+    search_from = 0
+    while len(blocked_contexts) < MAX_BLOCKED_CONTEXTS:
+        position = full_summary.find(HIGH_ENTROPY_REDACTION, search_from)
+        if position < 0:
+            break
+        start = max(0, position - BLOCKED_CONTEXT_RADIUS)
+        end = min(
+            len(full_summary),
+            position + len(HIGH_ENTROPY_REDACTION) + BLOCKED_CONTEXT_RADIUS,
+        )
+        context, _ = kibana_sanitizer.redact_free_text(
+            full_summary[start:end], "blocked_preview.context"
+        )
+        context = " ".join(context.split())
+        if find_sensitive_data({"context": context}):
+            context = "[REDACTED:sensitive_preview]"
+        blocked_contexts.append(context)
+        search_from = position + len(HIGH_ENTROPY_REDACTION)
     findings = sanitized.get("sanitization", {}).get("findings", [])
     blocked_categories = sorted(
         {
@@ -280,6 +303,7 @@ def _blocked_error_preview(sanitized: Dict[str, Any]) -> Dict[str, Any]:
         "business_method": target.get("business_method", ""),
         "blocked_categories": blocked_categories,
         "sanitized_summary": summary,
+        "blocked_contexts": blocked_contexts,
     }
 
 

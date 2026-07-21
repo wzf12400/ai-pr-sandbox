@@ -236,6 +236,16 @@ def _is_allowlisted_code_identifier(text: str, match: re.Match[str]) -> bool:
     return False
 
 
+def _is_safe_route_segment(segment: str) -> bool:
+    if not SAFE_ROUTE_SEGMENT_PATTERN.fullmatch(segment):
+        return False
+    if len(segment) < 20:
+        return True
+    is_hex = bool(re.fullmatch(r"[A-Fa-f0-9]+", segment))
+    threshold = 3.2 if is_hex and len(segment) >= 32 else 4.0
+    return _entropy(segment) < threshold
+
+
 def _minimize_request_urls(text: str, path: str) -> Tuple[str, List[Finding]]:
     findings: List[Finding] = []
 
@@ -260,10 +270,7 @@ def _minimize_request_urls(text: str, path: str) -> Tuple[str, List[Finding]]:
         for segment in parsed.path.split("/"):
             if not segment:
                 continue
-            if (
-                SAFE_ROUTE_SEGMENT_PATTERN.fullmatch(segment)
-                and (len(segment) < 20 or _entropy(segment) < 4.0)
-            ):
+            if _is_safe_route_segment(segment):
                 safe_segments.append(segment)
             else:
                 safe_segments.append("[REDACTED:path_segment]")
