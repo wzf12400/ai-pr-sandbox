@@ -166,6 +166,10 @@ gh auth login
 the repository. `AI_API_KEY` may still be supplied as an environment variable
 for non-interactive automation.
 
+For gateways that implement the older Chat Completions parameter names, set
+`AI_API_MODE=compatible`. This sends `max_tokens` and JSON object mode; the
+same strict local schema and evidence validation still run before publication.
+
 The command rejects blocked AI output and prevents publication when credentials
 were present in the source, even after redaction. It never uses model output as
 authorization to modify code.

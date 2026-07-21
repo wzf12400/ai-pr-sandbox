@@ -184,6 +184,7 @@ class GatewayConfig:
     safety_identifier: str = field(repr=False)
     timeout_seconds: float
     max_completion_tokens: int
+    api_mode: str
 
     @classmethod
     def from_env(cls) -> "GatewayConfig":
@@ -192,6 +193,7 @@ class GatewayConfig:
         model = os.environ.get("AI_MODEL", "ailemac/gpt-5-mini").strip()
         review_model = os.environ.get("AI_REVIEW_MODEL", model).strip()
         safety_identifier = os.environ.get("AI_SAFETY_IDENTIFIER", "").strip()
+        api_mode = os.environ.get("AI_API_MODE", "strict").strip().lower()
         if not base_url:
             raise ValueError("AI_BASE_URL is required")
         if not base_url.startswith("https://"):
@@ -200,6 +202,8 @@ class GatewayConfig:
             raise ValueError("AI_API_KEY is required")
         if not model or not review_model:
             raise ValueError("AI_MODEL and AI_REVIEW_MODEL must not be empty")
+        if api_mode not in {"strict", "compatible"}:
+            raise ValueError("AI_API_MODE must be strict or compatible")
         try:
             timeout_seconds = float(os.environ.get("AI_TIMEOUT_SECONDS", "60"))
             max_tokens = int(os.environ.get("AI_MAX_COMPLETION_TOKENS", "1800"))
@@ -217,6 +221,7 @@ class GatewayConfig:
             safety_identifier=safety_identifier,
             timeout_seconds=timeout_seconds,
             max_completion_tokens=max_tokens,
+            api_mode=api_mode,
         )
 
 
@@ -242,13 +247,17 @@ class OpenAICompatibleChatProvider:
                     "content": json.dumps(user_payload, ensure_ascii=False, separators=(",", ":")),
                 },
             ],
-            "max_completion_tokens": self.config.max_completion_tokens,
             "stream": False,
-            "response_format": {
+        }
+        if self.config.api_mode == "compatible":
+            request_payload["max_tokens"] = self.config.max_completion_tokens
+            request_payload["response_format"] = {"type": "json_object"}
+        else:
+            request_payload["max_completion_tokens"] = self.config.max_completion_tokens
+            request_payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {"name": schema_name, "strict": True, "schema": schema},
-            },
-        }
+            }
         if self.config.safety_identifier:
             request_payload["safety_identifier"] = self.config.safety_identifier
         encoded = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
@@ -266,7 +275,9 @@ class OpenAICompatibleChatProvider:
             with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
                 raw_response = response.read()
         except urllib.error.HTTPError as exc:
-            raise ValueError(f"AI gateway returned HTTP {exc.code}") from exc
+            detail = _safe_gateway_error_detail(exc)
+            suffix = f": {detail}" if detail else ""
+            raise ValueError(f"AI gateway returned HTTP {exc.code}{suffix}") from exc
         except urllib.error.URLError as exc:
             raise ValueError("AI gateway request failed") from exc
         try:
@@ -285,6 +296,23 @@ class OpenAICompatibleChatProvider:
             if isinstance(response_payload.get("usage"), dict)
             else {},
         )
+
+
+def _safe_gateway_error_detail(exc: urllib.error.HTTPError) -> str:
+    try:
+        payload = json.loads(exc.read(4096).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    candidates = []
+    if isinstance(error, dict):
+        candidates.extend([error.get("message"), error.get("type"), error.get("code")])
+    candidates.extend([payload.get("detail"), payload.get("message")])
+    detail = next((item.strip() for item in candidates if isinstance(item, str) and item.strip()), "")
+    detail = " ".join(detail.split())[:500]
+    return "" if find_sensitive_data(detail) else detail
 
 
 def _text(value: Any) -> str:
