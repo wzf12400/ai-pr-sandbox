@@ -131,3 +131,67 @@ publication and AI implementation disabled.
 The live public-project AI trial uses SymPy Issue #20567. See
 [`docs/ai-issue-trial.md`](docs/ai-issue-trial.md) for its safety boundary,
 observed blocked iterations, final guarded result, and limitations.
+
+## Create an Issue from natural language and a log
+
+The terminal entry accepts a UTF-8 description plus one raw Kibana hit or
+plain-text log. It sanitizes and minimizes both inputs, runs the guarded AI
+generator and reviewer, and writes local audit artifacts under
+`.issue-entry-output/`:
+
+```bash
+export LOG_SANITIZER_HMAC_KEY="<local-key-at-least-32-bytes>"
+export AI_BASE_URL="https://example.invalid/api/v1"
+export AI_MODEL="ailemac/gpt-5-mini"
+
+./bin/issue-entry \
+  --description-file examples/natural_request.txt \
+  --log examples/kibana_error_raw.json \
+  --prompt-api-key
+```
+
+Review the generated `issue.md`. To create the Issue in the repository, first
+authenticate `gh`, then make the human publication decision explicit:
+
+```bash
+gh auth login
+./bin/issue-entry \
+  --description-file examples/natural_request.txt \
+  --log examples/kibana_error_raw.json \
+  --repository wzf12400/ai-pr-sandbox \
+  --prompt-api-key --publish --confirm
+```
+
+`--prompt-api-key` reads the secret without echoing it and does not save it to
+the repository. `AI_API_KEY` may still be supplied as an environment variable
+for non-interactive automation.
+
+For gateways that implement the older Chat Completions parameter names, set
+`AI_API_MODE=compatible`. This sends `max_tokens` and JSON object mode; the
+same strict local schema and evidence validation still run before publication.
+
+The command rejects blocked AI output and prevents publication when credentials
+were present in the source, even after redaction. It never uses model output as
+authorization to modify code.
+
+## Pull error candidates from OpenSearch Dashboards
+
+`bin/kibana-to-issues` accepts a complete Discover URL, resolves its data view,
+and performs a bounded read-only error search. The default run only writes
+sanitized local candidates:
+
+```bash
+export LOG_SANITIZER_HMAC_KEY="<stable-local-secret-at-least-32-bytes>"
+
+./bin/kibana-to-issues \
+  --discover-url '<full-discover-url>' \
+  --prompt-password
+```
+
+Add `--generate --prompt-api-key` for locally reviewed AI drafts. Publishing
+also requires `--publish --confirm`, a GitHub repository, and a maximum of
+three candidates per run. Raw OpenSearch responses, passwords, and AI keys are
+not persisted.
+
+See [`docs/kibana-connector.md`](docs/kibana-connector.md) for access
+requirements, the complete commands, safety gates, and current phase boundary.

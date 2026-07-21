@@ -1,4 +1,4 @@
 interface:
   display_name: "Company Issue Generator"
   short_description: "Generate evidence-grounded company Issue drafts"
-  default_prompt: "Generate a company-safe Issue draft from the provided sanitized evidence, preserve unknown fields, and report any human context still required."
+  default_prompt: "Generate a company-safe Issue draft from the provided sanitized evidence, preserve unknown fields, report required human context, and stop before downstream code work."

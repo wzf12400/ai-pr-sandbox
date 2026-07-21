@@ -10,3 +10,6 @@ drafts/
 sanitized/
 .trial-data/
 .trial-repos/
+.issue-entry-output/
+.kibana-issue-output/
+.issue-entry-state/

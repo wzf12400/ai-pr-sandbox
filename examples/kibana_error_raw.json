@@ -1,0 +1,18 @@
+{
+  "_index": "logstash-2099.01.01",
+  "_id": "synthetic-error-event-0001",
+  "_source": {
+    "@timestamp": "2099-01-01T01:02:03.004Z",
+    "stream": "stdout",
+    "message": "[2099-01-01 09:02:03.004] [TID: synthetic-trace-0001] ERROR [http-worker-1] com.example.checkout.controller.OrderController:87 - request failed: com.example.checkout.service.OrderService: createOrder: IllegalStateException: inventory unavailable",
+    "kubernetes": {
+      "namespace_name": "demo-checkout",
+      "container_name": "demo-checkout",
+      "container_image": "registry.example.invalid/demo-checkout:20990101",
+      "labels": {
+        "app_kubernetes_io/name": "demo-checkout",
+        "topology_kubernetes_io/region": "test-region"
+      }
+    }
+  }
+}

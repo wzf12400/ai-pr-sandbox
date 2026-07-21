@@ -1,5 +1,7 @@
+import io
 import json
 import os
+import urllib.error
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -8,6 +10,7 @@ from src.ai_issue_generator import (
     DRAFT_SCHEMA_VERSION,
     Completion,
     GatewayConfig,
+    OpenAICompatibleChatProvider,
     compact_evidence,
     generate_issue,
     render_markdown,
@@ -272,6 +275,74 @@ class AIIssueGeneratorTest(unittest.TestCase):
 
         self.assertNotIn("secret-test-key", rendered)
         self.assertNotIn("private-user-id", rendered)
+
+    def test_gateway_compatible_mode_is_explicit(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AI_BASE_URL": "https://example.test/api/v1",
+                "AI_API_KEY": "test-key",
+                "AI_API_MODE": "compatible",
+            },
+            clear=True,
+        ):
+            config = GatewayConfig.from_env()
+
+        self.assertEqual(config.api_mode, "compatible")
+
+    @patch("src.ai_issue_generator.urllib.request.urlopen")
+    def test_compatible_mode_uses_legacy_chat_completion_fields(self, urlopen):
+        response = urlopen.return_value.__enter__.return_value
+        response.read.return_value = json.dumps(
+            {
+                "choices": [{"message": {"content": json.dumps(valid_draft())}}],
+                "model": "demo",
+            }
+        ).encode()
+        with patch.dict(
+            os.environ,
+            {
+                "AI_BASE_URL": "https://example.test/api/v1",
+                "AI_API_KEY": "test-key",
+                "AI_API_MODE": "compatible",
+            },
+            clear=True,
+        ):
+            provider = OpenAICompatibleChatProvider(GatewayConfig.from_env())
+            provider.complete(
+                system_prompt="Return JSON.",
+                user_payload={"safe": True},
+                schema_name="issue",
+                schema={},
+            )
+
+        request_body = json.loads(urlopen.call_args.args[0].data)
+        self.assertIn("max_tokens", request_body)
+        self.assertNotIn("max_completion_tokens", request_body)
+        self.assertEqual(request_body["response_format"], {"type": "json_object"})
+
+    @patch("src.ai_issue_generator.urllib.request.urlopen")
+    def test_http_error_reports_safe_gateway_message(self, urlopen):
+        urlopen.side_effect = urllib.error.HTTPError(
+            "https://example.test",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"error":{"message":"unsupported model"}}'),
+        )
+        with patch.dict(
+            os.environ,
+            {"AI_BASE_URL": "https://example.test/api/v1", "AI_API_KEY": "test-key"},
+            clear=True,
+        ):
+            provider = OpenAICompatibleChatProvider(GatewayConfig.from_env())
+            with self.assertRaisesRegex(ValueError, "unsupported model"):
+                provider.complete(
+                    system_prompt="Return JSON.",
+                    user_payload={"safe": True},
+                    schema_name="issue",
+                    schema={},
+                )
 
     def test_result_writes_no_raw_public_issue(self):
         result = generate_issue(
