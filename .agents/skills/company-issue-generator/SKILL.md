@@ -21,6 +21,16 @@ Use this repository's deterministic intake, sanitization, AI review, and code-lo
 
 Use `.github/ISSUE_TEMPLATE/feature.yml` as the canonical human-facing field contract. Read [references/upstream-adaptation.md](references/upstream-adaptation.md) only when auditing the Microsoft source or revising the writing format.
 
+For a natural-language description plus one log file, prefer the repository entry point:
+
+```bash
+./bin/issue-entry \
+  --description-file REQUEST.txt \
+  --log LOG.json
+```
+
+Inspect the generated Markdown before publication. A separately authorized human can add `--repository OWNER/REPO --publish --confirm`; the command still rejects blocked output and inputs that require credential security review.
+
 ## Select The Input Path
 
 ### Raw Kibana Or Elasticsearch Hit

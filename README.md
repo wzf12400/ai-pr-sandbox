@@ -131,3 +131,37 @@ publication and AI implementation disabled.
 The live public-project AI trial uses SymPy Issue #20567. See
 [`docs/ai-issue-trial.md`](docs/ai-issue-trial.md) for its safety boundary,
 observed blocked iterations, final guarded result, and limitations.
+
+## Create an Issue from natural language and a log
+
+The terminal entry accepts a UTF-8 description plus one raw Kibana hit or
+plain-text log. It sanitizes and minimizes both inputs, runs the guarded AI
+generator and reviewer, and writes local audit artifacts under
+`.issue-entry-output/`:
+
+```bash
+export LOG_SANITIZER_HMAC_KEY="<local-key-at-least-32-bytes>"
+export AI_BASE_URL="https://example.invalid/api/v1"
+export AI_API_KEY="<local-secret>"
+export AI_MODEL="ailemac/gpt-5-mini"
+
+./bin/issue-entry \
+  --description-file examples/natural_request.txt \
+  --log examples/kibana_error_raw.json
+```
+
+Review the generated `issue.md`. To create the Issue in the repository, first
+authenticate `gh`, then make the human publication decision explicit:
+
+```bash
+gh auth login
+./bin/issue-entry \
+  --description-file examples/natural_request.txt \
+  --log examples/kibana_error_raw.json \
+  --repository wzf12400/ai-pr-sandbox \
+  --publish --confirm
+```
+
+The command rejects blocked AI output and prevents publication when credentials
+were present in the source, even after redaction. It never uses model output as
+authorization to modify code.
