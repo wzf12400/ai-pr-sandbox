@@ -169,6 +169,8 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(summary["mode"], "dry_run")
         self.assertEqual(summary["candidates"][0]["status"], "sanitized")
+        self.assertEqual(summary["selection"]["parsed_levels"], {"ERROR": 1})
+        self.assertEqual(summary["selection"]["accepted"], 1)
         self.assertNotIn("raw-document-id", event_text)
         self.assertNotIn("password", persisted_text)
         self.assertFalse(state.exists())

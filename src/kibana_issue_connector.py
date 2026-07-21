@@ -308,17 +308,45 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         candidates: List[Dict[str, Any]] = []
         candidate_refs = set()
+        selection: Dict[str, Any] = {
+            "scanned_hits": 0,
+            "parsed_levels": {},
+            "sanitization_statuses": {},
+            "accepted": 0,
+            "rejected_not_error": 0,
+            "rejected_blocked": 0,
+            "rejected_already_published": 0,
+            "rejected_duplicate_in_run": 0,
+            "rejected_missing_event_ref": 0,
+        }
         for hit in hits:
             sanitized = kibana_sanitizer.sanitize_hit(hit, raw_key)
+            selection["scanned_hits"] += 1
+            level = str(sanitized.get("event", {}).get("level", "UNKNOWN"))
+            status = str(sanitized.get("sanitization", {}).get("status", "unknown"))
+            selection["parsed_levels"][level] = selection["parsed_levels"].get(level, 0) + 1
+            selection["sanitization_statuses"][status] = (
+                selection["sanitization_statuses"].get(status, 0) + 1
+            )
             event_ref = str(sanitized.get("source", {}).get("event_ref", ""))
-            if (
-                sanitized.get("event", {}).get("is_issue_candidate")
-                and event_ref
-                and event_ref not in seen
-                and event_ref not in candidate_refs
-            ):
-                candidates.append(sanitized)
-                candidate_refs.add(event_ref)
+            if not sanitized.get("sanitization", {}).get("ai_allowed", False):
+                selection["rejected_blocked"] += 1
+                continue
+            if not sanitized.get("event", {}).get("is_error", False):
+                selection["rejected_not_error"] += 1
+                continue
+            if not event_ref:
+                selection["rejected_missing_event_ref"] += 1
+                continue
+            if event_ref in seen:
+                selection["rejected_already_published"] += 1
+                continue
+            if event_ref in candidate_refs:
+                selection["rejected_duplicate_in_run"] += 1
+                continue
+            candidates.append(sanitized)
+            candidate_refs.add(event_ref)
+            selection["accepted"] += 1
             if len(candidates) >= args.max_candidates:
                 break
 
@@ -342,6 +370,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "candidate_limit": args.max_candidates,
             },
             "mode": "publish" if args.publish else "generate" if args.generate else "dry_run",
+            "selection": selection,
             "candidates": [],
         }
         for position, sanitized in enumerate(candidates, start=1):

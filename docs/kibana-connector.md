@@ -52,6 +52,9 @@ The command writes a summary and sanitized candidate events under
 `.kibana-issue-output/`. It does not call AI or GitHub.
 When no `OPENSEARCH_USERNAME` is set, the command prompts for the username and
 then reads the password without echoing it.
+The summary includes aggregate selection diagnostics such as parsed log levels,
+blocked events, non-error events, and duplicates. It never includes rejected
+raw log messages.
 
 ## 2. Generate local Issue drafts
 
