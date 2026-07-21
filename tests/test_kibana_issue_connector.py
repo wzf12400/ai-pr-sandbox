@@ -13,6 +13,7 @@ from src.kibana_issue_connector import (
     DashboardCredentials,
     DiscoverTarget,
     OpenSearchDashboardsClient,
+    _credentials,
     main,
     parse_discover_url,
 )
@@ -78,6 +79,17 @@ class FakeOpener:
 
 
 class KibanaIssueConnectorTest(unittest.TestCase):
+    @mock.patch("src.kibana_issue_connector.getpass.getpass", return_value="password")
+    @mock.patch("builtins.input", return_value="reader")
+    def test_credentials_can_be_prompted_without_environment_storage(self, input_prompt, password_prompt):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            credentials = _credentials(True, "")
+
+        self.assertEqual(credentials.username, "reader")
+        self.assertNotIn("password", repr(credentials))
+        input_prompt.assert_called_once_with("OpenSearch username: ")
+        password_prompt.assert_called_once_with("OpenSearch password: ")
+
     def test_parses_discover_target(self):
         target = parse_discover_url(DISCOVER_URL)
 

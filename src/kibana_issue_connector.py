@@ -221,6 +221,8 @@ class OpenSearchDashboardsClient:
 def _credentials(prompt_password: bool, username: str) -> DashboardCredentials:
     resolved_username = username.strip() or os.environ.get(USERNAME_ENV, "").strip()
     password = os.environ.get(PASSWORD_ENV, "")
+    if prompt_password and not resolved_username:
+        resolved_username = input("OpenSearch username: ").strip()
     if prompt_password and not password:
         password = getpass.getpass("OpenSearch password: ")
     if not resolved_username or not password:

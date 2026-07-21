@@ -182,7 +182,6 @@ sanitized local candidates:
 
 ```bash
 export LOG_SANITIZER_HMAC_KEY="<stable-local-secret-at-least-32-bytes>"
-export OPENSEARCH_USERNAME="<read-only-user>"
 
 ./bin/kibana-to-issues \
   --discover-url '<full-discover-url>' \

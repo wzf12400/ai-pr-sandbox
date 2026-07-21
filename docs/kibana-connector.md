@@ -42,7 +42,6 @@ key changes event references and disables cross-run deduplication.
 
 ```bash
 export LOG_SANITIZER_HMAC_KEY="<stable-local-secret-at-least-32-bytes>"
-export OPENSEARCH_USERNAME="<read-only-user>"
 
 ./bin/kibana-to-issues \
   --discover-url '<full-discover-url>' \
@@ -51,6 +50,8 @@ export OPENSEARCH_USERNAME="<read-only-user>"
 
 The command writes a summary and sanitized candidate events under
 `.kibana-issue-output/`. It does not call AI or GitHub.
+When no `OPENSEARCH_USERNAME` is set, the command prompts for the username and
+then reads the password without echoing it.
 
 ## 2. Generate local Issue drafts
 
