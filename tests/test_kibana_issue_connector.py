@@ -13,10 +13,12 @@ from src.kibana_issue_connector import (
     DashboardCredentials,
     DiscoverTarget,
     OpenSearchDashboardsClient,
+    _blocked_error_preview,
     _credentials,
     main,
     parse_discover_url,
 )
+from src.kibana_sanitizer import sanitize_hit
 
 
 DISCOVER_URL = (
@@ -89,6 +91,22 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertNotIn("password", repr(credentials))
         input_prompt.assert_called_once_with("OpenSearch username: ")
         password_prompt.assert_called_once_with("OpenSearch password: ")
+
+    def test_blocked_error_preview_is_sanitized_again(self):
+        hit = error_hit()
+        hit["_source"]["message"] += (
+            " mystery=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 "
+            "contact=person@example.test"
+        )
+        sanitized = sanitize_hit(hit, HMAC_KEY.encode())
+
+        preview = _blocked_error_preview(sanitized)
+
+        encoded = json.dumps(preview)
+        self.assertIn("unclassified_high_entropy", preview["blocked_categories"])
+        self.assertEqual(preview["sanitized_summary"], "[REDACTED:sensitive_preview]")
+        self.assertNotIn("AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", encoded)
+        self.assertNotIn("person@example.test", encoded)
 
     def test_parses_discover_target(self):
         target = parse_discover_url(DISCOVER_URL)

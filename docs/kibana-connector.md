@@ -54,7 +54,10 @@ When no `OPENSEARCH_USERNAME` is set, the command prompts for the username and
 then reads the password without echoing it.
 The summary includes aggregate selection diagnostics such as parsed log levels,
 blocked events, non-error events, and duplicates. It never includes rejected
-raw log messages.
+raw log messages. For blocked `ERROR` or `FATAL` events, it may include up to
+ten minimized previews containing only HMAC event references, timestamps,
+software object fields, blocked categories, and a twice-scanned sanitized
+summary.
 
 ## 2. Generate local Issue drafts
 

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from src import ai_issue_generator, kibana_sanitizer
 from src.issue_draft import _atomic_write_json
 from src.issue_entry import _gateway_config, _infer_repository, publish_issue
+from src.issue_intake import find_sensitive_data
 
 
 USERNAME_ENV = "OPENSEARCH_USERNAME"
@@ -28,6 +29,7 @@ TENANT_ENV = "OPENSEARCH_TENANT"
 MAX_CANDIDATES = 20
 MAX_PUBLISH_CANDIDATES = 3
 MAX_FETCH_SIZE = 100
+MAX_BLOCKED_ERROR_PREVIEWS = 10
 DATA_VIEW_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 INDEX_PATTERN = re.compile(r"^[A-Za-z0-9._*,-]{1,500}$")
 RELATIVE_TIME_PATTERN = re.compile(r"^now(?:-\d+[mhdw])?$|^now$")
@@ -248,6 +250,34 @@ def _load_published(path: Path) -> Dict[str, Any]:
     return payload
 
 
+def _blocked_error_preview(sanitized: Dict[str, Any]) -> Dict[str, Any]:
+    event = sanitized.get("event", {})
+    target = sanitized.get("target", {})
+    summary = str(event.get("summary", ""))[:1000]
+    if find_sensitive_data({"summary": summary}):
+        summary = "[REDACTED:sensitive_preview]"
+    findings = sanitized.get("sanitization", {}).get("findings", [])
+    blocked_categories = sorted(
+        {
+            str(item.get("category", "unknown"))
+            for item in findings
+            if isinstance(item, dict) and item.get("action") == "blocked"
+        }
+    )
+    return {
+        "event_ref": sanitized.get("source", {}).get("event_ref", ""),
+        "timestamp": sanitized.get("source", {}).get("timestamp", ""),
+        "service": target.get("service", ""),
+        "level": event.get("level", "UNKNOWN"),
+        "logger_class": target.get("logger_class", ""),
+        "logger_line": target.get("logger_line"),
+        "business_class": target.get("business_class", ""),
+        "business_method": target.get("business_method", ""),
+        "blocked_categories": blocked_categories,
+        "sanitized_summary": summary,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Fetch bounded OpenSearch error candidates and optionally create reviewed Issues."
@@ -318,6 +348,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "rejected_already_published": 0,
             "rejected_duplicate_in_run": 0,
             "rejected_missing_event_ref": 0,
+            "blocked_error_previews": [],
         }
         for hit in hits:
             sanitized = kibana_sanitizer.sanitize_hit(hit, raw_key)
@@ -331,6 +362,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             event_ref = str(sanitized.get("source", {}).get("event_ref", ""))
             if not sanitized.get("sanitization", {}).get("ai_allowed", False):
                 selection["rejected_blocked"] += 1
+                if level in {"ERROR", "FATAL"} and len(
+                    selection["blocked_error_previews"]
+                ) < MAX_BLOCKED_ERROR_PREVIEWS:
+                    selection["blocked_error_previews"].append(
+                        _blocked_error_preview(sanitized)
+                    )
                 continue
             if not sanitized.get("event", {}).get("is_error", False):
                 selection["rejected_not_error"] += 1
