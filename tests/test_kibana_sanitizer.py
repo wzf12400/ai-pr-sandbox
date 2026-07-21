@@ -181,6 +181,10 @@ class KibanaSanitizerTest(unittest.TestCase):
             "at com.example.command.SensitiveTextCommand.execute"
             "(SensitiveTextCommand.java:119)",
             "class path resource [com/example/VeryLongAssetResourceMapper.xml]",
+            "at com.example.aop.OperationPlatformLogAspect.saveUserOperateLog"
+            "(OperationPlatformLogAspect.java:93)",
+            "at sun.reflect.DelegatingMethodAccessorImpl.invoke"
+            "(DelegatingMethodAccessorImpl.java:43)",
         )
         for sample in samples:
             with self.subTest(sample=sample):
@@ -188,6 +192,14 @@ class KibanaSanitizerTest(unittest.TestCase):
 
                 self.assertEqual(sanitized, sample)
                 self.assertFalse(any(item.action == "blocked" for item in findings))
+
+    def test_existing_redaction_marker_is_not_redacted_again(self) -> None:
+        marker = "[REDACTED:unclassified_high_entropy]"
+
+        sanitized, findings = redact_free_text(f"before {marker} after")
+
+        self.assertEqual(sanitized, f"before {marker} after")
+        self.assertFalse(any(item.action == "blocked" for item in findings))
 
     def test_sql_statement_is_removed_before_entropy_detection(self) -> None:
         statement = (

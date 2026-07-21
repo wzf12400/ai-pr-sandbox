@@ -119,6 +119,7 @@ class KibanaIssueConnectorTest(unittest.TestCase):
 
         self.assertEqual(len(preview["blocked_contexts"]), 1)
         self.assertIn("[REDACTED:unclassified_high_entropy]", encoded)
+        self.assertNotIn("[REDACTED:[REDACTED:", encoded)
         self.assertNotIn(secret, encoded)
 
     def test_parses_discover_target(self):

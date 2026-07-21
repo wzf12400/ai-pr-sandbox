@@ -230,6 +230,8 @@ def _is_allowlisted_code_identifier(text: str, match: re.Match[str]) -> bool:
     if candidate.endswith(("Exception", "Error")):
         if re.search(r"(?:[A-Za-z_$][\w$]*\.)+$", prefix) and re.match(r"\s*:", suffix):
             return True
+    if prefix.endswith("(") and re.match(r"\.java(?::\d+)?\)", suffix):
+        return True
     if re.search(r"\bat\s+(?:[A-Za-z_$][\w$]*\.)+$", prefix):
         if re.match(r"(?:\.[A-Za-z_$][\w$]*)?\([^\r\n)]*\)", suffix):
             return True
@@ -340,6 +342,10 @@ def _redact_unclassified_entropy(text: str, path: str) -> Tuple[str, List[Findin
 
     def replace(match: re.Match[str]) -> str:
         candidate = match.group(0)
+        redaction_start = text.rfind("[REDACTED:", 0, match.start())
+        redaction_end = text.rfind("]", 0, match.start())
+        if redaction_start > redaction_end:
+            return candidate
         context_key = _preceding_assignment_key(text, match.start())
         if context_key in HIGH_ENTROPY_CONTEXT_ALLOWLIST:
             return candidate
