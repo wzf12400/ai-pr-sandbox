@@ -1,11 +1,12 @@
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from src.issue_entry import compose_evidence, publish_issue
+from src.issue_entry import _gateway_config, compose_evidence, publish_issue
 
 
 HMAC_KEY = b"0123456789abcdef0123456789abcdef"
@@ -60,6 +61,19 @@ class IssueEntryTest(unittest.TestCase):
         serialized = json.dumps(evidence)
         self.assertNotIn("secret-demo-token", serialized)
         self.assertTrue(evidence["safety"]["security_review_required"])
+
+    @mock.patch("src.issue_entry.ai_issue_generator.GatewayConfig.from_env")
+    @mock.patch("src.issue_entry.getpass.getpass", return_value="temporary-secret")
+    def test_api_key_can_be_prompted_without_persisting_in_environment(self, getpass, from_env):
+        sentinel = object()
+        from_env.return_value = sentinel
+
+        with mock.patch.dict("src.issue_entry.os.environ", {}, clear=True):
+            self.assertIs(_gateway_config(True), sentinel)
+            self.assertNotIn("AI_API_KEY", os.environ)
+
+        getpass.assert_called_once_with("AI API key: ")
+        self.assertEqual(from_env.call_count, 1)
 
     @mock.patch("src.issue_entry.subprocess.run")
     def test_publish_uses_validated_markdown_and_title(self, run):

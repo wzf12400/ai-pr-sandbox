@@ -142,12 +142,12 @@ generator and reviewer, and writes local audit artifacts under
 ```bash
 export LOG_SANITIZER_HMAC_KEY="<local-key-at-least-32-bytes>"
 export AI_BASE_URL="https://example.invalid/api/v1"
-export AI_API_KEY="<local-secret>"
 export AI_MODEL="ailemac/gpt-5-mini"
 
 ./bin/issue-entry \
   --description-file examples/natural_request.txt \
-  --log examples/kibana_error_raw.json
+  --log examples/kibana_error_raw.json \
+  --prompt-api-key
 ```
 
 Review the generated `issue.md`. To create the Issue in the repository, first
@@ -159,8 +159,12 @@ gh auth login
   --description-file examples/natural_request.txt \
   --log examples/kibana_error_raw.json \
   --repository wzf12400/ai-pr-sandbox \
-  --publish --confirm
+  --prompt-api-key --publish --confirm
 ```
+
+`--prompt-api-key` reads the secret without echoing it and does not save it to
+the repository. `AI_API_KEY` may still be supplied as an environment variable
+for non-interactive automation.
 
 The command rejects blocked AI output and prevents publication when credentials
 were present in the source, even after redaction. It never uses model output as

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
@@ -175,6 +176,22 @@ def _description(args: argparse.Namespace) -> str:
     return args.description or ""
 
 
+def _gateway_config(prompt_api_key: bool) -> ai_issue_generator.GatewayConfig:
+    existing_key = os.environ.get("AI_API_KEY")
+    injected_key = False
+    if prompt_api_key and not existing_key:
+        api_key = getpass.getpass("AI API key: ")
+        if not api_key:
+            raise ValueError("AI API key is required")
+        os.environ["AI_API_KEY"] = api_key
+        injected_key = True
+    try:
+        return ai_issue_generator.GatewayConfig.from_env()
+    finally:
+        if injected_key:
+            os.environ.pop("AI_API_KEY", None)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate a reviewed Issue from natural language and one log."
@@ -192,6 +209,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confirm human review and publication; required with --publish.",
     )
     parser.add_argument("--repository", help="GitHub owner/name; defaults to the origin remote.")
+    parser.add_argument(
+        "--prompt-api-key",
+        action="store_true",
+        help="Read AI_API_KEY securely from the terminal when it is not already set.",
+    )
     return parser
 
 
@@ -220,7 +242,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         evidence = compose_evidence(_description(args), args.log, raw_key)
         _atomic_write_json(evidence_path, evidence)
 
-        config = ai_issue_generator.GatewayConfig.from_env()
+        config = _gateway_config(args.prompt_api_key)
         result = ai_issue_generator.generate_issue(
             evidence,
             ai_issue_generator.OpenAICompatibleChatProvider(config, config.model),
