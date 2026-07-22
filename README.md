@@ -98,6 +98,26 @@ Issue matching; ambiguous and unknown drafts remain unpublished. See
 [`docs/repository-resolution-design.md`](docs/repository-resolution-design.md)
 for the design, versioned JSON Schemas, and company-neutral examples.
 
+Resolve one locally validated AI Issue result against a reviewed repository
+scope:
+
+```bash
+./bin/resolve-issue-repository reports/ai-issue.json \
+  --scope .issue-entry-state/repository-search-scope.json \
+  --output reports/repository-resolution.json
+```
+
+The initial read-only adapter uses the authenticated GitHub CLI and searches
+only grounded qualified-class and class/method evidence. It enforces one total
+query budget across the enabled scope, keeps GitHub file paths in memory only,
+and emits `resolved`, `ambiguous`, `unknown`, or `blocked`. It does not create
+or update Issues, and the existing-Issue matcher remains unimplemented.
+
+For newly created synthetic repositories that have not entered GitHub's code
+search index, `--adapter github-tree-probe` provides an explicit test-only
+path. It fails closed above 1 MB or 500 tree entries, reads only matching Java
+files up to 256 KB, and is not the default for real repositories.
+
 The first real-project benchmark uses SymPy Issue #20567 and its fixing PR.
 See [`docs/real-project-trial.md`](docs/real-project-trial.md) for the pinned
 inputs, safety boundary, reproduction commands, and measured result. The

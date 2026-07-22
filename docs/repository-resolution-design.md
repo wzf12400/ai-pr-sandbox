@@ -211,3 +211,28 @@ discovered entries must pass the same schema and authorization checks.
 
 No scheduler, watcher, or automatic code modification is part of this design
 milestone.
+
+## Current implementation
+
+`bin/resolve-issue-repository` now implements the first read-only slice:
+
+- strict loading of `repository-search-scope/v1` and eligible, locally
+  validated `ai-issue-generation/v1` results;
+- grounded extraction of fully qualified classes and class/method pairs;
+- bounded GitHub CLI code search within enabled repositories only;
+- same-file in-memory verification for class/method pairs;
+- deterministic scoring and fail-closed result states;
+- repository-level evidence references without persisted source paths or
+  snippets.
+
+The default adapter is `github-code-search`. A separate
+`github-tree-probe` adapter exists only for newly created synthetic repositories
+that have not entered GitHub's asynchronous code-search index. It fails closed
+for repositories above 1 MB, trees above 500 entries, truncated trees, archived
+repositories, or matching Java files above 256 KB. It is not a production
+large-repository search strategy.
+
+Module/package, interface/business-object, service, and repository-metadata
+families are not yet implemented. Target-repository existing-Issue matching is
+also not implemented, and resolver output is not connected to Issue
+publication.
