@@ -1,4 +1,4 @@
-"""Turn natural-language context and one log into a reviewed local Issue, then optionally publish it."""
+"""Turn natural language and an optional log into a reviewed local Issue."""
 
 from __future__ import annotations
 
@@ -21,6 +21,10 @@ from src.issue_draft import _atomic_write_json
 MAX_DESCRIPTION_CHARS = 8_000
 MAX_LOG_BYTES = 2_000_000
 REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+QUALIFIED_METHOD_PATTERN = re.compile(
+    r"\b((?:[a-z_][A-Za-z0-9_$]*\.){2,}[A-Z][A-Za-z0-9_$]*)"
+    r"\.([a-z_$][A-Za-z0-9_$]{1,127})\b"
+)
 
 
 def _load_log(path: Path) -> Dict[str, Any]:
@@ -44,7 +48,11 @@ def _load_log(path: Path) -> Dict[str, Any]:
     }
 
 
-def compose_evidence(description: str, log_path: Path, hmac_key: bytes) -> Dict[str, Any]:
+def compose_evidence(
+    description: str,
+    log_path: Optional[Path] = None,
+    hmac_key: bytes = b"",
+) -> Dict[str, Any]:
     description = description.strip()
     if not description:
         raise ValueError("natural-language description is required")
@@ -58,11 +66,6 @@ def compose_evidence(description: str, log_path: Path, hmac_key: bytes) -> Dict[
     if any(finding.action == "blocked" for finding in description_findings):
         raise ValueError("description contains unclassified high-entropy data")
 
-    sanitized_log = kibana_sanitizer.sanitize_hit(_load_log(log_path), hmac_key)
-    sanitization = sanitized_log["sanitization"]
-    if not sanitization.get("ai_allowed", False):
-        raise ValueError("log sanitization blocked AI processing")
-
     sensitive_categories = {
         "password",
         "token",
@@ -73,9 +76,44 @@ def compose_evidence(description: str, log_path: Path, hmac_key: bytes) -> Dict[
         "api_key_candidate",
         "credential",
     }
-    all_categories = {
-        finding.category for finding in description_findings
-    } | set(sanitization.get("removed_categories", []))
+    description_categories = {finding.category for finding in description_findings}
+    facts = {"reported_description": safe_description}
+    qualified_method = QUALIFIED_METHOD_PATTERN.search(safe_description)
+    if qualified_method:
+        facts["qualified_class"] = qualified_method.group(1)
+        facts["code_method"] = qualified_method.group(2)
+    if log_path is None:
+        fallback_ref = hashlib.sha256(safe_description.encode("utf-8")).hexdigest()[:16]
+        return {
+            "schema_version": ai_issue_generator.EVIDENCE_SCHEMA_VERSION,
+            "source": {
+                "type": "natural_language",
+                "reference": f"local_ref:{fallback_ref}",
+                "url": "",
+            },
+            "safety": {
+                "status": "sanitized",
+                "ai_allowed": True,
+                "security_review_required": bool(
+                    description_categories & sensitive_categories
+                ),
+                "redacted_categories": sorted(description_categories),
+            },
+            "facts": facts,
+        }
+
+    if len(hmac_key) < kibana_sanitizer.MIN_HMAC_KEY_BYTES:
+        raise ValueError(
+            f"{kibana_sanitizer.HMAC_KEY_ENV} must contain at least "
+            f"{kibana_sanitizer.MIN_HMAC_KEY_BYTES} bytes when --log is used"
+        )
+    sanitized_log = kibana_sanitizer.sanitize_hit(_load_log(log_path), hmac_key)
+    sanitization = sanitized_log["sanitization"]
+    if not sanitization.get("ai_allowed", False):
+        raise ValueError("log sanitization blocked AI processing")
+    all_categories = description_categories | set(
+        sanitization.get("removed_categories", [])
+    )
     security_review_required = bool(all_categories & sensitive_categories) or bool(
         sanitization.get("security_review_required", False)
     )
@@ -97,9 +135,7 @@ def compose_evidence(description: str, log_path: Path, hmac_key: bytes) -> Dict[
             "security_review_required": security_review_required,
             "redacted_categories": sorted(all_categories),
         },
-        "facts": {
-            "reported_description": safe_description,
-        },
+        "facts": facts,
         "target": sanitized_log.get("target", {}),
         "event": sanitized_log.get("event", {}),
         "runtime": sanitized_log.get("runtime", {}),
@@ -197,12 +233,12 @@ def _gateway_config(prompt_api_key: bool) -> ai_issue_generator.GatewayConfig:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate a reviewed Issue from natural language and one log."
+        description="Generate a reviewed Issue from natural language and an optional log."
     )
     description = parser.add_mutually_exclusive_group(required=True)
     description.add_argument("--description", help="Short natural-language problem description.")
     description.add_argument("--description-file", type=Path, help="UTF-8 description file.")
-    parser.add_argument("--log", type=Path, required=True, help="Kibana hit JSON or plain-text log.")
+    parser.add_argument("--log", type=Path, help="Optional Kibana hit JSON or plain-text log.")
     parser.add_argument("--output-dir", type=Path, default=Path(".issue-entry-output"))
     parser.add_argument("--name", help="Output folder name; defaults to a UTC timestamp.")
     parser.add_argument("--publish", action="store_true", help="Create the reviewed Issue with gh.")
@@ -237,11 +273,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         raw_key = os.environ.get(kibana_sanitizer.HMAC_KEY_ENV, "").encode("utf-8")
-        if len(raw_key) < kibana_sanitizer.MIN_HMAC_KEY_BYTES:
-            raise ValueError(
-                f"{kibana_sanitizer.HMAC_KEY_ENV} must contain at least "
-                f"{kibana_sanitizer.MIN_HMAC_KEY_BYTES} bytes"
-            )
         evidence = compose_evidence(_description(args), args.log, raw_key)
         _atomic_write_json(evidence_path, evidence)
 

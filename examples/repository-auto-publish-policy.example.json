@@ -1,0 +1,15 @@
+{
+  "schema_version": "repository-auto-publish-policy/v1",
+  "policy_id": "example-reviewed-repository-publication",
+  "scope_id": "example-company-code",
+  "scope_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "provider": "github_cli",
+  "max_issues_per_run": 1,
+  "allowed_generation_states": [
+    "ready_for_human_review",
+    "needs_human_context"
+  ],
+  "allowed_adapters": [
+    "github-code-search"
+  ]
+}

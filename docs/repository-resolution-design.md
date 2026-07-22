@@ -233,6 +233,17 @@ repositories, or matching Java files above 256 KB. It is not a production
 large-repository search strategy.
 
 Module/package, interface/business-object, service, and repository-metadata
-families are not yet implemented. Target-repository existing-Issue matching is
-also not implemented, and resolver output is not connected to Issue
-publication.
+families are not yet implemented.
+
+`bin/natural-language-to-issue` now composes natural-language evidence,
+generator/reviewer validation, repository resolution, target-repository Issue
+matching, and deterministic automatic publication approval. Its policy is
+bound to both the reviewed policy bytes and the exact repository-scope bytes.
+It creates at most one Issue per invocation only when every gate passes.
+
+Existing-Issue matching uses the deterministic fingerprint first and bounded
+structured similarity only as a conservative duplicate candidate. Exact or
+possible matches are returned without updating the existing Issue; multiple
+matches block publication. The generated GitHub Issue remains the only entry
+to later code localization, and automatic code modification is still not
+implemented.

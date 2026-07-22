@@ -111,12 +111,49 @@ The initial read-only adapter uses the authenticated GitHub CLI and searches
 only grounded qualified-class and class/method evidence. It enforces one total
 query budget across the enabled scope, keeps GitHub file paths in memory only,
 and emits `resolved`, `ambiguous`, `unknown`, or `blocked`. It does not create
-or update Issues, and the existing-Issue matcher remains unimplemented.
+or update Issues by itself.
 
 For newly created synthetic repositories that have not entered GitHub's code
 search index, `--adapter github-tree-probe` provides an explicit test-only
 path. It fails closed above 1 MB or 500 tree entries, reads only matching Java
 files up to 256 KB, and is not the default for real repositories.
+
+## Run the natural-language to GitHub Issue flow
+
+`bin/natural-language-to-issue` composes the existing AI Issue generator with
+repository resolution, target-repository Issue matching, deterministic policy
+approval, and optional unattended publication. The operator approves the
+scope and policy bytes once by supplying the policy SHA-256 through the
+environment; AI output, Codex, repository names, and the input text cannot
+authorize publication.
+
+The default remains a dry run. After reviewing the scope and policy, run:
+
+```bash
+export REPOSITORY_AUTO_POLICY_SHA256="<reviewed-policy-sha256>"
+
+./bin/natural-language-to-issue \
+  --description 'com.example.routing.SyntheticRoutingController.routeIssue 抛出 SyntheticRoutingException' \
+  --prompt-api-key \
+  --auto-publish
+```
+
+The command uses these local ignored defaults:
+
+- `.issue-entry-state/repository-search-scope.json`
+- `.issue-entry-state/repository-auto-publish-policy.json`
+
+It creates at most one Issue per invocation. Before writing, it requires a
+valid reviewed AI result, no credential-security review, one uniquely resolved
+repository, an allowed adapter, an unchanged policy/scope digest, and no
+ambiguous existing Issue. A deterministic fingerprint prevents a rerun from
+creating a duplicate. Existing Issues are never appended automatically.
+
+Copy
+[`examples/repository-auto-publish-policy.example.json`](examples/repository-auto-publish-policy.example.json)
+when creating a new environment-specific policy. Real repository names and
+approved digests belong only in ignored local configuration or a secret/config
+manager.
 
 The first real-project benchmark uses SymPy Issue #20567 and its fixing PR.
 See [`docs/real-project-trial.md`](docs/real-project-trial.md) for the pinned
