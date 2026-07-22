@@ -1,0 +1,77 @@
+{
+  "schema_version": "repository-resolution/v1",
+  "draft_ref": "draft_ref:example-assistant-error",
+  "input_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "scope_id": "example-company-code",
+  "status": "resolved",
+  "selected_repository": "example-org/assistant-service",
+  "decision": {
+    "policy_version": "repository-resolution-policy/v1",
+    "minimum_resolved_score": 70,
+    "minimum_margin": 20,
+    "minimum_strong_families": 2,
+    "top_score": 90,
+    "runner_up_score": 20,
+    "margin": 70,
+    "reasons": [
+      "one repository passed every resolved threshold",
+      "qualified class and class-method evidence are independent"
+    ]
+  },
+  "candidates": [
+    {
+      "repository": "example-org/assistant-service",
+      "score": 90,
+      "strong_families": 2,
+      "conflicts": [],
+      "evidence": [
+        {
+          "family": "qualified_class",
+          "matched_term": "com.example.assistant.AssistantChatCommand",
+          "source_paths": [
+            "$.draft.object.code_object"
+          ],
+          "ref": "main",
+          "hit_count": 1,
+          "evidence_ref": "search_ref:1111111111111111"
+        },
+        {
+          "family": "class_method",
+          "matched_term": "AssistantChatCommand.execute",
+          "source_paths": [
+            "$.draft.object.code_object",
+            "$.draft.problem.current_behavior"
+          ],
+          "ref": "main",
+          "hit_count": 1,
+          "evidence_ref": "search_ref:2222222222222222"
+        }
+      ]
+    },
+    {
+      "repository": "example-org/catalog-service",
+      "score": 20,
+      "strong_families": 0,
+      "conflicts": [],
+      "evidence": [
+        {
+          "family": "service_identifier",
+          "matched_term": "assistant",
+          "source_paths": [
+            "$.draft.object.service"
+          ],
+          "ref": "main",
+          "hit_count": 2,
+          "evidence_ref": "search_ref:3333333333333333"
+        }
+      ]
+    }
+  ],
+  "search_audit": {
+    "provider": "github",
+    "repositories_enabled": 2,
+    "queries_executed": 3,
+    "candidate_repositories_verified": 2,
+    "raw_source_snippets_persisted": false
+  }
+}

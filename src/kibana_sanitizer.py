@@ -128,6 +128,9 @@ CLIENT_DESCRIPTOR_PATTERN = re.compile(
     r"(?P<application>(?:[A-Za-z0-9_-]+\.){2,}[A-Za-z0-9_.-]+(?:/\d+)?)\s+"
     r"\((?P<identifiers>[^)\r\n]{1,300})\)(?=\s+Country/)"
 )
+SQL_STATEMENT_PATTERN = re.compile(
+    r"(?is)(?P<prefix>###\s*SQL:\s*).*?(?=(?:\s*\|\s*###\s*[A-Za-z ]+:)|$)"
+)
 
 
 @dataclass(frozen=True)
@@ -227,10 +230,22 @@ def _is_allowlisted_code_identifier(text: str, match: re.Match[str]) -> bool:
     if candidate.endswith(("Exception", "Error")):
         if re.search(r"(?:[A-Za-z_$][\w$]*\.)+$", prefix) and re.match(r"\s*:", suffix):
             return True
+    if prefix.endswith("(") and re.match(r"\.java(?::\d+)?\)", suffix):
+        return True
     if re.search(r"\bat\s+(?:[A-Za-z_$][\w$]*\.)+$", prefix):
         if re.match(r"(?:\.[A-Za-z_$][\w$]*)?\([^\r\n)]*\)", suffix):
             return True
     return False
+
+
+def _is_safe_route_segment(segment: str) -> bool:
+    if not SAFE_ROUTE_SEGMENT_PATTERN.fullmatch(segment):
+        return False
+    if len(segment) < 20:
+        return True
+    is_hex = bool(re.fullmatch(r"[A-Fa-f0-9]+", segment))
+    threshold = 3.2 if is_hex and len(segment) >= 32 else 4.0
+    return _entropy(segment) < threshold
 
 
 def _minimize_request_urls(text: str, path: str) -> Tuple[str, List[Finding]]:
@@ -257,10 +272,7 @@ def _minimize_request_urls(text: str, path: str) -> Tuple[str, List[Finding]]:
         for segment in parsed.path.split("/"):
             if not segment:
                 continue
-            if (
-                SAFE_ROUTE_SEGMENT_PATTERN.fullmatch(segment)
-                and (len(segment) < 20 or _entropy(segment) < 4.0)
-            ):
+            if _is_safe_route_segment(segment):
                 safe_segments.append(segment)
             else:
                 safe_segments.append("[REDACTED:path_segment]")
@@ -313,11 +325,27 @@ def _remove_client_descriptors(text: str, path: str) -> Tuple[str, List[Finding]
     return CLIENT_DESCRIPTOR_PATTERN.sub(replace, text), findings
 
 
+def _remove_sql_statements(text: str, path: str) -> Tuple[str, List[Finding]]:
+    findings: List[Finding] = []
+
+    def replace(match: re.Match[str]) -> str:
+        findings.append(
+            Finding(f"{path}.sql", "sql_statement", "removed", "sql-statement")
+        )
+        return f"{match.group('prefix')}[REDACTED:sql_statement]"
+
+    return SQL_STATEMENT_PATTERN.sub(replace, text), findings
+
+
 def _redact_unclassified_entropy(text: str, path: str) -> Tuple[str, List[Finding]]:
     findings: List[Finding] = []
 
     def replace(match: re.Match[str]) -> str:
         candidate = match.group(0)
+        redaction_start = text.rfind("[REDACTED:", 0, match.start())
+        redaction_end = text.rfind("]", 0, match.start())
+        if redaction_start > redaction_end:
+            return candidate
         context_key = _preceding_assignment_key(text, match.start())
         if context_key in HIGH_ENTROPY_CONTEXT_ALLOWLIST:
             return candidate
@@ -356,6 +384,8 @@ def redact_free_text(text: str, path: str = "message") -> Tuple[str, List[Findin
     findings.extend(url_findings)
     sanitized, client_findings = _remove_client_descriptors(sanitized, path)
     findings.extend(client_findings)
+    sanitized, sql_findings = _remove_sql_statements(sanitized, path)
+    findings.extend(sql_findings)
     pattern_rules = (
         (PRIVATE_KEY_PATTERN, "private_key", "private-key-block"),
         (AUTHORIZATION_PATTERN, "authorization", "authorization-header"),

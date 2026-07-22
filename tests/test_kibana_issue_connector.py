@@ -1,5 +1,6 @@
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -108,6 +109,20 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertNotIn("AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", encoded)
         self.assertNotIn("person@example.test", encoded)
 
+    def test_blocked_error_preview_reports_only_redacted_entropy_context(self):
+        hit = error_hit()
+        secret = "QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ=="
+        hit["_source"]["message"] += " safe-prefix" * 120 + f" mystery={secret} tail"
+        sanitized = sanitize_hit(hit, HMAC_KEY.encode())
+
+        preview = _blocked_error_preview(sanitized)
+        encoded = json.dumps(preview)
+
+        self.assertEqual(len(preview["blocked_contexts"]), 1)
+        self.assertIn("[REDACTED:unclassified_high_entropy]", encoded)
+        self.assertNotIn("[REDACTED:[REDACTED:", encoded)
+        self.assertNotIn(secret, encoded)
+
     def test_parses_discover_target(self):
         target = parse_discover_url(DISCOVER_URL)
 
@@ -131,13 +146,16 @@ class KibanaIssueConnectorTest(unittest.TestCase):
             time_to="now",
         )
         credentials = DashboardCredentials("reader", "password")
-        client = OpenSearchDashboardsClient(target, credentials, opener=opener)
+        client = OpenSearchDashboardsClient(
+            target, credentials, timeout_seconds=45, opener=opener
+        )
 
         index_pattern, time_field = client.resolve_index_pattern()
         hits = client.fetch_error_hits(index_pattern, time_field, 25)
 
         self.assertEqual(index_pattern, "logs-*")
         self.assertEqual(len(hits), 1)
+        self.assertTrue(all(timeout == 45 for _, timeout in opener.requests))
         self.assertNotIn("password", repr(credentials))
         request = opener.requests[1][0]
         expected_auth = "Basic " + base64.b64encode(b"reader:password").decode()
@@ -150,6 +168,42 @@ class KibanaIssueConnectorTest(unittest.TestCase):
             payload["query"]["bool"]["filter"][0]["range"]["@timestamp"],
             {"gte": "now-2h", "lte": "now"},
         )
+
+    def test_client_reports_read_timeout_without_remote_details(self):
+        target = DiscoverTarget(
+            base_url="https://logs.example.test/_dashboards",
+            data_view_id="data-view-1",
+            time_from="now-2h",
+            time_to="now",
+        )
+
+        def timeout_opener(request, timeout):
+            raise TimeoutError("synthetic transport detail")
+
+        client = OpenSearchDashboardsClient(
+            target,
+            DashboardCredentials("reader", "password"),
+            timeout_seconds=60,
+            opener=timeout_opener,
+        )
+
+        with self.assertRaisesRegex(ValueError, "timed out after 60 seconds") as raised:
+            client.resolve_index_pattern()
+
+        self.assertNotIn("synthetic transport detail", str(raised.exception))
+
+    def test_rejects_out_of_range_timeout_before_credentials(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = main(
+                [
+                    "--discover-url",
+                    DISCOVER_URL,
+                    "--timeout-seconds",
+                    "121",
+                ]
+            )
+
+        self.assertEqual(code, 2)
 
     @mock.patch("src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits")
     @mock.patch("src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern")
@@ -187,6 +241,7 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(summary["schema_version"], "kibana-issue-connector/v2")
         self.assertEqual(summary["mode"], "dry_run")
+        self.assertEqual(summary["query"]["timeout_seconds"], 30)
         self.assertEqual(summary["candidates"][0]["status"], "sanitized")
         self.assertEqual(summary["candidates"][0]["event_count"], 1)
         self.assertEqual(summary["selection"]["parsed_levels"], {"ERROR": 1})
@@ -258,6 +313,61 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertEqual(summary["selection"]["rejected_candidate_limit"], 1)
         self.assertEqual(summary["candidates"][0]["event_count"], 2)
         self.assertEqual(summary["candidates"][0]["grouping_strategy"], "fallback_similarity")
+
+    @mock.patch("src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits")
+    @mock.patch("src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern")
+    def test_cross_trace_issue_signature_suppresses_duplicate_candidate(self, resolve, fetch):
+        resolve.return_value = ("logs-*", "@timestamp")
+        hits = []
+        for document_id, trace, timestamp in (
+            ("first", "trace-first", "2026-07-21T09:03:08.757Z"),
+            ("second", "trace-second", "2026-07-21T09:02:59.144Z"),
+        ):
+            hit = error_hit()
+            hit["_id"] = document_id
+            hit["_source"]["@timestamp"] = timestamp
+            hit["_source"]["message"] = (
+                f"[2026-07-21 17:03:08.757] [TID: {trace}] ERROR [worker-1] "
+                "com.example.BusinessExceptionHandler:43 - "
+                "request_path=/v3/api/assistant/chat java.lang.NullPointerException: null | "
+                "at com.example.AssistantChatCommand.execute(AssistantChatCommand.java:140)"
+            )
+            hits.append(hit)
+        fetch.return_value = hits
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            with mock.patch.dict(
+                os.environ,
+                {"LOG_SANITIZER_HMAC_KEY": HMAC_KEY, "OPENSEARCH_PASSWORD": "password"},
+                clear=True,
+            ), contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--discover-url",
+                        DISCOVER_URL,
+                        "--username",
+                        "reader",
+                        "--output-dir",
+                        str(output),
+                        "--state-file",
+                        str(root / "state.json"),
+                        "--name",
+                        "signature-trial",
+                    ]
+                )
+            summary = json.loads((output / "signature-trial" / "summary.json").read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["selection"]["grouped_incidents"], 2)
+        self.assertEqual(summary["selection"]["accepted"], 1)
+        self.assertEqual(summary["selection"]["rejected_duplicate_issue_signature"], 1)
+        duplicate = summary["selection"]["issue_signature_duplicates"][0]
+        self.assertEqual(
+            duplicate["issue_fingerprint"],
+            summary["candidates"][0]["issue_signature"]["fingerprint"],
+        )
 
     def test_publish_requires_generation_and_confirmation(self):
         with mock.patch.dict(
@@ -340,6 +450,109 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertEqual(summary["candidates"][0]["status"], "published")
         record = next(iter(state_payload["published"].values()))
         self.assertEqual(record["issue_url"], "https://github.com/acme/project/issues/12")
+
+    def test_auto_publish_policy_skips_security_review_and_continues_safe_candidate(self):
+        unsafe = error_hit()
+        unsafe["_id"] = "unsafe"
+        unsafe["_source"]["@timestamp"] = "2026-07-21T09:03:08.757Z"
+        unsafe["_source"]["message"] = (
+            "[2026-07-21 17:03:08.757] [TID: trace-unsafe] ERROR [worker-1] "
+            "com.example.BusinessExceptionHandler:43 - Throws while processing request: "
+            "https://internal.example.test/v3/api/assistant/chat?"
+            "sign=b3da3d22b9e1383d439d4fd92359724b&appKey=private-application-key "
+            "java.lang.NullPointerException | "
+            "at com.example.AssistantChatCommand.execute(AssistantChatCommand.java:140)"
+        )
+        safe = error_hit()
+        safe["_id"] = "safe"
+        safe["_source"]["@timestamp"] = "2026-07-21T09:03:05.858Z"
+        safe["_source"]["message"] = (
+            "[2026-07-21 17:03:05.858] [TID: trace-safe] ERROR [worker-1] "
+            "com.example.BusinessExceptionHandler:43 - "
+            "request_path=/v1/api/resource/list java.sql.SQLException: collation failed | "
+            "at com.example.ResourceQuery.execute(ResourceQuery.java:45)"
+        )
+        generated = {
+            "state": "needs_human_context",
+            "validation": {"valid": True},
+            "draft": {"title": "Demo issue"},
+        }
+        policy = {
+            "schema_version": "issue-auto-publish-policy/v1",
+            "policy_id": "demo-errors-v1",
+            "max_issues_per_run": 2,
+            "allowed_states": ["needs_human_context"],
+            "routes": [
+                {
+                    "route_id": "checkout",
+                    "match": {"service": "demo-checkout"},
+                    "provider": "github_cli",
+                    "repository": "acme/project",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy_path = root / "policy.json"
+            policy_bytes = json.dumps(policy, sort_keys=True).encode()
+            policy_path.write_bytes(policy_bytes)
+            digest = hashlib.sha256(policy_bytes).hexdigest()
+            output = root / "output"
+            state = root / "state.json"
+            with mock.patch.dict(
+                os.environ,
+                {"LOG_SANITIZER_HMAC_KEY": HMAC_KEY, "OPENSEARCH_PASSWORD": "password"},
+                clear=True,
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern",
+                return_value=("logs-*", "@timestamp"),
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits",
+                return_value=[unsafe, safe],
+            ), mock.patch(
+                "src.kibana_issue_connector._gateway_config",
+                return_value=SimpleNamespace(model="demo", review_model="demo"),
+            ), mock.patch(
+                "src.kibana_issue_connector.ai_issue_generator.generate_issue",
+                return_value=generated,
+            ), mock.patch(
+                "src.kibana_issue_connector.ai_issue_generator.write_result"
+            ), mock.patch(
+                "src.kibana_issue_connector.publish_issue",
+                return_value="https://github.com/acme/project/issues/12",
+            ) as publish, contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--discover-url",
+                        DISCOVER_URL,
+                        "--username",
+                        "reader",
+                        "--generate",
+                        "--auto-publish-policy",
+                        str(policy_path),
+                        "--confirm-policy-sha256",
+                        digest,
+                        "--max-candidates",
+                        "2",
+                        "--output-dir",
+                        str(output),
+                        "--state-file",
+                        str(state),
+                        "--name",
+                        "auto-publish-trial",
+                    ]
+                )
+            summary = json.loads((output / "auto-publish-trial" / "summary.json").read_text())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["mode"], "auto_publish")
+        self.assertEqual(summary["selection"]["publication_blocked"], 1)
+        self.assertEqual(summary["selection"]["published"], 1)
+        self.assertEqual(publish.call_count, 1)
+        self.assertEqual(publish.call_args.args[2], "acme/project")
+        statuses = [item["publication"]["status"] for item in summary["candidates"]]
+        self.assertEqual(statuses, ["blocked", "published"])
+        self.assertEqual(summary["candidates"][0]["publication"]["reason"], "security_review_required")
 
 
 if __name__ == "__main__":

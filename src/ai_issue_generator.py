@@ -968,7 +968,7 @@ def render_markdown(result: Dict[str, Any]) -> str:
         f"- AI review verdict: {review['verdict']}",
         f"- Local validation: {'pass' if validation['valid'] else 'fail'}",
         "- Human confirmation required: yes",
-        "- GitHub publication allowed: no",
+        "- AI-authorized GitHub publication: no",
         "- AI implementation allowed: no",
         "",
     ]

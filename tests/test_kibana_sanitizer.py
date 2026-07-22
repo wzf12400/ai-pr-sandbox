@@ -160,6 +160,20 @@ class KibanaSanitizerTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, serialized)
 
+    def test_high_entropy_url_path_identifier_is_removed(self) -> None:
+        identifier = "c3de2802001e4cb9a76c5124df1dfd2f"
+
+        sanitized, findings = redact_free_text(
+            f"https://internal.example.test/v1/api/category/{identifier}/resources"
+        )
+
+        self.assertEqual(
+            sanitized,
+            "request_path=/v1/api/category/[REDACTED:path_segment]/resources",
+        )
+        self.assertNotIn(identifier, sanitized)
+        self.assertTrue(any(item.category == "path_identifier" for item in findings))
+
     def test_java_identifiers_are_allowed_only_in_code_contexts(self) -> None:
         samples = (
             "java.lang.StringIndexOutOfBoundsException: index -2",
@@ -167,6 +181,10 @@ class KibanaSanitizerTest(unittest.TestCase):
             "at com.example.command.SensitiveTextCommand.execute"
             "(SensitiveTextCommand.java:119)",
             "class path resource [com/example/VeryLongAssetResourceMapper.xml]",
+            "at com.example.aop.OperationPlatformLogAspect.saveUserOperateLog"
+            "(OperationPlatformLogAspect.java:93)",
+            "at sun.reflect.DelegatingMethodAccessorImpl.invoke"
+            "(DelegatingMethodAccessorImpl.java:43)",
         )
         for sample in samples:
             with self.subTest(sample=sample):
@@ -174,6 +192,38 @@ class KibanaSanitizerTest(unittest.TestCase):
 
                 self.assertEqual(sanitized, sample)
                 self.assertFalse(any(item.action == "blocked" for item in findings))
+
+    def test_existing_redaction_marker_is_not_redacted_again(self) -> None:
+        marker = "[REDACTED:unclassified_high_entropy]"
+
+        sanitized, findings = redact_free_text(f"before {marker} after")
+
+        self.assertEqual(sanitized, f"before {marker} after")
+        self.assertFalse(any(item.action == "blocked" for item in findings))
+
+    def test_sql_statement_is_removed_before_entropy_detection(self) -> None:
+        statement = (
+            "### SQL: select very_long_internal_column_name from private_table "
+            "where api_token = 'QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ==' "
+            "| ### Cause: java.sql.SQLException: Illegal mix of collations"
+        )
+
+        sanitized, findings = redact_free_text(statement)
+
+        self.assertEqual(
+            sanitized,
+            "### SQL: [REDACTED:sql_statement] "
+            "| ### Cause: java.sql.SQLException: Illegal mix of collations",
+        )
+        self.assertTrue(
+            any(
+                item.category == "sql_statement" and item.action == "removed"
+                for item in findings
+            )
+        )
+        self.assertFalse(any(item.action == "blocked" for item in findings))
+        self.assertNotIn("private_table", sanitized)
+        self.assertNotIn("QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ==", sanitized)
 
     def test_error_level_is_selected_after_sanitization(self) -> None:
         payload = raw_hit()

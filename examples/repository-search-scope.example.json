@@ -1,0 +1,35 @@
+{
+  "schema_version": "repository-search-scope/v1",
+  "scope_id": "example-company-code",
+  "provider": "github",
+  "repositories": [
+    {
+      "repository": "example-org/assistant-service",
+      "enabled": true,
+      "default_branch": "main",
+      "labels": [
+        "backend"
+      ]
+    },
+    {
+      "repository": "example-org/catalog-service",
+      "enabled": true,
+      "default_branch": "main",
+      "labels": [
+        "backend"
+      ]
+    },
+    {
+      "repository": "example-org/retired-service",
+      "enabled": false,
+      "labels": [
+        "archived-migration"
+      ]
+    }
+  ],
+  "limits": {
+    "max_queries": 12,
+    "max_candidate_repositories": 10,
+    "max_hits_per_query": 20
+  }
+}

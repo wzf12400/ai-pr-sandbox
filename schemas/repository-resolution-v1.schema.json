@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/repository-resolution-v1.schema.json",
+  "title": "Repository resolution result v1",
+  "description": "An auditable, deterministic repository-level decision derived from a validated and sanitized IssueDraft.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "draft_ref",
+    "input_sha256",
+    "scope_id",
+    "status",
+    "selected_repository",
+    "decision",
+    "candidates",
+    "search_audit"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "repository-resolution/v1"
+    },
+    "draft_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "input_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scope_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "status": {
+      "enum": [
+        "resolved",
+        "ambiguous",
+        "unknown",
+        "blocked"
+      ]
+    },
+    "selected_repository": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/repository_name"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "decision": {
+      "$ref": "#/$defs/decision"
+    },
+    "candidates": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "$ref": "#/$defs/candidate"
+      }
+    },
+    "search_audit": {
+      "$ref": "#/$defs/search_audit"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "resolved"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "selected_repository": {
+            "$ref": "#/$defs/repository_name"
+          },
+          "candidates": {
+            "minItems": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "selected_repository": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "$comment": "A local semantic validator must verify score arithmetic, status thresholds, candidate uniqueness, and that a resolved selected_repository is the top candidate.",
+  "$defs": {
+    "repository_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
+    },
+    "nullable_score": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_version",
+        "minimum_resolved_score",
+        "minimum_margin",
+        "minimum_strong_families",
+        "top_score",
+        "runner_up_score",
+        "margin",
+        "reasons"
+      ],
+      "properties": {
+        "policy_version": {
+          "const": "repository-resolution-policy/v1"
+        },
+        "minimum_resolved_score": {
+          "const": 70
+        },
+        "minimum_margin": {
+          "const": 20
+        },
+        "minimum_strong_families": {
+          "const": 2
+        },
+        "top_score": {
+          "$ref": "#/$defs/nullable_score"
+        },
+        "runner_up_score": {
+          "$ref": "#/$defs/nullable_score"
+        },
+        "margin": {
+          "$ref": "#/$defs/nullable_score"
+        },
+        "reasons": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "score",
+        "strong_families",
+        "conflicts",
+        "evidence"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "#/$defs/repository_name"
+        },
+        "score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "strong_families": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "conflicts": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "matched_term",
+        "source_paths",
+        "ref",
+        "hit_count",
+        "evidence_ref"
+      ],
+      "properties": {
+        "family": {
+          "enum": [
+            "qualified_class",
+            "exact_filename",
+            "class_method",
+            "interface_business_object",
+            "module_artifact",
+            "package_prefix",
+            "service_identifier",
+            "repository_metadata"
+          ]
+        },
+        "matched_term": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "source_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^\\$\\."
+          }
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "hit_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "evidence_ref": {
+          "type": "string",
+          "pattern": "^search_ref:[0-9a-f]{16,64}$"
+        }
+      }
+    },
+    "search_audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "repositories_enabled",
+        "queries_executed",
+        "candidate_repositories_verified",
+        "raw_source_snippets_persisted"
+      ],
+      "properties": {
+        "provider": {
+          "const": "github"
+        },
+        "repositories_enabled": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "queries_executed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "candidate_repositories_verified": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "raw_source_snippets_persisted": {
+          "const": false
+        }
+      }
+    }
+  }
+}

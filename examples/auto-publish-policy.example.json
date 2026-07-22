@@ -1,0 +1,27 @@
+{
+  "schema_version": "issue-auto-publish-policy/v1",
+  "policy_id": "example-service-routing-v1",
+  "max_issues_per_run": 2,
+  "allowed_states": [
+    "ready_for_human_review",
+    "needs_human_context"
+  ],
+  "routes": [
+    {
+      "route_id": "checkout-service",
+      "match": {
+        "service": "example-checkout"
+      },
+      "provider": "github_cli",
+      "repository": "example-org/checkout"
+    },
+    {
+      "route_id": "catalog-service",
+      "match": {
+        "service": "example-catalog"
+      },
+      "provider": "github_cli",
+      "repository": "example-org/catalog"
+    }
+  ]
+}
