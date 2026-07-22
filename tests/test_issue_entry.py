@@ -50,6 +50,31 @@ class IssueEntryTest(unittest.TestCase):
         self.assertTrue(evidence["event"]["is_error"])
         self.assertNotIn("event-1", json.dumps(evidence))
 
+    def test_composes_natural_language_without_log_or_hmac_key(self):
+        evidence = compose_evidence(
+            "SyntheticRoutingController.routeIssue 抛出 SyntheticRoutingException"
+        )
+
+        self.assertEqual("natural_language", evidence["source"]["type"])
+        self.assertEqual(
+            "SyntheticRoutingController.routeIssue 抛出 SyntheticRoutingException",
+            evidence["facts"]["reported_description"],
+        )
+        self.assertTrue(evidence["safety"]["ai_allowed"])
+        self.assertFalse(evidence["safety"]["security_review_required"])
+        self.assertNotIn("target", evidence)
+
+    def test_natural_language_extracts_explicit_qualified_method_evidence(self):
+        evidence = compose_evidence(
+            "com.example.routing.SyntheticRoutingController.routeIssue 调用失败"
+        )
+
+        self.assertEqual(
+            "com.example.routing.SyntheticRoutingController",
+            evidence["facts"]["qualified_class"],
+        )
+        self.assertEqual("routeIssue", evidence["facts"]["code_method"])
+
     def test_redacted_credentials_require_security_review(self):
         with tempfile.TemporaryDirectory() as directory:
             evidence = compose_evidence(
