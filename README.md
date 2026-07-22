@@ -90,6 +90,14 @@ The locator scans tracked source files without executing repository code. It
 combines bounded lexical retrieval with Python AST class-inheritance analysis
 and returns ranked files, symbols, lines, and human-readable evidence.
 
+Repository selection is a separate, earlier step. The proposed resolver uses a
+maintainable allowlist of repositories as its search boundary, then applies
+deterministic evidence scoring instead of a service-to-repository routing map.
+Only one high-confidence `resolved` result may proceed to target-repository
+Issue matching; ambiguous and unknown drafts remain unpublished. See
+[`docs/repository-resolution-design.md`](docs/repository-resolution-design.md)
+for the design, versioned JSON Schemas, and company-neutral examples.
+
 The first real-project benchmark uses SymPy Issue #20567 and its fixing PR.
 See [`docs/real-project-trial.md`](docs/real-project-trial.md) for the pinned
 inputs, safety boundary, reproduction commands, and measured result. The
