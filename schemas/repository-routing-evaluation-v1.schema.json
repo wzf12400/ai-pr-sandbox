@@ -1,0 +1,284 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/repository-routing-evaluation-v1.schema.json",
+  "title": "Repository routing evaluation report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dataset_revision",
+    "counts",
+    "metrics",
+    "confidence_intervals_95",
+    "expected_status_counts",
+    "predicted_status_counts",
+    "status_confusion",
+    "per_repository",
+    "audit"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "repository-routing-evaluation/v1"
+    },
+    "dataset_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "labels",
+        "predictions",
+        "missing_predictions",
+        "expected_resolved",
+        "predicted_resolved",
+        "resolved_on_expected_resolved",
+        "correct_resolved",
+        "wrong_resolved",
+        "nonresolved_expected",
+        "correct_safe_abstentions"
+      ],
+      "properties": {
+        "labels": {
+          "$ref": "#/$defs/count"
+        },
+        "predictions": {
+          "$ref": "#/$defs/count"
+        },
+        "missing_predictions": {
+          "$ref": "#/$defs/count"
+        },
+        "expected_resolved": {
+          "$ref": "#/$defs/count"
+        },
+        "predicted_resolved": {
+          "$ref": "#/$defs/count"
+        },
+        "resolved_on_expected_resolved": {
+          "$ref": "#/$defs/count"
+        },
+        "correct_resolved": {
+          "$ref": "#/$defs/count"
+        },
+        "wrong_resolved": {
+          "$ref": "#/$defs/count"
+        },
+        "nonresolved_expected": {
+          "$ref": "#/$defs/count"
+        },
+        "correct_safe_abstentions": {
+          "$ref": "#/$defs/count"
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "auto_route_precision",
+        "false_route_rate",
+        "resolved_coverage",
+        "correct_route_recall",
+        "exact_outcome_accuracy",
+        "safe_abstention_accuracy",
+        "macro_repository_recall"
+      ],
+      "properties": {
+        "auto_route_precision": {
+          "$ref": "#/$defs/nullable_ratio"
+        },
+        "false_route_rate": {
+          "$ref": "#/$defs/nullable_ratio"
+        },
+        "resolved_coverage": {
+          "$ref": "#/$defs/nullable_ratio"
+        },
+        "correct_route_recall": {
+          "$ref": "#/$defs/nullable_ratio"
+        },
+        "exact_outcome_accuracy": {
+          "$ref": "#/$defs/nullable_ratio"
+        },
+        "safe_abstention_accuracy": {
+          "$ref": "#/$defs/nullable_ratio"
+        },
+        "macro_repository_recall": {
+          "$ref": "#/$defs/nullable_ratio"
+        }
+      }
+    },
+    "confidence_intervals_95": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "auto_route_precision",
+        "false_route_rate"
+      ],
+      "properties": {
+        "auto_route_precision": {
+          "$ref": "#/$defs/nullable_interval"
+        },
+        "false_route_rate": {
+          "$ref": "#/$defs/nullable_interval"
+        }
+      }
+    },
+    "expected_status_counts": {
+      "$ref": "#/$defs/status_counts"
+    },
+    "predicted_status_counts": {
+      "$ref": "#/$defs/status_counts_with_missing"
+    },
+    "status_confusion": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "resolved",
+          "ambiguous",
+          "unknown",
+          "blocked"
+        ]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/status_counts_with_missing"
+      }
+    },
+    "per_repository": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repository",
+          "total",
+          "correct_resolved",
+          "wrong_resolved",
+          "abstained",
+          "correct_route_recall"
+        ],
+        "properties": {
+          "repository": {
+            "$ref": "#/$defs/repository"
+          },
+          "total": {
+            "$ref": "#/$defs/count"
+          },
+          "correct_resolved": {
+            "$ref": "#/$defs/count"
+          },
+          "wrong_resolved": {
+            "$ref": "#/$defs/count"
+          },
+          "abstained": {
+            "$ref": "#/$defs/count"
+          },
+          "correct_route_recall": {
+            "$ref": "#/$defs/nullable_ratio"
+          }
+        }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "private_labels_provided_to_predictor",
+        "answer_fields_used_as_predictions",
+        "missing_predictions_count_as_incorrect"
+      ],
+      "properties": {
+        "private_labels_provided_to_predictor": {
+          "const": false
+        },
+        "answer_fields_used_as_predictions": {
+          "const": false
+        },
+        "missing_predictions_count_as_incorrect": {
+          "const": true
+        }
+      }
+    }
+  },
+  "$defs": {
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ratio": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "nullable_ratio": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ratio"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "interval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lower",
+        "upper"
+      ],
+      "properties": {
+        "lower": {
+          "$ref": "#/$defs/ratio"
+        },
+        "upper": {
+          "$ref": "#/$defs/ratio"
+        }
+      }
+    },
+    "nullable_interval": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/interval"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
+    },
+    "status_counts": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "resolved",
+          "ambiguous",
+          "unknown",
+          "blocked"
+        ]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/count"
+      }
+    },
+    "status_counts_with_missing": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "resolved",
+          "ambiguous",
+          "unknown",
+          "blocked",
+          "missing"
+        ]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/count"
+      }
+    }
+  }
+}
