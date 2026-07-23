@@ -13,3 +13,4 @@ sanitized/
 .issue-entry-output/
 .kibana-issue-output/
 .issue-entry-state/
+.benchmark-output/

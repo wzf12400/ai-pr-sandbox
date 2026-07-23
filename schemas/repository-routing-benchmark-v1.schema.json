@@ -1,0 +1,296 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/repository-routing-benchmark-v1.schema.json",
+  "title": "Repository routing benchmark JSONL record v1",
+  "description": "One leakage-controlled predictor input, private label, or prediction record.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/input"
+    },
+    {
+      "$ref": "#/$defs/label"
+    },
+    {
+      "$ref": "#/$defs/prediction"
+    }
+  ],
+  "$defs": {
+    "case_ref": {
+      "type": "string",
+      "pattern": "^swebench_ref:[0-9a-f]{32}$"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
+    },
+    "nullable_repository": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/repository"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "enum": [
+        "resolved",
+        "ambiguous",
+        "unknown",
+        "blocked"
+      ]
+    },
+    "nullable_score": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "case_ref",
+        "source_type",
+        "problem_statement",
+        "problem_sha256",
+        "candidate_repositories",
+        "preflight",
+        "derived_from",
+        "answer_fields_present"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "repository-routing-benchmark-input/v1"
+        },
+        "case_ref": {
+          "$ref": "#/$defs/case_ref"
+        },
+        "source_type": {
+          "const": "public_github_issue"
+        },
+        "problem_statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100000
+        },
+        "problem_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "candidate_repositories": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 500,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/repository"
+          }
+        },
+        "preflight": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "redacted_categories"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "eligible",
+                "blocked"
+              ]
+            },
+            "redacted_categories": {
+              "type": "array",
+              "maxItems": 20,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              }
+            }
+          }
+        },
+        "derived_from": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/case_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "answer_fields_present": {
+          "const": false
+        }
+      }
+    },
+    "label": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "case_ref",
+        "expected_status",
+        "expected_repository",
+        "source_repository",
+        "source_ref",
+        "dataset_revision",
+        "gold_base_commit",
+        "created_at",
+        "variant"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "repository-routing-benchmark-label/v1"
+        },
+        "case_ref": {
+          "$ref": "#/$defs/case_ref"
+        },
+        "expected_status": {
+          "$ref": "#/$defs/status"
+        },
+        "expected_repository": {
+          "$ref": "#/$defs/nullable_repository"
+        },
+        "source_repository": {
+          "$ref": "#/$defs/repository"
+        },
+        "source_ref": {
+          "type": "string",
+          "pattern": "^source_ref:[0-9a-f]{32}$"
+        },
+        "dataset_revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "gold_base_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,64}$"
+        },
+        "created_at": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "variant": {
+          "enum": [
+            "original",
+            "gold_removed",
+            "ambiguous_duplicate",
+            "information_ablation"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "expected_status": {
+                "const": "resolved"
+              }
+            },
+            "required": [
+              "expected_status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected_repository": {
+                "$ref": "#/$defs/repository"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "expected_repository": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "prediction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "case_ref",
+        "status",
+        "selected_repository",
+        "policy_version",
+        "top_score",
+        "runner_up_score",
+        "margin"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "repository-routing-benchmark-prediction/v1"
+        },
+        "case_ref": {
+          "$ref": "#/$defs/case_ref"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "selected_repository": {
+          "$ref": "#/$defs/nullable_repository"
+        },
+        "policy_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "top_score": {
+          "$ref": "#/$defs/nullable_score"
+        },
+        "runner_up_score": {
+          "$ref": "#/$defs/nullable_score"
+        },
+        "margin": {
+          "$ref": "#/$defs/nullable_score"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "resolved"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "selected_repository": {
+                "$ref": "#/$defs/repository"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "selected_repository": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

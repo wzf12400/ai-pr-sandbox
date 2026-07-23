@@ -118,6 +118,37 @@ search index, `--adapter github-tree-probe` provides an explicit test-only
 path. It fails closed above 1 MB or 500 tree entries, reads only matching Java
 files up to 256 KB, and is not the default for real repositories.
 
+## Evaluate repository routing with SWE-bench
+
+The SWE-bench adaptation separates minimized predictor inputs from private
+gold repository labels, masks answer-bearing repository strings and GitHub
+URLs, supports derived out-of-scope `unknown` cases, and computes routing
+precision, false-route rate, coverage, recall, safe abstention, macro metrics,
+per-repository results, and Wilson confidence intervals.
+
+```bash
+./bin/prepare-swebench-routing swebench.jsonl \
+  --dataset-revision '<pinned-dataset-commit>' \
+  --inputs-output .benchmark-output/inputs.jsonl \
+  --labels-output .benchmark-output/labels.jsonl \
+  --summary-output .benchmark-output/preparation.json \
+  --derive-out-of-scope
+
+./bin/evaluate-repository-routing \
+  .benchmark-output/labels.jsonl \
+  .benchmark-output/predictions.jsonl \
+  --output-json .benchmark-output/evaluation.json \
+  --output-md .benchmark-output/evaluation.md
+```
+
+The current slice prepares and scores benchmark records; it does not yet
+download repositories, search pinned historical snapshots, or run SWE-bench
+Docker tests. See
+[`docs/swebench-routing-benchmark.md`](docs/swebench-routing-benchmark.md) for
+the leakage boundary, prediction contract, metric definitions, and remaining
+local-search work. A company-neutral source fixture is available at
+[`examples/swebench-routing-source.example.jsonl`](examples/swebench-routing-source.example.jsonl).
+
 ## Run the natural-language to GitHub Issue flow
 
 `bin/natural-language-to-issue` composes the existing AI Issue generator with
