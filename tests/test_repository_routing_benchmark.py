@@ -10,9 +10,11 @@ from src.repository_routing_benchmark import (
     PREDICTION_SCHEMA_VERSION,
     evaluate_main,
     evaluate_routing_predictions,
+    load_ablation_aliases,
     prepare_main,
     prepare_swebench_records,
     render_evaluation_markdown,
+    select_stratified_rows,
 )
 
 
@@ -71,6 +73,109 @@ def case_ref(character):
 
 
 class RepositoryRoutingBenchmarkTest(unittest.TestCase):
+    def test_stratified_selection_is_deterministic_and_bounded(self):
+        rows = [
+            swebench_row(
+                f"example-org__alpha-{index}",
+                REPOSITORIES[0],
+                f"AlphaController.route_{index} fails.",
+            )
+            for index in range(6)
+        ] + [
+            swebench_row(
+                f"example-org__beta-{index}",
+                REPOSITORIES[1],
+                f"BetaController.route_{index} fails.",
+            )
+            for index in range(3)
+        ]
+
+        first = select_stratified_rows(rows, 2, "unit-test-seed")
+        second = select_stratified_rows(list(reversed(rows)), 2, "unit-test-seed")
+        held_out = select_stratified_rows(rows, 2, "unit-test-seed", 2)
+
+        self.assertEqual(
+            [row["instance_id"] for row in first],
+            [row["instance_id"] for row in second],
+        )
+        self.assertEqual(
+            {REPOSITORIES[0]: 2, REPOSITORIES[1]: 2},
+            {
+                repository: sum(row["repo"] == repository for row in first)
+                for repository in REPOSITORIES
+            },
+        )
+        self.assertTrue(
+            {row["instance_id"] for row in first}.isdisjoint(
+                {row["instance_id"] for row in held_out}
+            )
+        )
+
+    def test_information_ablation_masks_project_aliases_and_keeps_labels_private(self):
+        rows = [
+            swebench_row(
+                "example-org__alpha-20",
+                REPOSITORIES[0],
+                "Alpha alpha_client.retry_delivery() raises DeliveryRetryError.",
+            ),
+            swebench_row(
+                "example-org__beta-21",
+                REPOSITORIES[1],
+                "Beta BetaScheduler.run fails.",
+            ),
+        ]
+
+        inputs, labels, summary = prepare_swebench_records(
+            rows,
+            "fixture-revision",
+            derive_out_of_scope=True,
+            derive_information_ablation=True,
+            repository_aliases={
+                REPOSITORIES[0]: ("Alpha", "alpha_client"),
+                REPOSITORIES[1]: ("Beta",),
+            },
+        )
+
+        self.assertEqual(2, summary["information_ablation_rows"])
+        self.assertEqual(2, summary["gold_removed_ablation_rows"])
+        ablated_inputs = [
+            item
+            for item in inputs
+            if item["derived_from"] is not None
+            and "[REDACTED_PROJECT_ALIAS]" in item["problem_statement"]
+        ]
+        self.assertEqual(4, len(ablated_inputs))
+        self.assertNotIn("alpha_client", json.dumps(ablated_inputs).casefold())
+        ablated_labels = [
+            item
+            for item in labels
+            if item["variant"] in {
+                "information_ablation",
+                "gold_removed_ablation",
+            }
+        ]
+        self.assertEqual(4, len(ablated_labels))
+
+    def test_loads_strict_ablation_alias_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "aliases.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "repository-routing-ablation-aliases/v1",
+                        "repositories": {
+                            REPOSITORIES[0]: ["alpha", "alpha_client"],
+                            REPOSITORIES[1]: ["beta"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            aliases = load_ablation_aliases(path)
+
+        self.assertEqual(("alpha", "alpha_client"), aliases[REPOSITORIES[0]])
+
     def test_prepare_masks_answer_fields_and_derives_unknown_case(self):
         rows = [
             swebench_row(
@@ -139,8 +244,12 @@ class RepositoryRoutingBenchmarkTest(unittest.TestCase):
         self.assertEqual(1, report["counts"]["missing_predictions"])
         self.assertAlmostEqual(1 / 3, report["metrics"]["auto_route_precision"])
         self.assertAlmostEqual(2 / 3, report["metrics"]["false_route_rate"])
+        self.assertEqual(0.5, report["metrics"]["positive_auto_route_precision"])
+        self.assertEqual(0.5, report["metrics"]["positive_wrong_route_rate"])
         self.assertEqual(1.0, report["metrics"]["resolved_coverage"])
         self.assertEqual(0.5, report["metrics"]["correct_route_recall"])
+        self.assertAlmostEqual(1 / 3, report["metrics"]["unsafe_fallback_rate"])
+        self.assertAlmostEqual(1 / 3, report["metrics"]["safe_nonresolution_rate"])
         self.assertEqual(0.4, report["metrics"]["exact_outcome_accuracy"])
         self.assertAlmostEqual(1 / 3, report["metrics"]["safe_abstention_accuracy"])
         self.assertEqual(0.5, report["metrics"]["macro_repository_recall"])
@@ -149,6 +258,10 @@ class RepositoryRoutingBenchmarkTest(unittest.TestCase):
         )
         self.assertFalse(
             report["audit"]["private_labels_provided_to_predictor"]
+        )
+        self.assertEqual(
+            ["original"],
+            report["audit"]["evaluation_variants"],
         )
         markdown = render_evaluation_markdown(report)
         self.assertIn("33.33%", markdown)

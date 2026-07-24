@@ -134,6 +134,12 @@ per-repository results, and Wilson confidence intervals.
   --summary-output .benchmark-output/preparation.json \
   --derive-out-of-scope
 
+./bin/predict-swebench-routing \
+  .benchmark-output/inputs.jsonl \
+  --snapshots .benchmark-output/snapshots.json \
+  --output .benchmark-output/predictions.jsonl \
+  --audit-output .benchmark-output/prediction-audit.json
+
 ./bin/evaluate-repository-routing \
   .benchmark-output/labels.jsonl \
   .benchmark-output/predictions.jsonl \
@@ -141,12 +147,18 @@ per-repository results, and Wilson confidence intervals.
   --output-md .benchmark-output/evaluation.md
 ```
 
-The current slice prepares and scores benchmark records; it does not yet
-download repositories, search pinned historical snapshots, or run SWE-bench
-Docker tests. See
+The local predictor scans bounded, exact-commit source snapshots without
+executing repository code or loading private labels. The held-out
+current-head pilot achieved 62.22% correct-route recall with no wrong automatic
+routes on full Issue text; after masking project/package aliases, recall was
+47.62%, two positive cases selected the wrong repository, and three
+out-of-scope cases used an unsafe fallback. This is not yet safe for unattended
+publication and is not a historical SWE-bench result. See
 [`docs/swebench-routing-benchmark.md`](docs/swebench-routing-benchmark.md) for
-the leakage boundary, prediction contract, metric definitions, and remaining
-local-search work. A company-neutral source fixture is available at
+the leakage boundary, prediction contract, metric definitions, exact pilot
+method, and remaining work. The machine-readable and Markdown summaries are
+under `reports/swebench-routing-heldout-20260724.*`. A company-neutral source
+fixture is available at
 [`examples/swebench-routing-source.example.jsonl`](examples/swebench-routing-source.example.jsonl).
 
 ## Run the natural-language to GitHub Issue flow

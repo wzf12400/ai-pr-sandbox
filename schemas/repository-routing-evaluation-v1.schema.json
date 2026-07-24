@@ -35,9 +35,13 @@
         "expected_resolved",
         "predicted_resolved",
         "resolved_on_expected_resolved",
+        "resolved_on_nonresolved_expected",
         "correct_resolved",
         "wrong_resolved",
+        "wrong_resolved_on_expected_resolved",
+        "unsafe_resolved_on_nonresolved_expected",
         "nonresolved_expected",
+        "safe_nonresolved_predictions",
         "correct_safe_abstentions"
       ],
       "properties": {
@@ -59,13 +63,25 @@
         "resolved_on_expected_resolved": {
           "$ref": "#/$defs/count"
         },
+        "resolved_on_nonresolved_expected": {
+          "$ref": "#/$defs/count"
+        },
         "correct_resolved": {
           "$ref": "#/$defs/count"
         },
         "wrong_resolved": {
           "$ref": "#/$defs/count"
         },
+        "wrong_resolved_on_expected_resolved": {
+          "$ref": "#/$defs/count"
+        },
+        "unsafe_resolved_on_nonresolved_expected": {
+          "$ref": "#/$defs/count"
+        },
         "nonresolved_expected": {
+          "$ref": "#/$defs/count"
+        },
+        "safe_nonresolved_predictions": {
           "$ref": "#/$defs/count"
         },
         "correct_safe_abstentions": {
@@ -79,8 +95,12 @@
       "required": [
         "auto_route_precision",
         "false_route_rate",
+        "positive_auto_route_precision",
+        "positive_wrong_route_rate",
         "resolved_coverage",
         "correct_route_recall",
+        "unsafe_fallback_rate",
+        "safe_nonresolution_rate",
         "exact_outcome_accuracy",
         "safe_abstention_accuracy",
         "macro_repository_recall"
@@ -92,10 +112,22 @@
         "false_route_rate": {
           "$ref": "#/$defs/nullable_ratio"
         },
+        "positive_auto_route_precision": {
+          "$ref": "#/$defs/nullable_ratio"
+        },
+        "positive_wrong_route_rate": {
+          "$ref": "#/$defs/nullable_ratio"
+        },
         "resolved_coverage": {
           "$ref": "#/$defs/nullable_ratio"
         },
         "correct_route_recall": {
+          "$ref": "#/$defs/nullable_ratio"
+        },
+        "unsafe_fallback_rate": {
+          "$ref": "#/$defs/nullable_ratio"
+        },
+        "safe_nonresolution_rate": {
           "$ref": "#/$defs/nullable_ratio"
         },
         "exact_outcome_accuracy": {
@@ -114,13 +146,25 @@
       "additionalProperties": false,
       "required": [
         "auto_route_precision",
-        "false_route_rate"
+        "false_route_rate",
+        "positive_auto_route_precision",
+        "unsafe_fallback_rate",
+        "safe_nonresolution_rate"
       ],
       "properties": {
         "auto_route_precision": {
           "$ref": "#/$defs/nullable_interval"
         },
         "false_route_rate": {
+          "$ref": "#/$defs/nullable_interval"
+        },
+        "positive_auto_route_precision": {
+          "$ref": "#/$defs/nullable_interval"
+        },
+        "unsafe_fallback_rate": {
+          "$ref": "#/$defs/nullable_interval"
+        },
+        "safe_nonresolution_rate": {
           "$ref": "#/$defs/nullable_interval"
         }
       }
@@ -186,7 +230,8 @@
       "required": [
         "private_labels_provided_to_predictor",
         "answer_fields_used_as_predictions",
-        "missing_predictions_count_as_incorrect"
+        "missing_predictions_count_as_incorrect",
+        "evaluation_variants"
       ],
       "properties": {
         "private_labels_provided_to_predictor": {
@@ -197,6 +242,20 @@
         },
         "missing_predictions_count_as_incorrect": {
           "const": true
+        },
+        "evaluation_variants": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "original",
+              "gold_removed",
+              "ambiguous_duplicate",
+              "information_ablation",
+              "gold_removed_ablation"
+            ]
+          }
         }
       }
     }

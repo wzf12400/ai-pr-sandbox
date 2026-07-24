@@ -33,7 +33,10 @@ ALLOWED_VARIANTS = {
     "gold_removed",
     "ambiguous_duplicate",
     "information_ablation",
+    "gold_removed_ablation",
 }
+ABLATION_ALIAS_SCHEMA_VERSION = "repository-routing-ablation-aliases/v1"
+ABLATION_ALIAS_PATTERN = re.compile(r"[A-Za-z0-9_.-]{2,64}")
 BLOCKED_STATEMENT = "[BLOCKED_BY_LOCAL_SENSITIVE_DATA_POLICY]"
 
 
@@ -59,6 +62,62 @@ def _source_ref(dataset_revision: str, instance_id: str) -> str:
     material = f"{dataset_revision}\n{instance_id}"
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
     return f"source_ref:{digest}"
+
+
+def _mask_repository_aliases(
+    problem_statement: str,
+    aliases: Sequence[str],
+) -> str:
+    masked = problem_statement
+    for alias in sorted(set(aliases), key=lambda value: (-len(value), value.casefold())):
+        masked = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(alias)}(?![A-Za-z0-9_])",
+            "[REDACTED_PROJECT_ALIAS]",
+            masked,
+            flags=re.IGNORECASE,
+        )
+    return masked
+
+
+def load_ablation_aliases(path: Path) -> Dict[str, Tuple[str, ...]]:
+    if path.is_symlink():
+        raise ValueError("ablation alias configuration must not be a symbolic link")
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError("unable to read ablation alias configuration") from exc
+    if not raw or len(raw) > 256_000:
+        raise ValueError("ablation alias configuration size is invalid")
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("ablation alias configuration must contain UTF-8 JSON") from exc
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "repositories"}
+        or payload.get("schema_version") != ABLATION_ALIAS_SCHEMA_VERSION
+        or not isinstance(payload.get("repositories"), dict)
+    ):
+        raise ValueError("ablation alias configuration has an invalid schema")
+    aliases: Dict[str, Tuple[str, ...]] = {}
+    for repository, raw_aliases in payload["repositories"].items():
+        if not isinstance(repository, str) or not REPOSITORY_PATTERN.fullmatch(repository):
+            raise ValueError("ablation alias repository is invalid")
+        if (
+            not isinstance(raw_aliases, list)
+            or not 1 <= len(raw_aliases) <= 20
+            or any(
+                not isinstance(alias, str)
+                or not ABLATION_ALIAS_PATTERN.fullmatch(alias)
+                for alias in raw_aliases
+            )
+            or len({alias.casefold() for alias in raw_aliases}) != len(raw_aliases)
+        ):
+            raise ValueError(f"ablation aliases are invalid for {repository}")
+        aliases[repository] = tuple(raw_aliases)
+    if not aliases:
+        raise ValueError("ablation alias configuration must not be empty")
+    return aliases
 
 
 def _load_json_rows(path: Path) -> List[Dict[str, Any]]:
@@ -203,6 +262,8 @@ def prepare_swebench_records(
     dataset_revision: str,
     derive_out_of_scope: bool = False,
     candidate_repositories: Optional[Sequence[str]] = None,
+    derive_information_ablation: bool = False,
+    repository_aliases: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     revision = dataset_revision.strip()
     if not revision or len(revision) > 128:
@@ -223,6 +284,8 @@ def prepare_swebench_records(
     labels: List[Dict[str, Any]] = []
     blocked_count = 0
     derived_count = 0
+    ablation_count = 0
+    gold_removed_ablation_count = 0
     seen_case_refs = set()
     for repository, instance_id, problem, base_commit, created_at in validated:
         if repository not in repositories:
@@ -296,6 +359,85 @@ def prepare_swebench_records(
                 )
             )
             derived_count += 1
+        if derive_information_ablation and not findings:
+            if repository_aliases is None or repository not in repository_aliases:
+                raise ValueError(
+                    f"information ablation aliases are missing for {repository}"
+                )
+            ablated_problem = _mask_repository_aliases(
+                safe_problem,
+                repository_aliases[repository],
+            )
+            if ablated_problem != safe_problem:
+                ablation_ref = _case_ref(revision, instance_id, "information_ablation")
+                if ablation_ref in seen_case_refs:
+                    raise ValueError("SWE-bench input contains duplicate ablation case")
+                seen_case_refs.add(ablation_ref)
+                inputs.append(
+                    _input_record(
+                        ablation_ref,
+                        ablated_problem,
+                        repositories,
+                        "eligible",
+                        (),
+                        case_ref,
+                    )
+                )
+                labels.append(
+                    _label_record(
+                        ablation_ref,
+                        "resolved",
+                        repository,
+                        repository,
+                        revision,
+                        instance_id,
+                        base_commit,
+                        created_at,
+                        "information_ablation",
+                    )
+                )
+                ablation_count += 1
+                if derive_out_of_scope and len(repositories) > 1:
+                    negative_ablation_ref = _case_ref(
+                        revision,
+                        instance_id,
+                        "gold_removed_ablation",
+                    )
+                    if negative_ablation_ref in seen_case_refs:
+                        raise ValueError(
+                            "SWE-bench input contains duplicate ablation case"
+                        )
+                    seen_case_refs.add(negative_ablation_ref)
+                    negative_repositories = [
+                        candidate
+                        for candidate in repositories
+                        if candidate != repository
+                    ]
+                    inputs.append(
+                        _input_record(
+                            negative_ablation_ref,
+                            ablated_problem,
+                            negative_repositories,
+                            "eligible",
+                            (),
+                            ablation_ref,
+                        )
+                    )
+                    labels.append(
+                        _label_record(
+                            negative_ablation_ref,
+                            "unknown",
+                            None,
+                            repository,
+                            revision,
+                            instance_id,
+                            base_commit,
+                            created_at,
+                            "gold_removed_ablation",
+                        )
+                    )
+                    derived_count += 1
+                    gold_removed_ablation_count += 1
     summary = {
         "schema_version": "repository-routing-benchmark-preparation/v1",
         "dataset_revision": revision,
@@ -305,9 +447,45 @@ def prepare_swebench_records(
         "candidate_repositories": repositories,
         "blocked_sensitive_rows": blocked_count,
         "derived_out_of_scope_rows": derived_count,
+        "information_ablation_rows": ablation_count,
+        "gold_removed_ablation_rows": gold_removed_ablation_count,
         "answer_fields_written_to_inputs": False,
     }
     return inputs, labels, summary
+
+
+def select_stratified_rows(
+    rows: Sequence[Mapping[str, Any]],
+    maximum_per_repository: int,
+    sample_seed: str,
+    offset_per_repository: int = 0,
+) -> List[Mapping[str, Any]]:
+    if not 1 <= maximum_per_repository <= 1_000:
+        raise ValueError("maximum per repository must be between 1 and 1000")
+    if not 0 <= offset_per_repository <= 100_000:
+        raise ValueError("repository sample offset must be between 0 and 100000")
+    seed = sample_seed.strip()
+    if not seed or len(seed) > 128:
+        raise ValueError("sample seed must be a nonempty bounded string")
+    buckets: Dict[str, List[Tuple[str, Mapping[str, Any]]]] = defaultdict(list)
+    for row in rows:
+        repository, instance_id, _problem, _base_commit, _created_at = (
+            _validate_source_row(row)
+        )
+        digest = hashlib.sha256(
+            f"{seed}\n{repository}\n{instance_id}".encode("utf-8")
+        ).hexdigest()
+        buckets[repository].append((digest, row))
+    selected = []
+    for repository in sorted(buckets, key=str.casefold):
+        selected.extend(
+            row
+            for _digest, row in sorted(buckets[repository], key=lambda item: item[0])[
+                offset_per_repository : offset_per_repository
+                + maximum_per_repository
+            ]
+        )
+    return selected
 
 
 def _load_jsonl_records(path: Path, label: str) -> List[Dict[str, Any]]:
@@ -473,10 +651,14 @@ def evaluate_routing_predictions(
     expected_resolved = 0
     predicted_resolved = 0
     resolved_on_expected_resolved = 0
+    resolved_on_nonresolved_expected = 0
     correct_resolved = 0
     wrong_resolved = 0
+    wrong_resolved_on_expected_resolved = 0
+    unsafe_resolved_on_nonresolved_expected = 0
     exact_outcomes = 0
     nonresolved_expected = 0
+    safe_nonresolved_predictions = 0
     correct_safe_abstentions = 0
     missing_predictions = 0
     per_repository: Dict[str, Counter[str]] = defaultdict(Counter)
@@ -511,6 +693,7 @@ def evaluate_routing_predictions(
                 repository_counts["correct_resolved"] += 1
             elif predicted_status == "resolved":
                 wrong_resolved += 1
+                wrong_resolved_on_expected_resolved += 1
                 repository_counts["wrong_resolved"] += 1
             else:
                 repository_counts["abstained"] += 1
@@ -518,7 +701,11 @@ def evaluate_routing_predictions(
             nonresolved_expected += 1
             if predicted_status == "resolved":
                 wrong_resolved += 1
-            elif predicted_status == expected_status:
+                resolved_on_nonresolved_expected += 1
+                unsafe_resolved_on_nonresolved_expected += 1
+            elif predicted_status in ALLOWED_STATUSES:
+                safe_nonresolved_predictions += 1
+            if predicted_status == expected_status:
                 correct_safe_abstentions += 1
                 exact_outcomes += 1
     per_repository_rows = []
@@ -549,18 +736,41 @@ def evaluate_routing_predictions(
             "expected_resolved": expected_resolved,
             "predicted_resolved": predicted_resolved,
             "resolved_on_expected_resolved": resolved_on_expected_resolved,
+            "resolved_on_nonresolved_expected": resolved_on_nonresolved_expected,
             "correct_resolved": correct_resolved,
             "wrong_resolved": wrong_resolved,
+            "wrong_resolved_on_expected_resolved": (
+                wrong_resolved_on_expected_resolved
+            ),
+            "unsafe_resolved_on_nonresolved_expected": (
+                unsafe_resolved_on_nonresolved_expected
+            ),
             "nonresolved_expected": nonresolved_expected,
+            "safe_nonresolved_predictions": safe_nonresolved_predictions,
             "correct_safe_abstentions": correct_safe_abstentions,
         },
         "metrics": {
             "auto_route_precision": auto_route_precision,
             "false_route_rate": false_route_rate,
+            "positive_auto_route_precision": _ratio(
+                correct_resolved, resolved_on_expected_resolved
+            ),
+            "positive_wrong_route_rate": _ratio(
+                wrong_resolved_on_expected_resolved,
+                resolved_on_expected_resolved,
+            ),
             "resolved_coverage": _ratio(
                 resolved_on_expected_resolved, expected_resolved
             ),
             "correct_route_recall": _ratio(correct_resolved, expected_resolved),
+            "unsafe_fallback_rate": _ratio(
+                unsafe_resolved_on_nonresolved_expected,
+                nonresolved_expected,
+            ),
+            "safe_nonresolution_rate": _ratio(
+                safe_nonresolved_predictions,
+                nonresolved_expected,
+            ),
             "exact_outcome_accuracy": _ratio(exact_outcomes, len(label_index)),
             "safe_abstention_accuracy": _ratio(
                 correct_safe_abstentions, nonresolved_expected
@@ -572,6 +782,17 @@ def evaluate_routing_predictions(
         "confidence_intervals_95": {
             "auto_route_precision": _wilson(correct_resolved, predicted_resolved),
             "false_route_rate": _wilson(wrong_resolved, predicted_resolved),
+            "positive_auto_route_precision": _wilson(
+                correct_resolved, resolved_on_expected_resolved
+            ),
+            "unsafe_fallback_rate": _wilson(
+                unsafe_resolved_on_nonresolved_expected,
+                nonresolved_expected,
+            ),
+            "safe_nonresolution_rate": _wilson(
+                safe_nonresolved_predictions,
+                nonresolved_expected,
+            ),
         },
         "expected_status_counts": dict(sorted(expected_counts.items())),
         "predicted_status_counts": dict(sorted(predicted_counts.items())),
@@ -584,6 +805,9 @@ def evaluate_routing_predictions(
             "private_labels_provided_to_predictor": False,
             "answer_fields_used_as_predictions": False,
             "missing_predictions_count_as_incorrect": True,
+            "evaluation_variants": sorted(
+                {record["variant"] for record in label_index.values()}
+            ),
         },
     }
     return report
@@ -600,6 +824,7 @@ def render_evaluation_markdown(report: Mapping[str, Any]) -> str:
         "# Repository routing evaluation",
         "",
         f"- Dataset revision: `{report['dataset_revision']}`",
+        f"- Variants: {', '.join(report['audit']['evaluation_variants'])}",
         f"- Labels / predictions: {counts['labels']} / {counts['predictions']}",
         f"- Missing predictions: {counts['missing_predictions']}",
         "",
@@ -609,17 +834,31 @@ def render_evaluation_markdown(report: Mapping[str, Any]) -> str:
         "|---|---:|",
         f"| Auto-route precision | {_percent(metrics['auto_route_precision'])} |",
         f"| False-route rate | {_percent(metrics['false_route_rate'])} |",
+        f"| Positive auto-route precision | "
+        f"{_percent(metrics['positive_auto_route_precision'])} |",
+        f"| Positive wrong-route rate | "
+        f"{_percent(metrics['positive_wrong_route_rate'])} |",
         f"| Resolved coverage | {_percent(metrics['resolved_coverage'])} |",
         f"| Correct-route recall | {_percent(metrics['correct_route_recall'])} |",
+        f"| Unsafe fallback rate | {_percent(metrics['unsafe_fallback_rate'])} |",
+        f"| Safe non-resolution rate | "
+        f"{_percent(metrics['safe_nonresolution_rate'])} |",
         f"| Exact outcome accuracy | {_percent(metrics['exact_outcome_accuracy'])} |",
-        f"| Safe abstention accuracy | {_percent(metrics['safe_abstention_accuracy'])} |",
+        f"| Exact non-resolved status accuracy | "
+        f"{_percent(metrics['safe_abstention_accuracy'])} |",
         f"| Macro repository recall | {_percent(metrics['macro_repository_recall'])} |",
         "",
         "## Counts",
         "",
         f"- Correct resolved: {counts['correct_resolved']}",
         f"- Wrong resolved: {counts['wrong_resolved']}",
+        f"- Wrong repository on resolvable cases: "
+        f"{counts['wrong_resolved_on_expected_resolved']}",
+        f"- Unsafe fallback routes: "
+        f"{counts['unsafe_resolved_on_nonresolved_expected']}",
         f"- Expected non-resolved: {counts['nonresolved_expected']}",
+        f"- Safe explicit non-resolutions: "
+        f"{counts['safe_nonresolved_predictions']}",
         f"- Correct safe abstentions: {counts['correct_safe_abstentions']}",
         "",
         "## Per repository",
@@ -655,6 +894,12 @@ def build_prepare_parser() -> argparse.ArgumentParser:
     parser.add_argument("--labels-output", type=Path, required=True)
     parser.add_argument("--summary-output", type=Path, required=True)
     parser.add_argument("--derive-out-of-scope", action="store_true")
+    parser.add_argument("--derive-information-ablation", action="store_true")
+    parser.add_argument("--repository-aliases", type=Path)
+    parser.add_argument("--max-per-repository", type=int)
+    parser.add_argument("--sample-offset-per-repository", type=int, default=0)
+    parser.add_argument("--minimum-repository-rows", type=int)
+    parser.add_argument("--sample-seed", default="repository-routing-pilot-v1")
     return parser
 
 
@@ -672,10 +917,66 @@ def prepare_main(argv: Optional[List[str]] = None) -> int:
             if output_path.exists():
                 raise FileExistsError(f"output already exists: {output_path}")
         rows = _load_json_rows(args.input)
+        total_source_rows = len(rows)
+        if (
+            args.max_per_repository is None
+            and args.sample_offset_per_repository != 0
+        ):
+            raise ValueError(
+                "--sample-offset-per-repository requires --max-per-repository"
+            )
+        if args.minimum_repository_rows is not None:
+            if not 1 <= args.minimum_repository_rows <= 100_000:
+                raise ValueError(
+                    "minimum repository rows must be between 1 and 100000"
+                )
+            repository_counts = Counter(
+                _validate_source_row(row)[0] for row in rows
+            )
+            rows = [
+                row
+                for row in rows
+                if repository_counts[_validate_source_row(row)[0]]
+                >= args.minimum_repository_rows
+            ]
+            if not rows:
+                raise ValueError("repository row filter removed every source row")
+        filtered_source_rows = len(rows)
+        if args.max_per_repository is not None:
+            rows = select_stratified_rows(
+                rows,
+                args.max_per_repository,
+                args.sample_seed,
+                args.sample_offset_per_repository,
+            )
+        repository_aliases = (
+            load_ablation_aliases(args.repository_aliases)
+            if args.repository_aliases is not None
+            else None
+        )
+        if args.derive_information_ablation and repository_aliases is None:
+            raise ValueError(
+                "--derive-information-ablation requires --repository-aliases"
+            )
         inputs, labels, summary = prepare_swebench_records(
             rows,
             args.dataset_revision,
             derive_out_of_scope=args.derive_out_of_scope,
+            derive_information_ablation=args.derive_information_ablation,
+            repository_aliases=repository_aliases,
+        )
+        summary["source_total_rows"] = total_source_rows
+        summary["source_rows_after_repository_filter"] = filtered_source_rows
+        summary["sampling"] = (
+            {
+                "strategy": "sha256_stratified_by_repository",
+                "maximum_per_repository": args.max_per_repository,
+                "offset_per_repository": args.sample_offset_per_repository,
+                "minimum_repository_rows": args.minimum_repository_rows,
+                "seed": args.sample_seed,
+            }
+            if args.max_per_repository is not None
+            else None
         )
         _write_jsonl(args.inputs_output, inputs)
         _write_jsonl(args.labels_output, labels)
@@ -697,6 +998,12 @@ def build_evaluate_parser() -> argparse.ArgumentParser:
     parser.add_argument("predictions", type=Path)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-md", type=Path, required=True)
+    parser.add_argument(
+        "--variant",
+        action="append",
+        choices=sorted(ALLOWED_VARIANTS),
+        help="Evaluate only the selected label variant; repeat for multiple variants.",
+    )
     return parser
 
 
@@ -705,8 +1012,27 @@ def evaluate_main(argv: Optional[List[str]] = None) -> int:
     try:
         if args.output_json.resolve() == args.output_md.resolve():
             raise ValueError("evaluation output paths must be distinct")
-        labels = _load_jsonl_records(args.labels, "routing labels")
-        predictions = _load_jsonl_records(args.predictions, "routing predictions")
+        labels = [
+            _validate_label(record)
+            for record in _load_jsonl_records(args.labels, "routing labels")
+        ]
+        predictions = [
+            _validate_prediction(record)
+            for record in _load_jsonl_records(
+                args.predictions, "routing predictions"
+            )
+        ]
+        if args.variant:
+            variants = set(args.variant)
+            labels = [record for record in labels if record["variant"] in variants]
+            if not labels:
+                raise ValueError("selected evaluation variants contain no labels")
+            selected_case_refs = {record["case_ref"] for record in labels}
+            predictions = [
+                record
+                for record in predictions
+                if record["case_ref"] in selected_case_refs
+            ]
         report = evaluate_routing_predictions(labels, predictions)
         if args.output_json.exists() or args.output_md.exists():
             raise FileExistsError("evaluation output already exists")

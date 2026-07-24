@@ -1,0 +1,17 @@
+{
+  "schema_version": "repository-routing-ablation-aliases/v1",
+  "repositories": {
+    "astropy/astropy": ["astropy"],
+    "django/django": ["django"],
+    "matplotlib/matplotlib": ["matplotlib", "pyplot"],
+    "mwaskom/seaborn": ["seaborn", "sns"],
+    "pallets/flask": ["flask"],
+    "psf/requests": ["requests"],
+    "pydata/xarray": ["xarray", "xr"],
+    "pylint-dev/pylint": ["pylint"],
+    "pytest-dev/pytest": ["pytest"],
+    "scikit-learn/scikit-learn": ["scikit-learn", "sklearn"],
+    "sphinx-doc/sphinx": ["sphinx"],
+    "sympy/sympy": ["sympy"]
+  }
+}
