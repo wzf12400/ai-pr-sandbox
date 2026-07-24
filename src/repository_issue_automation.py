@@ -387,6 +387,8 @@ def automate_repository_issue(
     policy: RepositoryAutoPublishPolicy,
     issue_client: GitHubIssueClient,
     auto_publish: bool,
+    *,
+    preselected_repository: str = "",
 ) -> Dict[str, Any]:
     generation_policy = _mapping(generation.get("policy"))
     review = _mapping(generation.get("review"))
@@ -409,7 +411,74 @@ def automate_repository_issue(
         and generation_policy.get("implementation_allowed") is False,
         "adapter_allowed": adapter_name in policy.allowed_adapters,
     }
-    if all(pre_resolution_rules.values()):
+    enabled_repositories = {
+        entry.repository: entry for entry in scope.enabled_repositories
+    }
+    if preselected_repository:
+        if (
+            preselected_repository not in enabled_repositories
+            or len(enabled_repositories) != 1
+        ):
+            raise ValueError(
+                "preselected repository requires the exact single enabled scope"
+            )
+    if preselected_repository and all(pre_resolution_rules.values()):
+        digest = _text(generation.get("input_sha256"))
+        selected_entry = enabled_repositories[preselected_repository]
+        resolution = {
+            "schema_version": RESOLUTION_SCHEMA_VERSION,
+            "draft_ref": f"draft_ref:{digest[:16]}",
+            "input_sha256": digest,
+            "scope_id": scope.scope_id,
+            "status": "resolved",
+            "selected_repository": preselected_repository,
+            "decision": {
+                "policy_version": RESOLUTION_POLICY_VERSION,
+                "minimum_resolved_score": MINIMUM_RESOLVED_SCORE,
+                "minimum_margin": MINIMUM_MARGIN,
+                "minimum_strong_families": MINIMUM_STRONG_FAMILIES,
+                "top_score": 100,
+                "runner_up_score": 0,
+                "margin": 100,
+                "reasons": [
+                    "repository is bound by the operator-approved single-repository scope"
+                ],
+            },
+            "candidates": [
+                {
+                    "repository": preselected_repository,
+                    "score": 100,
+                    "strong_families": MINIMUM_STRONG_FAMILIES,
+                    "conflicts": [],
+                    "evidence": [
+                        {
+                            "family": "operator_scope",
+                            "matched_term": preselected_repository,
+                            "source_paths": [],
+                            "ref": selected_entry.default_branch,
+                            "hit_count": 1,
+                            "evidence_ref": (
+                                "scope_ref:"
+                                + hashlib.sha256(
+                                    (
+                                        f"{scope.scope_id}\n"
+                                        f"{preselected_repository}"
+                                    ).encode("utf-8")
+                                ).hexdigest()[:32]
+                            ),
+                        }
+                    ],
+                }
+            ],
+            "search_audit": {
+                "provider": "operator_scope",
+                "repositories_enabled": 1,
+                "queries_executed": 0,
+                "candidate_repositories_verified": 1,
+                "raw_source_snippets_persisted": False,
+            },
+        }
+    elif all(pre_resolution_rules.values()):
         resolution = resolve_repository(generation, scope, search_adapter)
     else:
         digest = _text(generation.get("input_sha256"))

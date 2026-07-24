@@ -11,6 +11,8 @@ from src.copilot_code_modifier import (
     CopilotCLICodeModifier,
     IssueCodePolicy,
     ProcessOutput,
+    _body_for_localization,
+    build_copilot_prompt,
     evaluate_issue_approval,
     execute_issue_code_workflow,
     load_issue_code_policy,
@@ -190,6 +192,45 @@ class FakePublisher:
 
 
 class CopilotCodeModifierTest(unittest.TestCase):
+    def test_localization_masks_only_the_validated_policy_repository_line(self):
+        body = (
+            "- Repository: wzf12400/ai-pr-sandbox\n"
+            "- Reported value: wzf12400/ai-pr-sandbox\n"
+            f"<!-- repository-issue-fingerprint/v1:{FINGERPRINT} -->"
+        )
+
+        normalized = _body_for_localization(
+            body,
+            "wzf12400/ai-pr-sandbox",
+        )
+
+        self.assertIn("- Repository: [POLICY_REPOSITORY]", normalized)
+        self.assertIn("- Reported value: wzf12400/ai-pr-sandbox", normalized)
+        self.assertNotIn(FINGERPRINT, normalized)
+
+    def test_localization_drops_system_metadata_but_keeps_task_safety_checks(self):
+        source_token = "QWxhZGRpbjpvcGVuIHNlc2FtZV9zb3VyY2VfdG9rZW4="
+        task_token = "QWxhZGRpbjpvcGVuIHNlc2FtZV90YXNrX3Rva2Vu"
+        body = (
+            "## Source\n\n"
+            f"- Reference: {source_token}\n\n"
+            "## Behavior\n\n"
+            f"- Background: investigate {task_token}\n\n"
+            "## Review Gate\n\n"
+            "- Policy SHA-256: `"
+            + ("a" * 64)
+            + "`\n\n"
+            "## Acceptance Criteria\n\n"
+            "- [ ] Add multiplication.\n"
+        )
+
+        normalized = _body_for_localization(body, REPOSITORY)
+
+        self.assertNotIn(source_token, normalized)
+        self.assertNotIn("Review Gate", normalized)
+        self.assertIn(task_token, normalized)
+        self.assertIn("Add multiplication", normalized)
+
     def test_policy_is_strict_and_model_is_pinned(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "policy.json"
@@ -235,7 +276,7 @@ class CopilotCodeModifierTest(unittest.TestCase):
                 evaluate_issue_approval(missing_timestamp, policy)["approved"]
             )
 
-    def test_cli_uses_stdin_minimal_permissions_and_no_allow_all(self):
+    def test_cli_uses_programmatic_mode_minimal_permissions_and_no_allow_all(self):
         modifier = CopilotCLICodeModifier()
         calls = []
 
@@ -264,13 +305,19 @@ class CopilotCodeModifierTest(unittest.TestCase):
             )
 
         args, prompt, environment = calls[0]
-        joined = " ".join(args)
-        self.assertEqual("private approved Issue prompt", prompt)
-        self.assertNotIn("private approved Issue prompt", joined)
+        self.assertIsNone(prompt)
+        prompt_index = args.index("--prompt")
+        self.assertEqual(
+            "private approved Issue prompt",
+            args[prompt_index + 1],
+        )
         self.assertIn("--no-ask-user", args)
         self.assertIn("--disable-builtin-mcps", args)
         self.assertIn("--no-custom-instructions", args)
-        self.assertIn("--available-tools=view,grep,glob,edit", args)
+        self.assertIn(
+            "--available-tools=view,grep,glob,edit,apply_patch,create",
+            args,
+        )
         self.assertIn("--deny-tool=shell", args)
         self.assertIn("--deny-url", args)
         self.assertIn("--allow-tool=write", args)
@@ -280,6 +327,29 @@ class CopilotCodeModifierTest(unittest.TestCase):
         self.assertIn("COPILOT_HOME", environment)
         self.assertNotEqual("/shared/copilot-home", environment["COPILOT_HOME"])
         self.assertFalse(result["allow_all_used"])
+
+    def test_execution_prompt_requires_real_file_edits_not_a_plan(self):
+        issue = approved_issue()
+        with tempfile.TemporaryDirectory() as directory:
+            repo = initialize_repo(Path(directory))
+            loaded_policy = load_issue_code_policy(
+                repo / ".github" / "issue-code-policy.json"
+            )
+            prompt = build_copilot_prompt(
+                issue,
+                loaded_policy,
+                "a" * 40,
+                {
+                    "candidates": [
+                        {"path": "src/calculator.py"},
+                        {"path": "tests/test_calculator.py"},
+                    ]
+                },
+            )
+
+        self.assertIn("use the available file-editing tool", prompt)
+        self.assertIn("Do not return a plan or patch as prose", prompt)
+        self.assertIn("src/calculator.py", prompt)
 
     def test_blocked_path_change_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -352,6 +422,33 @@ class CopilotCodeModifierTest(unittest.TestCase):
             self.assertEqual(
                 "copilot_cli_invocation_failed",
                 result["modification"]["failure_reason"],
+            )
+            self.assertTrue(result["modification"]["work_branch_removed"])
+            current_branch = subprocess.run(
+                ["git", "-C", str(repo), "branch", "--show-current"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self.assertEqual("main", current_branch)
+
+    def test_success_without_changes_removes_empty_work_branch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = initialize_repo(Path(directory))
+
+            result = execute_issue_code_workflow(
+                ISSUE_URL,
+                repo,
+                repo / ".github" / "issue-code-policy.json",
+                FakeIssueClient(),
+                FakeModifier(),
+                execute=True,
+            )
+
+            self.assertEqual("blocked", result["status"])
+            self.assertEqual(
+                ["Copilot produced no file changes"],
+                result["changes"]["reasons"],
             )
             self.assertTrue(result["modification"]["work_branch_removed"])
             current_branch = subprocess.run(

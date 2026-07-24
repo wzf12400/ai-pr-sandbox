@@ -31,6 +31,14 @@ For a natural-language description plus one log file, prefer the repository entr
 
 Inspect the generated Markdown before publication. A separately authorized human can add `--repository OWNER/REPO --publish --confirm`; the command still rejects blocked output and inputs that require credential security review.
 
+The terminal agent may instead reuse the employee's selected Copilot CLI model
+for two separate structured calls: Issue generation and independent Issue
+review. That provider must expose no tools, repository files, network URLs,
+MCP servers, memory, or custom instructions; it must return one strict JSON
+object to the same local schema, evidence, sensitive-data, and reviewer
+validators. Reusing Copilot removes per-employee AI gateway configuration but
+does not authorize Issue publication or code modification.
+
 ## Select The Input Path
 
 ### OpenSearch Dashboards Discover URL
@@ -166,6 +174,37 @@ accepts a raw upstream source or local Issue draft, shares a Copilot identity,
 uses allow-all permissions, merges, deploys, or performs a production action.
 Treat failed or retained branches as blocked outcomes, not authorization to
 bypass a gate.
+
+The local approved-Issue dispatcher connects repository-owned approval labels
+to that modifier:
+
+```bash
+./bin/watch-approved-issues \
+  --repo /path/to/repository \
+  --once \
+  --dry-run \
+  --output /path/to/repository/.issue-code-output/dispatch-preflight.json
+```
+
+It requires `--once`; operators must start with the documented `--dry-run`
+path. It refetches each bounded candidate, reruns the approval and
+sensitive-data gates, rejects an existing claim/work branch or Draft PR,
+dispatches at most one Issue, and requires the modifier to observe the same
+Issue snapshot.
+
+After a reviewed dry-run, a separately authorized operator may replace
+`--dry-run` with `--execute`, or use the explicit `--publish-pr` mode.
+Execution atomically competes for a separate
+remote claim branch, refetches the exact snapshot before and after the claim,
+then calls the local employee's Copilot CLI, validates the diff, and runs only
+policy tests. `--publish-pr` may additionally commit, push, and create a Draft
+PR only after those gates pass. The claim is retained on every outcome. The CLI
+does not automatically approve labels, publish claim comments/checks,
+expire/release/retry claims, poll continuously, merge, deploy, or perform
+production actions. The terminal agent may apply approval labels and start
+this exact-Issue publication mode only after displaying and recording a
+combined human approval. Do not describe either entry as a durable daemon or
+an unattended merge service.
 
 ## Publication Boundary
 

@@ -35,6 +35,12 @@ STOP_WORDS = {
 }
 STRUCTURAL_WORDS = {"parent", "base", "inherit", "inherits", "mixin", "slots", "dict"}
 NOTEBOOK_FRAME_PATTERN = re.compile(r"<(?:(?:i)?python-)?input-\d+-[A-Fa-f0-9]+>", re.IGNORECASE)
+SOURCE_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_.-])"
+    r"((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+"
+    r"(?:\.(?:c|cc|cpp|cs|go|h|hpp|java|js|jsx|kt|kts|php|py|rb|rs|scala|swift|ts|tsx)))"
+    r"(?![A-Za-z0-9_-]|\.[A-Za-z0-9])"
+)
 
 
 @dataclass(frozen=True)
@@ -136,6 +142,9 @@ def extract_terms(title: str, body: str) -> Tuple[List[str], List[str]]:
             if len(term) >= 2:
                 code_terms.add(term)
                 code_terms.add(term.rsplit(".", 1)[-1])
+    for term in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", text):
+        if len(term) >= 2:
+            code_terms.add(term)
     words = {
         part
         for part in _camel_parts(text)
@@ -255,6 +264,7 @@ def locate_issue(repo: Path, title: str, body: str, top_k: int = 10) -> Dict[str
     top_k = max(1, min(top_k, MAX_CANDIDATES))
 
     code_terms, words = extract_terms(safe_title, safe_body)
+    referenced_paths = sorted(set(SOURCE_PATH_PATTERN.findall(f"{safe_title}\n{safe_body}")))
     files: Dict[str, str] = {}
     classes: List[ClassInfo] = []
     candidates: Dict[str, Candidate] = {}
@@ -283,6 +293,12 @@ def locate_issue(repo: Path, title: str, body: str, top_k: int = 10) -> Dict[str
         if total > 0:
             candidate = candidates.setdefault(relative, Candidate(relative))
             candidate.add(total, f"文本命中：{', '.join(matches) if matches else '路径关键词'}", line)
+
+    for relative in referenced_paths:
+        if relative not in files:
+            continue
+        candidate = candidates.setdefault(relative, Candidate(relative))
+        candidate.add(80.0, f"Issue 直接引用文件 {relative}", 1)
 
     class_names = {info.name for info in classes}
     query_classes = {
@@ -348,6 +364,7 @@ def locate_issue(repo: Path, title: str, body: str, top_k: int = 10) -> Dict[str
             "code_terms": code_terms[:30],
             "keywords": words[:50],
             "query_classes": sorted(query_classes),
+            "referenced_paths": referenced_paths[:20],
             "safety": {
                 "status": "passed_with_redactions" if safety_findings else "passed",
                 "handled_categories": sorted({finding.category for finding in safety_findings}),
