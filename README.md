@@ -204,6 +204,34 @@ inputs, safety boundary, reproduction commands, and measured result. The
 machine-readable output is stored in
 [`reports/real-project-sympy-20567.json`](reports/real-project-sympy-20567.json).
 
+## Modify code from an approved Issue with Copilot CLI
+
+The guarded downstream command uses the current employee's locally
+authenticated GitHub Copilot CLI. It requires an open, fingerprinted GitHub
+Issue with the repository policy's approval label and a clean checkout whose
+tracked `.github/issue-code-policy.json` matches the target repository.
+
+Run a read-only preflight first:
+
+```bash
+./bin/modify-approved-issue \
+  https://github.com/OWNER/REPOSITORY/issues/123 \
+  --repo /path/to/repository \
+  --output .issue-code-output/issue-123-preflight.json
+```
+
+`--execute` creates an Issue-bound local branch, asks Copilot to make bounded
+changes, validates the diff, and runs only the policy test commands.
+`--publish-pr` additionally commits, pushes, and creates a Draft PR after all
+gates pass. Neither mode can merge or deploy.
+
+Every employee installs `copilot` and runs `copilot login` with their own
+company-authorized GitHub account. The workflow never shares user credentials,
+never invokes `--allow-all`/`--yolo`, and does not persist the raw prompt or
+Copilot transcript. See
+[`docs/copilot-cli-code-modification.md`](docs/copilot-cli-code-modification.md)
+for policy fields, commands, audit output, and current limitations.
+
 ## Generate an Issue with AI
 
 The AI command accepts a sanitized `issue-intake/v1` record, a

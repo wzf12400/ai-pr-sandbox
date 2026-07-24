@@ -1,0 +1,45 @@
+{
+  "schema_version": "issue-code-policy/v1",
+  "policy_id": "ai-pr-sandbox-copilot-v1",
+  "repository": "wzf12400/ai-pr-sandbox",
+  "provider": "github-copilot-cli",
+  "base_branch": "main",
+  "branch_prefix": "codex/copilot",
+  "required_labels": [
+    "ai-code-approved"
+  ],
+  "allowed_models": [
+    "gpt-5.6-sol"
+  ],
+  "default_model": "gpt-5.6-sol",
+  "allowed_write_paths": [
+    "src/**",
+    "tests/**"
+  ],
+  "blocked_write_paths": [
+    ".github/**",
+    ".git/**",
+    "deploy/**",
+    "infrastructure/**"
+  ],
+  "test_commands": [
+    [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests",
+      "-v"
+    ]
+  ],
+  "limits": {
+    "max_changed_files": 5,
+    "max_added_lines": 300,
+    "max_deleted_lines": 150,
+    "copilot_timeout_seconds": 900,
+    "test_timeout_seconds": 300
+  },
+  "draft_pr_only": true,
+  "auto_merge": false
+}
