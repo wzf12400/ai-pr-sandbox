@@ -2,6 +2,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -670,16 +671,20 @@ class ApprovedIssueDispatcherTest(unittest.TestCase):
             repo = initialize_repo(Path(directory))
             modifier = FakeWritingModifier()
 
-            report = dispatch_once(
-                repo,
-                repo / ".github" / "issue-code-policy.json",
-                FakeCandidateClient(),
-                FakeIssueClient(),
-                FakeStateInspector(),
-                modifier,
-                execute=True,
-                claimer=FakeClaimer(),
-            )
+            with mock.patch.dict(
+                os.environ,
+                {"PYTHONPYCACHEPREFIX": str(repo / ".python-cache")},
+            ):
+                report = dispatch_once(
+                    repo,
+                    repo / ".github" / "issue-code-policy.json",
+                    FakeCandidateClient(),
+                    FakeIssueClient(),
+                    FakeStateInspector(),
+                    modifier,
+                    execute=True,
+                    claimer=FakeClaimer(),
+                )
 
             self.assertEqual("tested", report["status"])
             self.assertEqual(
@@ -692,6 +697,7 @@ class ApprovedIssueDispatcherTest(unittest.TestCase):
             self.assertEqual(
                 0, report["dispatch"]["modifier_report"]["tests"][0]["returncode"]
             )
+            self.assertFalse((repo / ".python-cache").exists())
             self.assertEqual(1, len(modifier.calls))
 
     def test_claim_conflict_stops_before_copilot(self):

@@ -738,9 +738,16 @@ def _body_for_localization(body: str, repository: str) -> str:
 
 def run_tests(repo: Path, policy: IssueCodePolicy) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
+    test_environment = dict(os.environ)
+    test_environment["PYTHONDONTWRITEBYTECODE"] = "1"
     for command in policy.test_commands:
         started = time.monotonic()
-        result = _run_process(command, repo, policy.limits.test_timeout_seconds)
+        result = _run_process(
+            command,
+            repo,
+            policy.limits.test_timeout_seconds,
+            env=test_environment,
+        )
         results.append(
             {
                 "command": list(command),
