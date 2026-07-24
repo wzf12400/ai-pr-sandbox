@@ -189,7 +189,8 @@
             "original",
             "gold_removed",
             "ambiguous_duplicate",
-            "information_ablation"
+            "information_ablation",
+            "gold_removed_ablation"
           ]
         }
       },

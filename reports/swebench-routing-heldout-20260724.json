@@ -1,0 +1,106 @@
+{
+  "schema_version": "repository-routing-heldout-report/v1",
+  "dataset": {
+    "name": "SWE-bench/SWE-bench_Verified",
+    "revision": "fd80552a1f66168960a36eb84c498a0d535eacfb",
+    "parquet_sha256": "43ed5a3d1d98da36472c1ade65ddd2085d7b4ff694fcaf6a023a07c5c1f32f21",
+    "total_rows": 500
+  },
+  "sample": {
+    "role": "held_out",
+    "strategy": "sha256_stratified_by_repository",
+    "seed": "repository-routing-pilot-v1",
+    "minimum_repository_rows": 10,
+    "offset_per_repository": 5,
+    "maximum_per_repository": 5,
+    "repositories": 9,
+    "source_rows": 45,
+    "full_text_cases": 90,
+    "information_ablation_cases": 84
+  },
+  "predictor": {
+    "policy_version": "repository-routing-lexical-snapshot/v1",
+    "minimum_resolved_score": 55,
+    "minimum_margin": 20,
+    "minimum_evidence_terms": 2,
+    "ambiguous_score": 25,
+    "private_labels_loaded": false,
+    "raw_problem_statements_persisted": false
+  },
+  "snapshots": {
+    "kind": "current_head_proxy",
+    "captured_at": "2026-07-24T02:28:34Z",
+    "historical_snapshot": false,
+    "repositories_known": 12,
+    "repositories_indexed": 9,
+    "files_scanned": 15631,
+    "bytes_scanned": 131672297,
+    "commits": {
+      "astropy/astropy": "72c76fc6d25ffa5577fc7f7ec7abe007c2b36213",
+      "django/django": "50c2b7c83661a61da48f78dd0130fc3cbf8ed39f",
+      "matplotlib/matplotlib": "c07379b0c647d0066c650c963888197930877d76",
+      "mwaskom/seaborn": "f04b6cd5484267a0885d1fed068e99dff3a1b226",
+      "pallets/flask": "36e4a824f340fdee7ed50937ba8e7f6bc7d17f81",
+      "psf/requests": "69f84847045bef7a849cc994a26fe7ba8a169e95",
+      "pydata/xarray": "adc8005a209919bf71296c7f3f6fc4c736a3f443",
+      "pylint-dev/pylint": "b7a1cbfddfabb688f205bb82999a45accebdae8c",
+      "pytest-dev/pytest": "a53a4d99c4ded7f30b712d57068d92243a731ce7",
+      "scikit-learn/scikit-learn": "a6f6e9b1b03f3ee90d433df9d00566d21b8bd956",
+      "sphinx-doc/sphinx": "9af5b469df42c810c62453661c1974c0f254e674",
+      "sympy/sympy": "992192249032ab37e91ba022083d3923ac8cdb85"
+    }
+  },
+  "results": {
+    "full_text": {
+      "expected_resolved": 45,
+      "correct_resolved": 28,
+      "wrong_resolved_on_expected_resolved": 0,
+      "unsafe_resolved_on_nonresolved_expected": 0,
+      "auto_route_precision": 1.0,
+      "auto_route_precision_ci95": [
+        0.8793566952341543,
+        1.0
+      ],
+      "correct_route_recall": 0.6222222222222222,
+      "unsafe_fallback_rate": 0.0,
+      "unsafe_fallback_rate_ci95": [
+        0.0,
+        0.07865159873288836
+      ],
+      "safe_nonresolution_rate": 1.0,
+      "macro_repository_recall": 0.6222222222222222
+    },
+    "information_ablation": {
+      "expected_resolved": 42,
+      "correct_resolved": 20,
+      "wrong_resolved_on_expected_resolved": 2,
+      "unsafe_resolved_on_nonresolved_expected": 3,
+      "auto_route_precision": 0.8,
+      "auto_route_precision_ci95": [
+        0.6086904963045967,
+        0.9113941531319742
+      ],
+      "positive_auto_route_precision": 0.9090909090909091,
+      "positive_auto_route_precision_ci95": [
+        0.7218505315839417,
+        0.9747045710090046
+      ],
+      "correct_route_recall": 0.47619047619047616,
+      "unsafe_fallback_rate": 0.07142857142857142,
+      "unsafe_fallback_rate_ci95": [
+        0.02459040987330592,
+        0.19009426801158313
+      ],
+      "safe_nonresolution_rate": 0.9285714285714286,
+      "macro_repository_recall": 0.47777777777777775
+    }
+  },
+  "decision": {
+    "unattended_publication_ready": false,
+    "reasons": [
+      "information-ablation cases include wrong positive repository selections",
+      "information-ablation out-of-scope cases include unsafe fallback routes",
+      "the pilot uses current-head rather than per-case historical snapshots"
+    ]
+  }
+}

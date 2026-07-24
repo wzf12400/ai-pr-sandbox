@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/repository-routing-snapshot-manifest-v1.schema.json",
+  "title": "Repository routing source snapshot manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "snapshot_kind",
+    "captured_at",
+    "repositories"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "repository-routing-snapshot-manifest/v1"
+    },
+    "snapshot_kind": {
+      "enum": [
+        "current_head_proxy",
+        "historical_cutoff"
+      ]
+    },
+    "captured_at": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "repositories": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repository",
+          "path",
+          "commit"
+        ],
+        "properties": {
+          "repository": {
+            "$ref": "#/$defs/repository"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "commit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
+    }
+  }
+}
