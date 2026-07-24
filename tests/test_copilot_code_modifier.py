@@ -74,6 +74,9 @@ def initialize_repo(root: Path) -> Path:
     (repo / "src").mkdir()
     (repo / "tests").mkdir()
     (repo / ".github").mkdir()
+    (repo / ".gitignore").write_text(
+        "__pycache__/\n*.py[cod]\n", encoding="utf-8"
+    )
     (repo / "src" / "calculator.py").write_text(
         "def add(left, right):\n    return left + right\n", encoding="utf-8"
     )
