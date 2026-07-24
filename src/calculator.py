@@ -7,3 +7,7 @@ def add(left: float, right: float) -> float:
 
 def subtract(left: float, right: float) -> float:
     return left - right
+
+
+def multiply(left: float, right: float) -> float:
+    return left * right
