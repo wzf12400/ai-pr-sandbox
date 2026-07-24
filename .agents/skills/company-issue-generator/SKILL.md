@@ -147,7 +147,25 @@ python3 -m src.phase_one locate-github-issue APPROVED_ISSUE.json \
 
 Treat returned files, symbols, and lines as ranked candidates rather than facts. Bind line references to the reported commit SHA. Record the Issue number on later branches, commits, tests, and draft PRs so the audit chain remains intact.
 
-This repository does not yet implement the full Issue-to-Code, test, and draft-PR workflow. Do not describe those stages as available until their code and gates exist.
+The first guarded local-user Issue-to-Code slice is available through:
+
+```bash
+./bin/modify-approved-issue \
+  https://github.com/OWNER/REPOSITORY/issues/123 \
+  --repo /path/to/repository \
+  --output .issue-code-output/issue-123-preflight.json
+```
+
+It requires one open, fingerprinted GitHub Issue, the repository policy's
+approval labels, a clean pinned base commit, and a tracked
+`.github/issue-code-policy.json`. Default mode is read-only localization.
+`--execute` may call the current employee's locally authenticated GitHub
+Copilot CLI, validate the resulting diff, and run only policy-listed tests.
+`--publish-pr` may create a Draft PR only after those gates pass. It never
+accepts a raw upstream source or local Issue draft, shares a Copilot identity,
+uses allow-all permissions, merges, deploys, or performs a production action.
+Treat failed or retained branches as blocked outcomes, not authorization to
+bypass a gate.
 
 ## Publication Boundary
 

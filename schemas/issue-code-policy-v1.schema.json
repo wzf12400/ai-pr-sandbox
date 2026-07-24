@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/issue-code-policy-v1.schema.json",
+  "title": "Issue Code Policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_id",
+    "repository",
+    "provider",
+    "base_branch",
+    "branch_prefix",
+    "required_labels",
+    "allowed_models",
+    "default_model",
+    "allowed_write_paths",
+    "blocked_write_paths",
+    "test_commands",
+    "limits",
+    "draft_pr_only",
+    "auto_merge"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "issue-code-policy/v1"
+    },
+    "policy_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,80}$"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "provider": {
+      "const": "github-copilot-cli"
+    },
+    "base_branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "branch_prefix": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "required_labels": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+      }
+    },
+    "allowed_models": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_.-]{1,100}$"
+      }
+    },
+    "default_model": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,100}$"
+    },
+    "allowed_write_paths": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      }
+    },
+    "blocked_write_paths": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      }
+    },
+    "test_commands": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 30,
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_changed_files",
+        "max_added_lines",
+        "max_deleted_lines",
+        "copilot_timeout_seconds",
+        "test_timeout_seconds"
+      ],
+      "properties": {
+        "max_changed_files": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "max_added_lines": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000
+        },
+        "max_deleted_lines": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000
+        },
+        "copilot_timeout_seconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600
+        },
+        "test_timeout_seconds": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 3600
+        }
+      }
+    },
+    "draft_pr_only": {
+      "const": true
+    },
+    "auto_merge": {
+      "const": false
+    }
+  }
+}

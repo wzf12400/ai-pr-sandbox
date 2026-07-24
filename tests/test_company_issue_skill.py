@@ -36,7 +36,8 @@ class CompanyIssueSkillTest(unittest.TestCase):
 
         self.assertIn("The approved GitHub Issue is the only downstream task entry.", content)
         self.assertIn("Do not run code localization or modification from a local Issue draft.", content)
-        self.assertIn("does not yet implement the full Issue-to-Code", content)
+        self.assertIn("The first guarded local-user Issue-to-Code slice is available", content)
+        self.assertIn("uses allow-all permissions, merges, deploys", content)
 
 
 if __name__ == "__main__":

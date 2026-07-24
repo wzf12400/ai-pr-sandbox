@@ -280,12 +280,17 @@ def render_automated_issue_body(
         "> AI-generated draft. Publication was authorized by a reviewed deterministic policy; AI did not authorize this Issue.",
         1,
     )
+    body = body.replace(
+        "- AI implementation allowed: no",
+        "- AI implementation permission: separate downstream policy required",
+        1,
+    )
     body += (
         "\n\n## Automated routing audit\n\n"
         f"- Resolution policy: `{RESOLUTION_POLICY_VERSION}`\n"
         f"- Publication policy: `{policy.policy_id}`\n"
         f"- Publication policy SHA-256: `{policy.policy_sha256}`\n"
-        "- Code modification authorized: no\n\n"
+        "- Code modification approval: separate downstream policy required\n\n"
         f"{_fingerprint_marker(fingerprint)}\n"
     )
     if find_sensitive_data(body):
