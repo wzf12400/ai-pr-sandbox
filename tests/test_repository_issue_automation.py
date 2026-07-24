@@ -87,6 +87,52 @@ class FakeIssueClient:
 
 
 class RepositoryIssueAutomationTest(unittest.TestCase):
+    def test_operator_approved_single_repository_scope_skips_code_search(self):
+        single_scope = RepositorySearchScope(
+            "synthetic-routing-probe",
+            (RepositoryEntry(REPOSITORIES[0], True, "main", ("probe",)),),
+            SearchLimits(12, 1, 5),
+        )
+        client = FakeIssueClient()
+        search = FakeSearchAdapter()
+
+        result = automate_repository_issue(
+            generation(),
+            {"safety": {"ai_allowed": True, "security_review_required": False}},
+            single_scope,
+            search,
+            "github-tree-probe",
+            policy(),
+            client,
+            False,
+            preselected_repository=REPOSITORIES[0],
+        )
+
+        self.assertEqual("resolved", result["resolution"]["status"])
+        self.assertEqual(
+            "operator_scope",
+            result["resolution"]["search_audit"]["provider"],
+        )
+        self.assertEqual([], search.calls)
+        self.assertEqual(
+            "approved_not_published",
+            result["publication"]["status"],
+        )
+
+    def test_preselected_repository_is_rejected_for_multi_repository_scope(self):
+        with self.assertRaisesRegex(ValueError, "single enabled scope"):
+            automate_repository_issue(
+                generation(),
+                {"safety": {"ai_allowed": True, "security_review_required": False}},
+                scope(),
+                FakeSearchAdapter(),
+                "github-tree-probe",
+                policy(),
+                FakeIssueClient(),
+                False,
+                preselected_repository=REPOSITORIES[0],
+            )
+
     def test_dry_run_approves_but_does_not_publish(self):
         client = FakeIssueClient()
 

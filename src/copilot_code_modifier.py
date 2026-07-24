@@ -32,6 +32,13 @@ AUDIT_SHA_LINE_PATTERN = re.compile(
     r"(?im)^- (?:Publication policy|Issue snapshot|Code policy) SHA-256:\s*"
     r"`[0-9a-f]{64}`\s*$"
 )
+LOCALIZATION_EXCLUDED_SECTIONS = frozenset(
+    {
+        "Source",
+        "Review Gate",
+        "Automated routing audit",
+    }
+)
 ISSUE_URL_PATTERN = re.compile(
     r"https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/"
     r"(?P<repo>[A-Za-z0-9_.-]+)/issues/(?P<number>[1-9][0-9]*)"
@@ -606,6 +613,8 @@ class CopilotCLICodeModifier:
         args = [
             self.executable,
             "-s",
+            "--prompt",
+            prompt,
             "--no-ask-user",
             "--no-auto-update",
             "--no-custom-instructions",
@@ -614,7 +623,7 @@ class CopilotCLICodeModifier:
             "--no-remote-export",
             "--disable-builtin-mcps",
             "--disallow-temp-dir",
-            "--available-tools=view,grep,glob,edit",
+            "--available-tools=view,grep,glob,edit,apply_patch,create",
             "--model",
             model,
             "--allow-tool=write",
@@ -645,7 +654,6 @@ class CopilotCLICodeModifier:
                 args,
                 repo,
                 timeout_seconds,
-                input_text=prompt,
                 env=environment,
             )
         elapsed = round(time.monotonic() - started, 3)
@@ -685,6 +693,9 @@ def build_copilot_prompt(
         "or git history.\n"
         "Do not run commands or tests, commit, push, create a pull request, install dependencies, "
         "or change permissions. The deterministic wrapper will run approved tests after you exit.\n"
+        "This is execution mode: inspect the referenced files and use the available file-editing "
+        "tool to make the required code and test changes now. Do not return a plan or patch as "
+        "prose, and do not report completion unless the working tree has actual edits.\n"
         "Make the smallest code and test changes needed to satisfy known acceptance criteria.\n"
         "Preserve unknown facts and do not implement reported hypotheses as facts.\n"
         f"Base commit: {base_commit}\n"
@@ -699,18 +710,44 @@ def build_copilot_prompt(
     )
 
 
-def _body_for_localization(body: str) -> str:
-    normalized = FINGERPRINT_PATTERN.sub(
-        "<!-- repository-issue-fingerprint/v1:[AUDIT_DIGEST] -->", body
+def _body_for_localization(body: str, repository: str) -> str:
+    """Project a canonical Issue onto task-bearing text for code localization.
+
+    System-owned provenance and approval sections are deliberately excluded.
+    Unknown values in task-bearing sections remain subject to the locator's
+    normal high-entropy and secret checks.
+    """
+    retained_lines: List[str] = []
+    excluded = False
+    for line in body.splitlines():
+        heading = re.fullmatch(r"##\s+(.+?)\s*", line)
+        if heading:
+            excluded = heading.group(1) in LOCALIZATION_EXCLUDED_SECTIONS
+        if not excluded:
+            retained_lines.append(line)
+    normalized = "\n".join(retained_lines)
+    normalized = FINGERPRINT_PATTERN.sub("", normalized)
+    normalized = AUDIT_SHA_LINE_PATTERN.sub(
+        "- Audit SHA-256: `[AUDIT_DIGEST]`", normalized
     )
-    return AUDIT_SHA_LINE_PATTERN.sub("- Audit SHA-256: `[AUDIT_DIGEST]`", normalized)
+    repository_line = re.compile(
+        rf"(?im)^(- Repository:\s*){re.escape(repository)}\s*$"
+    )
+    return repository_line.sub(r"\1[POLICY_REPOSITORY]", normalized).strip()
 
 
 def run_tests(repo: Path, policy: IssueCodePolicy) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
+    test_environment = dict(os.environ)
+    test_environment["PYTHONDONTWRITEBYTECODE"] = "1"
     for command in policy.test_commands:
         started = time.monotonic()
-        result = _run_process(command, repo, policy.limits.test_timeout_seconds)
+        result = _run_process(
+            command,
+            repo,
+            policy.limits.test_timeout_seconds,
+            env=test_environment,
+        )
         results.append(
             {
                 "command": list(command),
@@ -811,7 +848,8 @@ class GitHubCLIDraftPRPublisher:
         return url
 
 
-def _branch_name(policy: IssueCodePolicy, issue: ApprovedIssue) -> str:
+def issue_work_branch_name(policy: IssueCodePolicy, issue: ApprovedIssue) -> str:
+    """Return the deterministic branch reserved for one exact Issue snapshot."""
     return f"{policy.branch_prefix}/issue-{issue.number}-{issue.sha256[:8]}"
 
 
@@ -845,9 +883,12 @@ def execute_issue_code_workflow(
     approval = evaluate_issue_approval(issue, policy)
     copilot_version = modifier.version(repo)
     location = locate_issue(
-        repo, issue.title, _body_for_localization(issue.body), top_k=10
+        repo,
+        issue.title,
+        _body_for_localization(issue.body, policy.repository),
+        top_k=10,
     )
-    branch = _branch_name(policy, issue)
+    branch = issue_work_branch_name(policy, issue)
     report: Dict[str, Any] = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "status": "ready" if approval["approved"] else "blocked",
@@ -925,6 +966,10 @@ def execute_issue_code_workflow(
     report["changes"] = changes
     if not changes["valid"]:
         report["status"] = "blocked"
+        if not changes["paths"]:
+            report["modification"]["work_branch_removed"] = (
+                _cleanup_empty_work_branch(repo, policy, branch)
+            )
         return report
 
     refreshed = issue_client.fetch(issue_url)

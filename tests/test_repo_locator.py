@@ -8,6 +8,61 @@ from src.repo_locator import extract_terms, load_github_issue, locate_issue
 
 
 class RepoLocatorTest(unittest.TestCase):
+    def test_explicit_source_paths_outrank_template_language(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "src").mkdir()
+            (repo / "tests").mkdir()
+            (repo / "src" / "calculator.py").write_text(
+                "def add(left, right):\n    return left + right\n",
+                encoding="utf-8",
+            )
+            (repo / "tests" / "test_calculator.py").write_text(
+                "from src.calculator import add\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "init", "-b", "main", str(repo)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.name", "Test User"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "add", "src/calculator.py", "tests/test_calculator.py"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "calculator fixture"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+
+            result = locate_issue(
+                repo,
+                "Add multiply",
+                (
+                    "Modify src/calculator.py and tests/test_calculator.py. "
+                    "Add multiply(left, right)."
+                ),
+            )
+
+        self.assertEqual(
+            ["src/calculator.py", "tests/test_calculator.py"],
+            result["query"]["referenced_paths"],
+        )
+        ranked_paths = [item["path"] for item in result["candidates"][:2]]
+        self.assertEqual(
+            {"src/calculator.py", "tests/test_calculator.py"},
+            set(ranked_paths),
+        )
+
     def test_extracts_code_identifiers_without_whole_issue_context(self) -> None:
         code_terms, words = extract_terms(
             "WidgetController regression",

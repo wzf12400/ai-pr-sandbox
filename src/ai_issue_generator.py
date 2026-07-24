@@ -55,6 +55,12 @@ CRITICAL_CLAIM_PATHS = [
     "$.problem.current_behavior",
     "$.problem.expected_behavior",
 ]
+AGGREGATE_EVIDENCE_CLAIM_PATHS = frozenset(
+    {
+        "$.acceptance_criteria",
+        "$.reproduction.steps",
+    }
+)
 
 REQUEST_TYPES = ["Bug", "Feature", "Performance", "Security", "Refactor", "Documentation", "Unknown"]
 SEVERITIES = ["S0", "S1", "S2", "S3", "Unknown"]
@@ -582,6 +588,41 @@ def _path_values(value: Any, path: str = "$") -> Iterable[Tuple[str, Any]]:
             yield from _path_values(item, f"{path}[{index}]")
 
 
+def _normalize_evidence_mappings(draft: Dict[str, Any]) -> Dict[str, Any]:
+    """Expand supported array-level evidence mappings into strict leaf paths."""
+    mappings = draft.get("evidence")
+    if not isinstance(mappings, list):
+        return draft
+    values = dict(_path_values(draft))
+    normalized: List[Any] = []
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            normalized.append(mapping)
+            continue
+        claim_path = mapping.get("claim_path")
+        source_paths = mapping.get("source_paths")
+        if (
+            not isinstance(claim_path, str)
+            or claim_path not in AGGREGATE_EVIDENCE_CLAIM_PATHS
+            or not isinstance(source_paths, list)
+            or not isinstance(values.get(claim_path), list)
+        ):
+            normalized.append(mapping)
+            continue
+        leaf_paths = list(_leaf_paths(values[claim_path], claim_path))
+        if not leaf_paths:
+            normalized.append(mapping)
+            continue
+        normalized.extend(
+            {
+                "claim_path": leaf_path,
+                "source_paths": list(source_paths),
+            }
+            for leaf_path in leaf_paths
+        )
+    return {**draft, "evidence": normalized}
+
+
 def _has_known_value(value: Any) -> bool:
     if isinstance(value, str):
         return _known(value)
@@ -605,7 +646,12 @@ def _actionable_unsupported_claims(draft: Dict[str, Any], paths: List[str]) -> L
 
 
 def _explicit_expected_paths(evidence: Dict[str, Any]) -> List[str]:
-    suffixes = (".expected_behavior", ".expected_result", ".expected_response")
+    suffixes = (
+        ".expected_behavior",
+        ".expected_result",
+        ".expected_response",
+        ".requested_change",
+    )
     return sorted(path for path in _leaf_paths(evidence) if path.endswith(suffixes))
 
 
@@ -732,8 +778,25 @@ def validate_draft(draft: Dict[str, Any], evidence: Dict[str, Any]) -> Tuple[Lis
     target = draft["object"]
     if not any(_known(target[key]) for key in ("service", "module", "code_object")):
         errors.append("AI output must identify at least one object field from evidence")
-    if not _known(draft["error"]["message"]) and not _known(draft["problem"]["current_behavior"]):
-        errors.append("AI output must preserve an error or current behavior from evidence")
+    request_type = draft["request_type"]
+    has_observed_problem = _known(draft["error"]["message"]) or _known(
+        draft["problem"]["current_behavior"]
+    )
+    has_expected_behavior = _known(draft["problem"]["expected_behavior"])
+    if request_type in {"Bug", "Performance", "Security"} and not has_observed_problem:
+        errors.append(
+            "bug, performance, or security output must preserve an error or current behavior"
+        )
+    elif request_type in {"Feature", "Refactor", "Documentation"} and not has_expected_behavior:
+        errors.append(
+            "feature, refactor, or documentation output must preserve the requested change"
+        )
+    elif request_type == "Unknown" and not (
+        has_observed_problem or has_expected_behavior
+    ):
+        errors.append(
+            "unknown request output must preserve an observed problem or requested change"
+        )
     if not _known(draft["problem"]["expected_behavior"]) and draft["acceptance_criteria"]:
         errors.append("acceptance criteria require a known expected behavior")
     factual_fields = {
@@ -769,7 +832,7 @@ has no path in explicit_expected_behavior_source_paths, expected_behavior must b
 restate expected behavior supported by the evidence. Reproduction steps must be concise
 user actions or executable commands; never split stack traces, separators, or observed
 output into separate steps. Put observed errors in the error fields. For every known critical claim, add an evidence item whose
-claim_path is a JSON path in the draft and whose source_paths are exact leaf paths from
+claim_path is an exact scalar JSON leaf path in the draft and whose source_paths are exact leaf paths from
 available_evidence_paths. When facts.qualified_class and facts.code_method are present,
 copy them exactly to object.code_object and interface.method and map each claim to its
 dedicated fact path. The model does not authorize publication or implementation."""
@@ -802,6 +865,13 @@ def generate_issue(
         },
         schema_name="ai_issue_draft",
         schema=ISSUE_SCHEMA,
+    )
+    normalized_draft = _normalize_evidence_mappings(generated.content)
+    generated = Completion(
+        content=normalized_draft,
+        request_id=generated.request_id,
+        model=generated.model,
+        usage=generated.usage,
     )
     validation_errors, validation_warnings = validate_draft(generated.content, compact)
 

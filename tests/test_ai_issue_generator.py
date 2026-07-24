@@ -15,6 +15,7 @@ from src.ai_issue_generator import (
     generate_issue,
     render_markdown,
     validate_draft,
+    _normalize_evidence_mappings,
 )
 
 
@@ -188,6 +189,181 @@ class AIIssueGeneratorTest(unittest.TestCase):
         self.assertIn(
             "expected behavior requires a dedicated expected-behavior evidence field",
             errors,
+        )
+
+    def test_feature_request_uses_requested_change_without_error_or_current_behavior(self):
+        evidence = {
+            "schema_version": "ai-issue-evidence/v1",
+            "source": {
+                "type": "natural_language",
+                "reference": "local_ref:test",
+                "url": "",
+            },
+            "safety": {"status": "sanitized", "ai_allowed": True},
+            "facts": {
+                "reported_description": "在 calculator 模块新增乘法功能。",
+                "requested_change": "在 calculator 模块新增乘法功能。",
+            },
+        }
+        draft = valid_draft()
+        draft["request_type"] = "Feature"
+        draft["object"].update(
+            {
+                "product": "unknown",
+                "repository": "unknown",
+                "service": "unknown",
+                "module": "calculator",
+                "code_object": "unknown",
+                "owner": "unknown",
+            }
+        )
+        draft["interface"] = {
+            "protocol": "unknown",
+            "method": "unknown",
+            "path_or_topic": "unknown",
+            "upstream": "unknown",
+            "downstream": "unknown",
+        }
+        draft["error"].update(
+            {
+                "error_code": "unknown",
+                "exception_type": "unknown",
+                "message": "unknown",
+            }
+        )
+        draft["problem"].update(
+            {
+                "current_behavior": "unknown",
+                "expected_behavior": "在 calculator 模块新增乘法功能。",
+            }
+        )
+        draft["acceptance_criteria"] = ["calculator 支持两个数相乘。"]
+        draft["evidence"] = [
+            {
+                "claim_path": "$.object.module",
+                "source_paths": ["$.facts.requested_change"],
+            },
+            {
+                "claim_path": "$.problem.expected_behavior",
+                "source_paths": ["$.facts.requested_change"],
+            },
+        ]
+
+        errors, _ = validate_draft(draft, evidence)
+
+        self.assertEqual([], errors)
+
+    def test_array_level_acceptance_evidence_is_expanded_to_leaf_paths(self):
+        draft = valid_draft()
+        draft["acceptance_criteria"] = [
+            "multiply(2, 3) returns 6.",
+            "multiply(0, 8) returns 0.",
+        ]
+        draft["evidence"].append(
+            {
+                "claim_path": "$.acceptance_criteria",
+                "source_paths": ["$.facts.body"],
+            }
+        )
+
+        normalized = _normalize_evidence_mappings(draft)
+
+        claim_paths = [item["claim_path"] for item in normalized["evidence"]]
+        self.assertNotIn("$.acceptance_criteria", claim_paths)
+        self.assertIn("$.acceptance_criteria[0]", claim_paths)
+        self.assertIn("$.acceptance_criteria[1]", claim_paths)
+        errors, _ = validate_draft(
+            normalized,
+            compact_evidence(self.public_issue),
+        )
+        self.assertNotIn(
+            "unknown claim path in evidence mapping: $.acceptance_criteria",
+            errors,
+        )
+
+    def test_feature_with_unknown_current_behavior_remains_reviewable(self):
+        evidence = {
+            "schema_version": "ai-issue-evidence/v1",
+            "source": {
+                "type": "natural_language",
+                "reference": "local_ref:test",
+                "url": "",
+            },
+            "safety": {"status": "sanitized", "ai_allowed": True},
+            "facts": {
+                "requested_change": (
+                    "Add multiply(left, right) with positive and zero tests."
+                )
+            },
+        }
+        draft = valid_draft()
+        draft["request_type"] = "Feature"
+        draft["object"] = {
+            "product": "unknown",
+            "repository": "unknown",
+            "service": "unknown",
+            "module": "src/calculator.py",
+            "code_object": "multiply(left, right)",
+            "owner": "unknown",
+        }
+        draft["interface"] = {
+            "protocol": "unknown",
+            "method": "unknown",
+            "path_or_topic": "unknown",
+            "upstream": "unknown",
+            "downstream": "unknown",
+        }
+        draft["error"] = {
+            "error_code": "unknown",
+            "exception_type": "unknown",
+            "message": "unknown",
+        }
+        draft["problem"]["reported_hypothesis"] = "unknown"
+        draft["problem"]["current_behavior"] = "unknown"
+        draft["problem"]["expected_behavior"] = evidence["facts"][
+            "requested_change"
+        ]
+        draft["acceptance_criteria"] = [
+            "multiply(2, 3) returns 6.",
+            "multiply(0, 8) returns 0.",
+        ]
+        draft["missing_information"] = ["Current behavior is unknown."]
+        draft["evidence"] = [
+            {
+                "claim_path": "$.object.module",
+                "source_paths": ["$.facts.requested_change"],
+            },
+            {
+                "claim_path": "$.object.code_object",
+                "source_paths": ["$.facts.requested_change"],
+            },
+            {
+                "claim_path": "$.problem.expected_behavior",
+                "source_paths": ["$.facts.requested_change"],
+            },
+            {
+                "claim_path": "$.acceptance_criteria",
+                "source_paths": ["$.facts.requested_change"],
+            },
+        ]
+        review = passing_review()
+        review["verdict"] = "needs_clarification"
+        review["missing_critical_fields"] = ["$.problem.current_behavior"]
+
+        result = generate_issue(
+            evidence,
+            FakeProvider(draft),
+            FakeProvider(review),
+        )
+
+        self.assertEqual("needs_human_context", result["state"])
+        self.assertTrue(result["validation"]["valid"])
+        self.assertTrue(
+            all(
+                item["claim_path"].startswith("$.acceptance_criteria[")
+                for item in result["draft"]["evidence"]
+                if item["claim_path"].startswith("$.acceptance_criteria")
+            )
         )
 
     def test_sensitive_ai_output_is_rejected_without_echoing_secret(self):

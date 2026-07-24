@@ -232,6 +232,78 @@ Copilot transcript. See
 [`docs/copilot-cli-code-modification.md`](docs/copilot-cli-code-modification.md)
 for policy fields, commands, audit output, and current limitations.
 
+## Watch approved Issues and dispatch code work
+
+The local watcher connects approved GitHub Issues to the existing code
+modifier. It polls one repository once, revalidates the Issue and tracked code
+policy, rejects existing claims, work branches, or Draft PRs, and dispatches at
+most one candidate. Start with a read-only preflight:
+
+```bash
+./bin/watch-approved-issues \
+  --repo /path/to/repository \
+  --once \
+  --dry-run \
+  --output /path/to/repository/.issue-code-output/dispatch-preflight.json
+```
+
+After reviewing that report, `--once --execute` creates a conflict-detecting
+remote claim for the exact Issue snapshot, calls the current employee's
+Copilot CLI, validates the bounded diff, and runs only policy-listed tests:
+
+```bash
+./bin/watch-approved-issues \
+  --repo /path/to/repository \
+  --once \
+  --execute \
+  --output /path/to/repository/.issue-code-output/dispatch-execution.json
+```
+
+The claim is retained as an idempotency record. Execution leaves the tested
+code changes on a local work branch. An explicit `--once --publish-pr` mode
+uses the same claim and gates, then commits, pushes, and creates a Draft PR.
+Neither mode retries, merges, deploys, or runs as a background service. See
+[`docs/approved-issue-dispatcher.md`](docs/approved-issue-dispatcher.md) for the
+selection, snapshot, idempotency, audit, and next-stage claim boundaries.
+
+## Run the terminal agent
+
+`bin/ai-agent` provides one Codex-style terminal flow. It reads the current
+GitHub and Copilot CLI identities, validates the configured repository and its
+tracked `.github/issue-code-policy.json`, and then offers two inputs:
+
+- one-line natural-language change request;
+- bounded OpenSearch Dashboards log intake.
+
+Start it from the project checkout:
+
+```bash
+./bin/ai-agent
+```
+
+Natural-language input is recorded as an explicit requested change, so feature,
+refactor, and documentation requests do not need to invent an error or current
+behavior. Bug, performance, and security reports still require an observed
+problem. When exactly one repository is enabled, its operator-approved local
+configuration binds the target without requiring class names or a GitHub code
+search. Multiple enabled repositories still require evidence-grounded
+resolution. After sanitization, independent Issue generation/review, and
+repository resolution, the terminal shows the exact Issue body and one combined
+approval. Approval publishes the Issue, applies repository-owned approval
+labels, claims the exact Issue snapshot, runs Copilot and policy tests, and
+creates a Draft PR. It never merges or deploys.
+
+Log mode asks for a complete bounded Discover URL, a read-only username, and a
+password entered without echo. The password is never stored. The connector
+fetches at most 50 whitelisted-field records, sanitizes and groups them before
+showing candidates, and persists only sanitized artifacts. The selected
+candidate enters the same Issue preview and approval path.
+
+Use `./bin/ai-agent --configure` to replace the local repository configuration,
+`--request '...'` to supply a request directly, `--logs` for log mode, or
+`--preview-only` to stop before all remote writes. See
+[`docs/terminal-control-center.md`](docs/terminal-control-center.md).
+
 ## Generate an Issue with AI
 
 The AI command accepts a sanitized `issue-intake/v1` record, a
