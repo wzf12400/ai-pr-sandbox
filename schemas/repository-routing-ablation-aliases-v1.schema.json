@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/repository-routing-ablation-aliases-v1.schema.json",
+  "title": "Repository routing information-ablation aliases v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repositories"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "repository-routing-ablation-aliases/v1"
+    },
+    "repositories": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 20,
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{2,64}$"
+        }
+      }
+    }
+  }
+}

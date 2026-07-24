@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/repository-routing-pilot-audit-v1.schema.json",
+  "title": "Repository routing lexical snapshot pilot audit v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_version",
+    "snapshot_kind",
+    "historical_snapshot",
+    "captured_at",
+    "thresholds",
+    "index",
+    "cases",
+    "status_counts",
+    "case_audit",
+    "private_labels_loaded",
+    "raw_problem_statements_persisted"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "repository-routing-pilot-audit/v1"
+    },
+    "policy_version": {
+      "const": "repository-routing-lexical-snapshot/v1"
+    },
+    "snapshot_kind": {
+      "enum": [
+        "current_head_proxy",
+        "historical_cutoff"
+      ]
+    },
+    "historical_snapshot": {
+      "type": "boolean"
+    },
+    "captured_at": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimum_resolved_score",
+        "minimum_margin",
+        "minimum_evidence_terms",
+        "ambiguous_score"
+      ],
+      "properties": {
+        "minimum_resolved_score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "minimum_margin": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "minimum_evidence_terms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 24
+        },
+        "ambiguous_score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repositories_known",
+        "repositories_indexed",
+        "files_scanned",
+        "bytes_scanned",
+        "query_terms_indexed",
+        "raw_source_snippets_persisted"
+      ],
+      "properties": {
+        "repositories_known": {
+          "$ref": "#/$defs/count"
+        },
+        "repositories_indexed": {
+          "$ref": "#/$defs/count"
+        },
+        "files_scanned": {
+          "$ref": "#/$defs/count"
+        },
+        "bytes_scanned": {
+          "$ref": "#/$defs/count"
+        },
+        "query_terms_indexed": {
+          "$ref": "#/$defs/count"
+        },
+        "raw_source_snippets_persisted": {
+          "const": false
+        }
+      }
+    },
+    "cases": {
+      "$ref": "#/$defs/count"
+    },
+    "status_counts": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "resolved",
+          "ambiguous",
+          "unknown",
+          "blocked"
+        ]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/count"
+      }
+    },
+    "case_audit": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "case_ref",
+          "terms_extracted",
+          "repositories_with_evidence",
+          "top_evidence_terms",
+          "evidence_ref",
+          "outside_scope_alias_ref"
+        ],
+        "properties": {
+          "case_ref": {
+            "type": "string",
+            "pattern": "^swebench_ref:[0-9a-f]{32}$"
+          },
+          "terms_extracted": {
+            "$ref": "#/$defs/count"
+          },
+          "repositories_with_evidence": {
+            "$ref": "#/$defs/count"
+          },
+          "top_evidence_terms": {
+            "$ref": "#/$defs/count"
+          },
+          "evidence_ref": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^pilot_ref:[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outside_scope_alias_ref": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^alias_ref:[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "private_labels_loaded": {
+      "const": false
+    },
+    "raw_problem_statements_persisted": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}
