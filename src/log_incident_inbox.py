@@ -20,6 +20,7 @@ from src.issue_entry import compose_evidence
 
 INBOX_SCHEMA_VERSION = "local-log-incident-inbox/v1"
 INCIDENT_ID_PATTERN = re.compile(r"INC-[0-9A-F]{12}")
+ISSUE_FINGERPRINT_PATTERN = re.compile(r"issue_ref:[0-9a-f]{20}")
 MAX_INBOX_BYTES = 8_000_000
 MAX_ARTIFACT_BYTES = 1_000_000
 ACTIVE_STATUSES = frozenset(
@@ -203,7 +204,7 @@ class LogIncidentInbox:
                 if isinstance(signature, dict)
                 else ""
             )
-            if fingerprint and not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            if fingerprint and not ISSUE_FINGERPRINT_PATTERN.fullmatch(fingerprint):
                 raise ValueError("日志候选指纹无效。")
             existing_id = by_reference.get(reference) or (
                 by_fingerprint.get(fingerprint) if fingerprint else None

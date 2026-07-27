@@ -21,7 +21,8 @@ def error_hit(document_id="error-1"):
             "stream": "stdout",
             "message": (
                 "[2026-07-27 08:00:00.000] [TID: trace-demo] ERROR [worker-1] "
-                "com.example.CalculatorService:42 - multiply returned an invalid result"
+                "com.example.CalculatorService:42 - java.lang.IllegalStateException "
+                "at com.example.CalculatorService.multiply(CalculatorService.java:42)"
             ),
             "kubernetes": {
                 "namespace_name": "synthetic",
@@ -81,6 +82,10 @@ class LogIncidentInboxTest(unittest.TestCase):
         self.assertEqual(1, len(records))
         self.assertEqual("pending", records[0]["status"])
         self.assertEqual(2, records[0]["occurrence_count"])
+        self.assertRegex(
+            records[0]["issue_fingerprint"],
+            r"^issue_ref:[0-9a-f]{20}$",
+        )
         self.assertEqual(0o600, mode)
         self.assertNotIn("raw-document-id", persisted)
 
