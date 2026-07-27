@@ -15,6 +15,7 @@ from src.terminal_control_center import (
     _load_or_create_log_key,
     _review_incident,
     _resolved_log_connection,
+    _run_interactive_session,
     _run_record,
     _run_resume,
     _run_with_spinner,
@@ -216,12 +217,51 @@ class TerminalControlCenterTest(unittest.TestCase):
             _interactive_input("review inc-123456789abc"),
         )
         self.assertEqual(("help", ""), _interactive_input("帮助"))
+        self.assertEqual(("exit", ""), _interactive_input("退出"))
+        self.assertEqual(("empty", ""), _interactive_input("  "))
         self.assertEqual(
             ("request", "在计算器模块新增乘法功能"),
             _interactive_input("在计算器模块新增乘法功能"),
         )
         with self.assertRaisesRegex(ValueError, "未知终端命令"):
             _interactive_input("/unknown")
+
+    def test_interactive_session_recovers_from_empty_log_password(self):
+        output = io.StringIO()
+        config = SimpleNamespace(
+            log_source=SimpleNamespace(
+                discover_url="https://logs.example.test/discover",
+                username="reader",
+                max_scan_hits=1000,
+            )
+        )
+        args = SimpleNamespace(
+            preview_only=False,
+            max_scan_hits=None,
+            discover_url="",
+            username="",
+            log_output=Path("logs"),
+            log_key=Path("key.json"),
+            log_scan_state=Path("cursor.json"),
+        )
+        answers = iter(["log", "help", "exit"])
+        with tempfile.TemporaryDirectory() as directory:
+            code = _run_interactive_session(
+                root=Path(directory),
+                config=config,
+                workflow=mock.Mock(),
+                inbox=mock.Mock(),
+                terminal=Terminal(output, color=False),
+                input_fn=lambda _prompt: next(answers),
+                password_fn=lambda _prompt: "",
+                args=args,
+            )
+
+        rendered = output.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("日志平台密码不能为空", rendered)
+        self.assertGreaterEqual(rendered.count("功能入口"), 2)
+        self.assertIn("会话已结束", rendered)
 
     def test_terminal_preview_can_be_cancelled_without_approval(self):
         output = io.StringIO()

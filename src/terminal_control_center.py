@@ -44,6 +44,7 @@ SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 INTERACTIVE_LOG_ALIASES = frozenset({"/logs", "logs", "log", "日志", "日志平台"})
 INTERACTIVE_INBOX_ALIASES = frozenset({"/inbox", "inbox", "收件箱", "异常收件箱"})
 INTERACTIVE_HELP_ALIASES = frozenset({"/help", "help", "帮助", "?"})
+INTERACTIVE_EXIT_ALIASES = frozenset({"/exit", "exit", "quit", "q", "退出", "结束"})
 
 
 class Terminal:
@@ -87,12 +88,16 @@ def _prompt(input_fn: Callable[[str], str], text: str) -> str:
 def _interactive_input(value: str) -> tuple[str, str]:
     text = value.strip()
     normalized = text.casefold()
+    if not text:
+        return "empty", ""
     if normalized in INTERACTIVE_LOG_ALIASES:
         return "logs", ""
     if normalized in INTERACTIVE_INBOX_ALIASES:
         return "inbox", ""
     if normalized in INTERACTIVE_HELP_ALIASES:
         return "help", ""
+    if normalized in INTERACTIVE_EXIT_ALIASES:
+        return "exit", ""
     review = re.fullmatch(
         r"(?:/?review|审阅|查看)\s+(INC-[0-9A-Fa-f]{12})",
         text,
@@ -112,6 +117,7 @@ def _show_interactive_menu(terminal: Terminal) -> None:
     terminal.line("  inbox / 收件箱        查看已脱敏的异常收件箱")
     terminal.line("  review INCIDENT_ID    审阅一个异常并选择处理范围")
     terminal.line("  help / 帮助           再次显示本菜单")
+    terminal.line("  exit / 退出           结束当前会话")
 
 
 def _configure_one_repository(
@@ -884,6 +890,94 @@ def _watch_logs(
     return 0
 
 
+def _run_interactive_session(
+    *,
+    root: Path,
+    config: ControlCenterConfig,
+    workflow: ControlCenterWorkflow,
+    inbox: LogIncidentInbox,
+    terminal: Terminal,
+    input_fn: Callable[[str], str],
+    password_fn: Callable[[str], str],
+    args: argparse.Namespace,
+) -> int:
+    _show_interactive_menu(terminal)
+    while True:
+        try:
+            entered = _prompt(input_fn, "输入需求或功能命令: ")
+        except EOFError:
+            terminal.line()
+            terminal.ok("会话已结束。")
+            return 0
+        try:
+            action, value = _interactive_input(entered)
+            if action == "empty":
+                terminal.warn("请输入需求或命令。")
+                continue
+            if action == "exit":
+                terminal.ok("会话已结束。")
+                return 0
+            if action == "help":
+                _show_interactive_menu(terminal)
+                continue
+            if action == "inbox":
+                _show_inbox(terminal, inbox)
+                continue
+            if action == "review":
+                _review_incident(
+                    incident_id=value,
+                    inbox=inbox,
+                    workflow=workflow,
+                    terminal=terminal,
+                    input_fn=input_fn,
+                    preview_only=args.preview_only,
+                )
+                continue
+            if action == "logs":
+                max_scan_hits = (
+                    args.max_scan_hits
+                    if args.max_scan_hits is not None
+                    else config.log_source.max_scan_hits
+                    if config.log_source is not None
+                    else kibana_issue_connector.DEFAULT_MAX_SCAN_HITS
+                )
+                discover_url, username = _resolved_log_connection(
+                    config,
+                    discover_url=args.discover_url,
+                    username=args.username,
+                )
+                evidence = _fetch_log_candidate(
+                    root=root,
+                    terminal=terminal,
+                    input_fn=input_fn,
+                    discover_url=discover_url,
+                    username=username,
+                    output_path=args.log_output,
+                    key_path=args.log_key,
+                    scan_state_path=args.log_scan_state,
+                    max_scan_hits=max_scan_hits,
+                    inbox=inbox,
+                    password_fn=password_fn,
+                )
+                initial = workflow.create_from_evidence(evidence)
+            else:
+                initial = workflow.create(value)
+            terminal.section("生成计划")
+            _run_record(
+                workflow,
+                initial,
+                terminal,
+                input_fn,
+                preview_only=args.preview_only,
+            )
+        except EOFError:
+            terminal.line()
+            terminal.ok("会话已结束。")
+            return 0
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            terminal.fail(str(exc))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the guarded Issue-to-code workflow entirely in the terminal."
@@ -1044,28 +1138,16 @@ def main(
         use_logs = args.logs
         request = (args.request or "").strip()
         if not args.logs and not request:
-            _show_interactive_menu(terminal)
-            entered = _prompt(
-                input_fn,
-                "输入需求或功能命令: ",
+            return _run_interactive_session(
+                root=root,
+                config=config,
+                workflow=workflow,
+                inbox=inbox,
+                terminal=terminal,
+                input_fn=input_fn,
+                password_fn=password_fn,
+                args=args,
             )
-            action, value = _interactive_input(entered)
-            if action == "help":
-                _show_interactive_menu(terminal)
-                return 0
-            if action == "inbox":
-                return _show_inbox(terminal, inbox)
-            if action == "review":
-                return _review_incident(
-                    incident_id=value,
-                    inbox=inbox,
-                    workflow=workflow,
-                    terminal=terminal,
-                    input_fn=input_fn,
-                    preview_only=args.preview_only,
-                )
-            use_logs = action == "logs"
-            request = value
         if use_logs:
             max_scan_hits = (
                 args.max_scan_hits

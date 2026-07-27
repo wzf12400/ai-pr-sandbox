@@ -284,6 +284,9 @@ Start it from the project checkout:
 With no arguments, the terminal shows the natural-language, log, inbox,
 incident-review, and help entries. `logs`, `/logs`, and `日志` are equivalent;
 command-like input is classified locally before any Issue-generation call.
+This interactive session remains open after completed operations and
+recoverable errors. Use `exit`/`退出` or Ctrl-D to close it. Explicit CLI
+commands remain one-shot for automation.
 
 Natural-language input is recorded as an explicit requested change, so feature,
 refactor, and documentation requests do not need to invent an error or current
