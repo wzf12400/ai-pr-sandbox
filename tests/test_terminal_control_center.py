@@ -386,6 +386,8 @@ class TerminalControlCenterTest(unittest.TestCase):
         self.assertEqual("sanitized", evidence["safety"]["status"])
         self.assertNotIn("temporary-password", persisted)
         self.assertNotIn("temporary-password", output.getvalue())
+        self.assertNotIn("原始响应不落盘", output.getvalue())
+        self.assertIn("扫描 1 · 有效 1 · 异常 1", output.getvalue())
 
     def test_log_review_issue_only_does_not_select_code_scope(self):
         output = io.StringIO()

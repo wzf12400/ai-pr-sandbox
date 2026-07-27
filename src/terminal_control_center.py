@@ -409,7 +409,7 @@ def _fetch_log_candidate(
     )
     username = username or _prompt(input_fn, "只读日志账号: ")
     password = os.environ.get(kibana_issue_connector.PASSWORD_ENV, "") or password_fn(
-        "› 日志平台密码（不会保存）: "
+        "› 日志密码: "
     )
     if not password:
         raise ValueError("日志平台密码不能为空。")
@@ -424,16 +424,18 @@ def _fetch_log_candidate(
     )
     candidates = summary.get("candidates", [])
     selection = summary.get("selection", {})
-    terminal.field("Scanned", str(selection.get("scanned_hits", 0)))
-    terminal.field("Sanitized", str(selection.get("eligible_events", 0)))
-    terminal.field("Incidents", str(len(candidates)))
+    terminal.ok(
+        f"扫描 {selection.get('scanned_hits', 0)} · "
+        f"有效 {selection.get('eligible_events', 0)} · "
+        f"异常 {len(candidates)}"
+    )
     if not candidates:
         raise ValueError("没有可进入 AI 流程的安全错误候选。")
     terminal.section("选择异常")
     for index, item in enumerate(candidates, start=1):
         services = ", ".join(item.get("services", [])) or "unknown"
         terminal.line(
-            f"  {index}. {services} · {item.get('event_count', 0)} events · "
+            f"  {index}. {services} · {item.get('event_count', 0)} 条 · "
             f"{item.get('first_seen_at', '')}"
         )
     selected = _prompt(input_fn, f"选择 1-{len(candidates)} [1]: ") or "1"
@@ -466,7 +468,6 @@ def _poll_log_candidates(
     output_path = output_path if output_path.is_absolute() else root / output_path
     key_path = key_path if key_path.is_absolute() else root / key_path
     terminal.section("读取日志")
-    terminal.line("  只读取最多 50 条错误候选；原始响应不落盘。")
     stdout = io.StringIO()
     stderr = io.StringIO()
     environment = {
@@ -778,7 +779,7 @@ def _watch_logs(
         )
         terminal.ok("日志地址、只读账号和轮询间隔已保存；密码未保存。")
     password = os.environ.get(kibana_issue_connector.PASSWORD_ENV, "") or password_fn(
-        "› 日志平台密码（仅本次进程使用，不会保存）: "
+        "› 日志密码: "
     )
     if not password:
         raise ValueError("日志平台密码不能为空。")
