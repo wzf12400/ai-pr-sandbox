@@ -10,6 +10,7 @@ from unittest import mock
 from src.terminal_control_center import (
     Terminal,
     _fetch_log_candidate,
+    _interactive_input,
     _load_or_create_log_key,
     _review_incident,
     _run_record,
@@ -158,6 +159,23 @@ class FakeInbox:
 
 
 class TerminalControlCenterTest(unittest.TestCase):
+    def test_interactive_commands_are_not_sent_as_change_requests(self):
+        for value in ("/logs", "logs", "LOG", "日志", "日志平台"):
+            self.assertEqual(("logs", ""), _interactive_input(value))
+        for value in ("inbox", "/inbox", "收件箱", "异常收件箱"):
+            self.assertEqual(("inbox", ""), _interactive_input(value))
+        self.assertEqual(
+            ("review", "INC-123456789ABC"),
+            _interactive_input("review inc-123456789abc"),
+        )
+        self.assertEqual(("help", ""), _interactive_input("帮助"))
+        self.assertEqual(
+            ("request", "在计算器模块新增乘法功能"),
+            _interactive_input("在计算器模块新增乘法功能"),
+        )
+        with self.assertRaisesRegex(ValueError, "未知终端命令"):
+            _interactive_input("/unknown")
+
     def test_terminal_preview_can_be_cancelled_without_approval(self):
         output = io.StringIO()
         workflow = FakeWorkflow(prepared_record())

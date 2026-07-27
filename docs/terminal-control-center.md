@@ -9,9 +9,12 @@ Run:
 ```
 
 The terminal displays the active GitHub account, Copilot model, validated
-repository checkout, and policy-owned write scope. It then accepts one input:
-a natural-language change request, or `/logs` to read an OpenSearch Dashboards
-candidate.
+repository checkout, and policy-owned write scope. With no command-line
+arguments it shows a small function menu. Employees may enter a natural-language
+change request, `logs`/`日志`/`/logs`, `inbox`/`收件箱`,
+`review INCIDENT_ID`, or `help`. Command-like input is classified locally
+before any AI call; unknown slash commands are rejected instead of becoming
+Issue text.
 
 The natural-language path treats the employee's request as explicit requested
 behavior. Feature, refactor, and documentation work therefore does not require

@@ -8,6 +8,7 @@ import getpass
 import io
 import json
 import os
+import re
 import secrets
 import sys
 import time
@@ -37,6 +38,9 @@ DEFAULT_LOG_KEY_PATH = Path(".issue-entry-state/log-sanitizer-key.json")
 DEFAULT_LOG_INBOX_PATH = Path(".issue-entry-state/log-inbox.json")
 TERMINAL_STATES = {"awaiting_approval", "completed", "blocked"}
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+INTERACTIVE_LOG_ALIASES = frozenset({"/logs", "logs", "log", "日志", "日志平台"})
+INTERACTIVE_INBOX_ALIASES = frozenset({"/inbox", "inbox", "收件箱", "异常收件箱"})
+INTERACTIVE_HELP_ALIASES = frozenset({"/help", "help", "帮助", "?"})
 
 
 class Terminal:
@@ -75,6 +79,36 @@ class Terminal:
 
 def _prompt(input_fn: Callable[[str], str], text: str) -> str:
     return input_fn(f"› {text}").strip()
+
+
+def _interactive_input(value: str) -> tuple[str, str]:
+    text = value.strip()
+    normalized = text.casefold()
+    if normalized in INTERACTIVE_LOG_ALIASES:
+        return "logs", ""
+    if normalized in INTERACTIVE_INBOX_ALIASES:
+        return "inbox", ""
+    if normalized in INTERACTIVE_HELP_ALIASES:
+        return "help", ""
+    review = re.fullmatch(
+        r"(?:/?review|审阅|查看)\s+(INC-[0-9A-Fa-f]{12})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if review:
+        return "review", review.group(1).upper()
+    if text.startswith("/"):
+        raise ValueError("未知终端命令；输入 help 查看可用功能。")
+    return "request", text
+
+
+def _show_interactive_menu(terminal: Terminal) -> None:
+    terminal.section("功能入口")
+    terminal.line("  直接输入需求          自然语言 → Issue → AI 修改 → Draft PR")
+    terminal.line("  logs / 日志           从日志平台读取并选择异常")
+    terminal.line("  inbox / 收件箱        查看已脱敏的异常收件箱")
+    terminal.line("  review INCIDENT_ID    审阅一个异常并选择处理范围")
+    terminal.line("  help / 帮助           再次显示本菜单")
 
 
 def _configure_one_repository(
@@ -900,12 +934,28 @@ def main(
         use_logs = args.logs
         request = (args.request or "").strip()
         if not args.logs and not request:
-            terminal.section("输入")
-            request = _prompt(
+            _show_interactive_menu(terminal)
+            entered = _prompt(
                 input_fn,
-                "描述你要改变什么（输入 /logs 读取日志平台）: ",
+                "输入需求或功能命令: ",
             )
-            use_logs = request.casefold() == "/logs"
+            action, value = _interactive_input(entered)
+            if action == "help":
+                _show_interactive_menu(terminal)
+                return 0
+            if action == "inbox":
+                return _show_inbox(terminal, inbox)
+            if action == "review":
+                return _review_incident(
+                    incident_id=value,
+                    inbox=inbox,
+                    workflow=workflow,
+                    terminal=terminal,
+                    input_fn=input_fn,
+                    preview_only=args.preview_only,
+                )
+            use_logs = action == "logs"
+            request = value
         if use_logs:
             evidence = _fetch_log_candidate(
                 root=root,

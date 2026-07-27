@@ -281,6 +281,10 @@ Start it from the project checkout:
 ./bin/ai-agent
 ```
 
+With no arguments, the terminal shows the natural-language, log, inbox,
+incident-review, and help entries. `logs`, `/logs`, and `日志` are equivalent;
+command-like input is classified locally before any Issue-generation call.
+
 Natural-language input is recorded as an explicit requested change, so feature,
 refactor, and documentation requests do not need to invent an error or current
 behavior. Bug, performance, and security reports still require an observed
