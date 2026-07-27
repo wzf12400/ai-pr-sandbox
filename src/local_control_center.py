@@ -32,7 +32,11 @@ from src.copilot_code_modifier import (
 from src.copilot_issue_provider import CopilotCLIIssueProvider
 from src.issue_draft import _atomic_write_json, _atomic_write_text
 from src.issue_entry import compose_evidence
-from src.kibana_issue_connector import parse_discover_url
+from src.kibana_issue_connector import (
+    DEFAULT_MAX_SCAN_HITS,
+    MAX_SCAN_HITS,
+    parse_discover_url,
+)
 from src.natural_language_issue_automation import (
     GitHubCLICodeSearchAdapter,
     GitHubCLIIssueClient,
@@ -235,6 +239,7 @@ class LogSourceConfig:
     time_to: str
     username: str
     interval_seconds: int
+    max_scan_hits: int
 
     @property
     def discover_url(self) -> str:
@@ -252,6 +257,7 @@ class LogSourceConfig:
             "time_to": self.time_to,
             "username": self.username,
             "interval_seconds": self.interval_seconds,
+            "max_scan_hits": self.max_scan_hits,
         }
 
 
@@ -376,6 +382,14 @@ class LocalConfigStore:
             or not MIN_LOG_INTERVAL_SECONDS <= interval <= MAX_LOG_INTERVAL_SECONDS
         ):
             raise ValueError("log polling interval must be between 60 and 3600 seconds")
+        max_scan_hits = value.get("max_scan_hits", DEFAULT_MAX_SCAN_HITS)
+        if (
+            not isinstance(max_scan_hits, int)
+            or not 1 <= max_scan_hits <= MAX_SCAN_HITS
+        ):
+            raise ValueError(
+                f"log scan limit must be between 1 and {MAX_SCAN_HITS}"
+            )
         discover_url = str(value.get("discover_url", "")).strip()
         if discover_url:
             target = parse_discover_url(discover_url)
@@ -394,6 +408,7 @@ class LocalConfigStore:
             time_to=target.time_to,
             username=username,
             interval_seconds=interval,
+            max_scan_hits=max_scan_hits,
         )
 
     def parse(self, payload: Mapping[str, Any]) -> ControlCenterConfig:
@@ -521,6 +536,7 @@ class LocalConfigStore:
         discover_url: str,
         username: str,
         interval_seconds: int,
+        max_scan_hits: int,
     ) -> ControlCenterConfig:
         payload = {
             "schema_version": CONFIG_SCHEMA_VERSION,
@@ -538,6 +554,7 @@ class LocalConfigStore:
                 "discover_url": discover_url,
                 "username": username,
                 "interval_seconds": interval_seconds,
+                "max_scan_hits": max_scan_hits,
             },
         }
         updated = self.parse(payload)

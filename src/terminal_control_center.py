@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,8 @@ from src.log_incident_inbox import LogIncidentInbox
 DEFAULT_LOG_OUTPUT_PATH = Path(".issue-entry-output/log-intake")
 DEFAULT_LOG_KEY_PATH = Path(".issue-entry-state/log-sanitizer-key.json")
 DEFAULT_LOG_INBOX_PATH = Path(".issue-entry-state/log-inbox.json")
+DEFAULT_LOG_SCAN_STATE_PATH = Path(".issue-entry-state/log-scan-cursor.json")
+MAX_DISPLAYED_LOG_CANDIDATES = 20
 TERMINAL_STATES = {"awaiting_approval", "completed", "blocked"}
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 INTERACTIVE_LOG_ALIASES = frozenset({"/logs", "logs", "log", "日志", "日志平台"})
@@ -151,6 +154,7 @@ def _configure_one_repository(
             "discover_url": discover_url,
             "username": _prompt(input_fn, "只读日志账号: "),
             "interval_seconds": 300,
+            "max_scan_hits": kibana_issue_connector.DEFAULT_MAX_SCAN_HITS,
         }
     config = store.save(payload)
     terminal.ok("配置已保存；未保存 GitHub、Copilot 或日志平台密码。")
@@ -176,6 +180,7 @@ def _show_config(
     if config.log_source:
         terminal.field("Log source", config.log_source.base_url)
         terminal.field("Log interval", f"{config.log_source.interval_seconds}s")
+        terminal.field("Scan limit", str(config.log_source.max_scan_hits))
 
 
 def _wait_for_terminal_state(
@@ -379,6 +384,43 @@ def _temporary_environment(values: Mapping[str, str]):
                 os.environ[key] = value
 
 
+def _run_with_spinner(
+    terminal: Terminal,
+    label: str,
+    action: Callable[[], int],
+) -> int:
+    if not terminal.color:
+        return action()
+    completed = threading.Event()
+    result: Dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            result["value"] = action()
+        except BaseException as exc:
+            result["error"] = exc
+        finally:
+            completed.set()
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    index = 0
+    try:
+        while not completed.wait(0.1):
+            terminal.stream.write(
+                f"\r{SPINNER[index % len(SPINNER)]} {label}"
+            )
+            terminal.stream.flush()
+            index += 1
+    finally:
+        terminal.stream.write("\r\033[2K")
+        terminal.stream.flush()
+    error = result.get("error")
+    if error is not None:
+        raise error
+    return int(result.get("value", 2))
+
+
 def _resolved_log_connection(
     config: ControlCenterConfig,
     *,
@@ -401,6 +443,9 @@ def _fetch_log_candidate(
     username: str,
     output_path: Path,
     key_path: Path,
+    scan_state_path: Path = DEFAULT_LOG_SCAN_STATE_PATH,
+    max_scan_hits: int = kibana_issue_connector.DEFAULT_MAX_SCAN_HITS,
+    inbox: Optional[LogIncidentInbox] = None,
     password_fn: Callable[[str], str] = getpass.getpass,
 ) -> Dict[str, Any]:
     discover_url = discover_url or _prompt(
@@ -421,7 +466,11 @@ def _fetch_log_candidate(
         password=password,
         output_path=output_path,
         key_path=key_path,
+        scan_state_path=scan_state_path,
+        max_scan_hits=max_scan_hits,
     )
+    if inbox is not None:
+        inbox.ingest_summary(summary_path)
     candidates = summary.get("candidates", [])
     selection = summary.get("selection", {})
     terminal.ok(
@@ -432,16 +481,19 @@ def _fetch_log_candidate(
     if not candidates:
         raise ValueError("没有可进入 AI 流程的安全错误候选。")
     terminal.section("选择异常")
-    for index, item in enumerate(candidates, start=1):
+    displayed = candidates[:MAX_DISPLAYED_LOG_CANDIDATES]
+    for index, item in enumerate(displayed, start=1):
         services = ", ".join(item.get("services", [])) or "unknown"
         terminal.line(
             f"  {index}. {services} · {item.get('event_count', 0)} 条 · "
             f"{item.get('first_seen_at', '')}"
         )
-    selected = _prompt(input_fn, f"选择 1-{len(candidates)} [1]: ") or "1"
-    if not selected.isdigit() or not 1 <= int(selected) <= len(candidates):
+    if len(candidates) > len(displayed):
+        terminal.line(f"  … 其余 {len(candidates) - len(displayed)} 条已入收件箱")
+    selected = _prompt(input_fn, f"选择 1-{len(displayed)} [1]: ") or "1"
+    if not selected.isdigit() or not 1 <= int(selected) <= len(displayed):
         raise ValueError("日志候选编号无效。")
-    artifact = Path(str(candidates[int(selected) - 1]["artifact"]))
+    artifact = Path(str(displayed[int(selected) - 1]["artifact"]))
     if not artifact.is_absolute():
         artifact = root / artifact
     resolved = artifact.resolve()
@@ -459,6 +511,8 @@ def _poll_log_candidates(
     password: str,
     output_path: Path,
     key_path: Path,
+    scan_state_path: Path,
+    max_scan_hits: int,
 ) -> tuple[Path, Dict[str, Any]]:
     run_name = (
         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -467,6 +521,9 @@ def _poll_log_candidates(
     )
     output_path = output_path if output_path.is_absolute() else root / output_path
     key_path = key_path if key_path.is_absolute() else root / key_path
+    scan_state_path = (
+        scan_state_path if scan_state_path.is_absolute() else root / scan_state_path
+    )
     terminal.section("读取日志")
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -474,25 +531,32 @@ def _poll_log_candidates(
         kibana_sanitizer.HMAC_KEY_ENV: _load_or_create_log_key(key_path),
         kibana_issue_connector.PASSWORD_ENV: password,
     }
-    with _temporary_environment(environment), contextlib.redirect_stdout(
-        stdout
-    ), contextlib.redirect_stderr(stderr):
-        code = kibana_issue_connector.main(
-            [
-                "--discover-url",
-                discover_url,
-                "--username",
-                username,
-                "--max-candidates",
-                "5",
-                "--fetch-size",
-                "50",
-                "--output-dir",
-                str(output_path),
-                "--name",
-                run_name,
-            ]
-        )
+    def run_connector() -> int:
+        with _temporary_environment(environment), contextlib.redirect_stdout(
+            stdout
+        ), contextlib.redirect_stderr(stderr):
+            return kibana_issue_connector.main(
+                [
+                    "--discover-url",
+                    discover_url,
+                    "--username",
+                    username,
+                    "--max-candidates",
+                    str(max_scan_hits),
+                    "--fetch-size",
+                    "50",
+                    "--max-scan-hits",
+                    str(max_scan_hits),
+                    "--scan-state-file",
+                    str(scan_state_path),
+                    "--output-dir",
+                    str(output_path),
+                    "--name",
+                    run_name,
+                ]
+            )
+
+    code = _run_with_spinner(terminal, "扫描中", run_connector)
     if code != 0:
         detail = " ".join(stderr.getvalue().split())
         raise ValueError(detail.removeprefix("error: ").strip() or "日志平台读取失败。")
@@ -743,6 +807,8 @@ def _watch_logs(
     username: str,
     output_path: Path,
     key_path: Path,
+    scan_state_path: Path,
+    max_scan_hits: int,
     interval_seconds: Optional[int],
     max_runs: int,
 ) -> int:
@@ -770,12 +836,14 @@ def _watch_logs(
         or configured.discover_url != resolved_url
         or configured.username != resolved_username
         or configured.interval_seconds != interval
+        or configured.max_scan_hits != max_scan_hits
     ):
         config = store.save_log_source(
             config,
             discover_url=resolved_url,
             username=resolved_username,
             interval_seconds=interval,
+            max_scan_hits=max_scan_hits,
         )
         terminal.ok("日志地址、只读账号和轮询间隔已保存；密码未保存。")
     password = os.environ.get(kibana_issue_connector.PASSWORD_ENV, "") or password_fn(
@@ -797,6 +865,8 @@ def _watch_logs(
             password=password,
             output_path=output_path,
             key_path=key_path,
+            scan_state_path=scan_state_path,
+            max_scan_hits=max_scan_hits,
         )
         result = inbox.ingest_summary(summary_path)
         selection = summary.get("selection", {})
@@ -844,6 +914,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-key", type=Path, default=DEFAULT_LOG_KEY_PATH)
     parser.add_argument("--inbox-path", type=Path, default=DEFAULT_LOG_INBOX_PATH)
     parser.add_argument(
+        "--log-scan-state",
+        type=Path,
+        default=DEFAULT_LOG_SCAN_STATE_PATH,
+    )
+    parser.add_argument(
+        "--max-scan-hits",
+        type=int,
+        default=None,
+    )
+    parser.add_argument(
         "--interval-seconds",
         type=int,
         default=None,
@@ -879,6 +959,13 @@ def main(
         raise SystemExit("log commands cannot be combined with --request, --logs, or --resume")
     if args.max_runs < 0:
         raise SystemExit("--max-runs cannot be negative")
+    if args.max_scan_hits is not None and not (
+        1 <= args.max_scan_hits <= kibana_issue_connector.MAX_SCAN_HITS
+    ):
+        raise SystemExit(
+            f"--max-scan-hits must be between 1 and "
+            f"{kibana_issue_connector.MAX_SCAN_HITS}"
+        )
     root = Path.cwd().resolve()
     config_path = args.config if args.config.is_absolute() else root / args.config
     runs_path = args.runs if args.runs.is_absolute() else root / args.runs
@@ -898,6 +985,13 @@ def main(
         if args.configure or config is None:
             config = _configure_one_repository(store, root, terminal, input_fn)
         if args.command == "watch":
+            max_scan_hits = (
+                args.max_scan_hits
+                if args.max_scan_hits is not None
+                else config.log_source.max_scan_hits
+                if config.log_source is not None
+                else kibana_issue_connector.DEFAULT_MAX_SCAN_HITS
+            )
             output_path = (
                 args.log_output
                 if args.log_output.is_absolute()
@@ -918,6 +1012,8 @@ def main(
                 username=args.username,
                 output_path=output_path,
                 key_path=key_path,
+                scan_state_path=args.log_scan_state,
+                max_scan_hits=max_scan_hits,
                 interval_seconds=args.interval_seconds,
                 max_runs=1 if args.once else args.max_runs,
             )
@@ -971,6 +1067,13 @@ def main(
             use_logs = action == "logs"
             request = value
         if use_logs:
+            max_scan_hits = (
+                args.max_scan_hits
+                if args.max_scan_hits is not None
+                else config.log_source.max_scan_hits
+                if config.log_source is not None
+                else kibana_issue_connector.DEFAULT_MAX_SCAN_HITS
+            )
             discover_url, username = _resolved_log_connection(
                 config,
                 discover_url=args.discover_url,
@@ -984,6 +1087,9 @@ def main(
                 username=username,
                 output_path=args.log_output,
                 key_path=args.log_key,
+                scan_state_path=args.log_scan_state,
+                max_scan_hits=max_scan_hits,
+                inbox=inbox,
                 password_fn=password_fn,
             )
             initial = workflow.create_from_evidence(evidence)

@@ -57,8 +57,10 @@ The default mode only fetches bounded candidates and writes sanitized local
 artifacts. Add `--generate --prompt-api-key` for AI-reviewed local drafts. A
 separately authorized publication may add `--publish --confirm`, but must keep
 `--max-candidates` at three or fewer. Never reuse browser cookies, persist the
-OpenSearch password, or claim that scheduling, durable retries, or pagination
-beyond the first bounded result page exists.
+OpenSearch password, or claim that foreground polling provides scheduling or
+durable retries. Bounded local scans may use fixed-snapshot scroll pages and a
+non-secret watermark, but must fail without advancing that watermark when the
+configured scan limit is reached.
 
 The connector deterministically groups eligible sanitized events before the
 candidate limit and before any AI call. Inspect each

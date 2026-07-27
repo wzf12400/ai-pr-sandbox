@@ -2,6 +2,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from src.terminal_control_center import (
     _resolved_log_connection,
     _run_record,
     _run_resume,
+    _run_with_spinner,
     _watch_logs,
 )
 
@@ -160,6 +162,22 @@ class FakeInbox:
 
 
 class TerminalControlCenterTest(unittest.TestCase):
+    def test_spinner_keeps_slow_log_scan_visibly_active(self):
+        output = io.StringIO()
+
+        def slow_action():
+            time.sleep(0.12)
+            return 0
+
+        code = _run_with_spinner(
+            Terminal(output, color=True),
+            "扫描中",
+            slow_action,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertIn("扫描中", output.getvalue())
+
     def test_log_mode_reuses_configured_url_and_username(self):
         configured = SimpleNamespace(
             log_source=SimpleNamespace(
@@ -362,6 +380,7 @@ class TerminalControlCenterTest(unittest.TestCase):
                 return 0
 
             answers = iter(["1"])
+            inbox = mock.Mock()
             with mock.patch(
                 "src.terminal_control_center.kibana_issue_connector.main",
                 side_effect=fake_connector,
@@ -374,6 +393,7 @@ class TerminalControlCenterTest(unittest.TestCase):
                     username="reader",
                     output_path=log_output,
                     key_path=root / "log-key.json",
+                    inbox=inbox,
                     password_fn=lambda _prompt: "temporary-password",
                 )
                 self.assertNotIn("OPENSEARCH_PASSWORD", os.environ)
@@ -388,6 +408,7 @@ class TerminalControlCenterTest(unittest.TestCase):
         self.assertNotIn("temporary-password", output.getvalue())
         self.assertNotIn("原始响应不落盘", output.getvalue())
         self.assertIn("扫描 1 · 有效 1 · 异常 1", output.getvalue())
+        inbox.ingest_summary.assert_called_once()
 
     def test_log_review_issue_only_does_not_select_code_scope(self):
         output = io.StringIO()
@@ -420,6 +441,7 @@ class TerminalControlCenterTest(unittest.TestCase):
             discover_url=discover_url,
             username="reader",
             interval_seconds=300,
+            max_scan_hits=1000,
         )
         config = SimpleNamespace(log_source=log_source)
         store = mock.Mock()
@@ -452,6 +474,8 @@ class TerminalControlCenterTest(unittest.TestCase):
                 username="",
                 output_path=Path(directory) / "logs",
                 key_path=Path(directory) / "key.json",
+                scan_state_path=Path(directory) / "cursor.json",
+                max_scan_hits=1000,
                 interval_seconds=None,
                 max_runs=1,
             )

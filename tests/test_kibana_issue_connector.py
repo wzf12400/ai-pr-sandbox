@@ -6,6 +6,8 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -16,6 +18,9 @@ from src.kibana_issue_connector import (
     OpenSearchDashboardsClient,
     _blocked_error_preview,
     _credentials,
+    _load_scan_cursor,
+    _save_scan_cursor,
+    _scan_window,
     main,
     parse_discover_url,
 )
@@ -79,6 +84,36 @@ class FakeOpener:
         else:
             payload = {"hits": {"hits": [error_hit()]}}
         return FakeResponse(request.full_url, payload)
+
+
+class PagedOpener:
+    def __init__(self):
+        self.requests = []
+        self.scroll_pages = [
+            {"_scroll_id": "scroll-1", "hits": {"hits": [error_hit(), error_hit()]}},
+            {"_scroll_id": "scroll-2", "hits": {"hits": [error_hit()]}},
+        ]
+
+    def __call__(self, request, timeout):
+        self.requests.append((request, timeout))
+        if request.method == "GET":
+            return FakeResponse(
+                request.full_url,
+                {"attributes": {"title": "logs-*", "timeFieldName": "@timestamp"}},
+            )
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(request.full_url).query
+        )
+        proxy_method = query.get("method", [""])[0]
+        proxy_path = query.get("path", [""])[0]
+        if proxy_method == "DELETE" and proxy_path == "_search/scroll":
+            return FakeResponse(request.full_url, {"succeeded": True})
+        if self.scroll_pages:
+            return FakeResponse(request.full_url, self.scroll_pages.pop(0))
+        return FakeResponse(
+            request.full_url,
+            {"_scroll_id": "scroll-2", "hits": {"hits": []}},
+        )
 
 
 class KibanaIssueConnectorTest(unittest.TestCase):
@@ -168,6 +203,186 @@ class KibanaIssueConnectorTest(unittest.TestCase):
             payload["query"]["bool"]["filter"][0]["range"]["@timestamp"],
             {"gte": "now-2h", "lte": "now"},
         )
+
+    def test_client_scrolls_every_page_before_completing_scan(self):
+        opener = PagedOpener()
+        target = DiscoverTarget(
+            base_url="https://logs.example.test/_dashboards",
+            data_view_id="data-view-1",
+            time_from="now-2h",
+            time_to="now",
+        )
+        client = OpenSearchDashboardsClient(
+            target,
+            DashboardCredentials("reader", "password"),
+            opener=opener,
+        )
+
+        hits = client.fetch_error_hits(
+            "logs-*",
+            "@timestamp",
+            2,
+            max_scan_hits=10,
+        )
+
+        self.assertEqual(len(hits), 3)
+        proxy_calls = [
+            urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
+            for request, _timeout in opener.requests
+            if request.method == "POST"
+        ]
+        self.assertEqual(proxy_calls[0]["method"], ["POST"])
+        self.assertIn("scroll=2m", proxy_calls[0]["path"][0])
+        self.assertEqual(proxy_calls[1]["path"], ["_search/scroll"])
+        self.assertEqual(proxy_calls[-1]["method"], ["DELETE"])
+
+    def test_client_does_not_silently_truncate_scan_backlog(self):
+        opener = PagedOpener()
+        target = DiscoverTarget(
+            base_url="https://logs.example.test/_dashboards",
+            data_view_id="data-view-1",
+            time_from="now-2h",
+            time_to="now",
+        )
+        client = OpenSearchDashboardsClient(
+            target,
+            DashboardCredentials("reader", "password"),
+            opener=opener,
+        )
+
+        with self.assertRaisesRegex(ValueError, "cursor was not advanced"):
+            client.fetch_error_hits(
+                "logs-*",
+                "@timestamp",
+                2,
+                max_scan_hits=2,
+            )
+
+    def test_scan_cursor_overlaps_previous_completed_window(self):
+        target = DiscoverTarget(
+            base_url="https://logs.example.test/_dashboards",
+            data_view_id="data-view-1",
+            time_from="now-2h",
+            time_to="now",
+        )
+        first_cutoff = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cursor_path = root / "cursor.json"
+            summary_path = root / "summary.json"
+            _save_scan_cursor(cursor_path, target, first_cutoff, summary_path)
+            cursor = _load_scan_cursor(cursor_path, target)
+            time_from, time_to, cutoff = _scan_window(
+                target,
+                cursor,
+                300,
+                now=datetime(2026, 7, 27, 8, 5, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(time_from, "2026-07-27T07:55:00.000Z")
+        self.assertEqual(time_to, "2026-07-27T08:05:00.000Z")
+        self.assertEqual(cutoff, datetime(2026, 7, 27, 8, 5, tzinfo=timezone.utc))
+
+    def test_failed_scan_does_not_advance_existing_cursor(self):
+        target = parse_discover_url(DISCOVER_URL)
+        original_cutoff = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cursor_path = root / "cursor.json"
+            _save_scan_cursor(
+                cursor_path,
+                target,
+                original_cutoff,
+                root / "previous-summary.json",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LOG_SANITIZER_HMAC_KEY": HMAC_KEY,
+                    "OPENSEARCH_PASSWORD": "password",
+                },
+                clear=True,
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern",
+                return_value=("logs-*", "@timestamp"),
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits",
+                side_effect=ValueError(
+                    "error backlog exceeds the per-run limit; "
+                    "scan cursor was not advanced"
+                ),
+            ), contextlib.redirect_stderr(io.StringIO()):
+                code = main(
+                    [
+                        "--discover-url",
+                        DISCOVER_URL,
+                        "--username",
+                        "reader",
+                        "--scan-state-file",
+                        str(cursor_path),
+                        "--output-dir",
+                        str(root / "output"),
+                        "--name",
+                        "failed-scan",
+                    ]
+                )
+            cursor = json.loads(cursor_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 2)
+        self.assertEqual(cursor["completed_through"], "2026-07-27T08:00:00.000Z")
+
+    def test_candidate_overflow_does_not_advance_existing_cursor(self):
+        target = parse_discover_url(DISCOVER_URL)
+        original_cutoff = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
+        first = error_hit()
+        second = error_hit()
+        second["_id"] = "second"
+        second["_source"]["message"] = second["_source"]["message"].replace(
+            "trace-demo", "trace-second"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cursor_path = root / "cursor.json"
+            _save_scan_cursor(
+                cursor_path,
+                target,
+                original_cutoff,
+                root / "previous-summary.json",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LOG_SANITIZER_HMAC_KEY": HMAC_KEY,
+                    "OPENSEARCH_PASSWORD": "password",
+                },
+                clear=True,
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern",
+                return_value=("logs-*", "@timestamp"),
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits",
+                return_value=[first, second],
+            ), contextlib.redirect_stderr(io.StringIO()):
+                code = main(
+                    [
+                        "--discover-url",
+                        DISCOVER_URL,
+                        "--username",
+                        "reader",
+                        "--max-candidates",
+                        "1",
+                        "--scan-state-file",
+                        str(cursor_path),
+                        "--output-dir",
+                        str(root / "output"),
+                        "--name",
+                        "candidate-overflow",
+                    ]
+                )
+            cursor = json.loads(cursor_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 2)
+        self.assertEqual(cursor["completed_through"], "2026-07-27T08:00:00.000Z")
 
     def test_client_reports_read_timeout_without_remote_details(self):
         target = DiscoverTarget(
