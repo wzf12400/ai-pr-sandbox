@@ -10,7 +10,8 @@ Run:
 
 The terminal displays the active GitHub account, Copilot model, validated
 repository checkout, and policy-owned write scope. With no command-line
-arguments it shows a small function menu. Employees may enter a natural-language
+arguments it shows only a compact pixel mascot and the input prompt; the
+function menu appears only after `help`. Employees may enter a natural-language
 change request, `logs`/`日志`/`/logs`, `inbox`/`收件箱`,
 `review INCIDENT_ID`, `help`, or `exit`/`退出`. This no-argument mode stays
 open after completed actions and recoverable input, password, connection, and

@@ -61,9 +61,18 @@ class Terminal:
         print(value, file=self.stream, flush=True)
 
     def banner(self) -> None:
-        self.line(self._paint("1;36", "╭─ AI Change Control ─────────────────────────╮"))
-        self.line("│  自然语言 / 日志异常  →  Issue  →  Draft PR  │")
-        self.line(self._paint("1;36", "╰─────────────────────────────────────────────╯"))
+        mascot = (
+            "       ▄████▄",
+            "      █▀    ▀█",
+            "     ██ ▀  ▀ ██",
+            "     ██  ▄▄  ██",
+            "      ▀██████▀",
+            "       ██  ██",
+            "      ▀▀    ▀▀",
+        )
+        for row in mascot:
+            self.line(self._paint("38;5;208", row))
+        self.line(self._paint("2", "  输入需求 · help 查看功能"))
 
     def section(self, title: str) -> None:
         self.line()
@@ -958,7 +967,6 @@ def _run_interactive_session(
     password_fn: Callable[[str], str],
     args: argparse.Namespace,
 ) -> int:
-    _show_interactive_menu(terminal)
     while True:
         try:
             entered = _prompt(input_fn, "输入需求或功能命令: ")

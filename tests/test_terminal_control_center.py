@@ -164,6 +164,17 @@ class FakeInbox:
 
 
 class TerminalControlCenterTest(unittest.TestCase):
+    def test_banner_uses_minimal_pixel_mascot_without_old_flow_box(self):
+        output = io.StringIO()
+
+        Terminal(output, color=False).banner()
+
+        rendered = output.getvalue()
+        self.assertIn("▄████▄", rendered)
+        self.assertIn("输入需求 · help 查看功能", rendered)
+        self.assertNotIn("AI Change Control", rendered)
+        self.assertNotIn("自然语言 / 日志异常", rendered)
+
     def test_log_authentication_retries_without_persisting_passwords(self):
         output = io.StringIO()
         passwords = iter(["wrong-password", "right-password"])
@@ -299,7 +310,7 @@ class TerminalControlCenterTest(unittest.TestCase):
         rendered = output.getvalue()
         self.assertEqual(code, 0)
         self.assertIn("已取消日志登录", rendered)
-        self.assertGreaterEqual(rendered.count("功能入口"), 2)
+        self.assertEqual(rendered.count("功能入口"), 1)
         self.assertIn("会话已结束", rendered)
 
     def test_terminal_preview_can_be_cancelled_without_approval(self):
