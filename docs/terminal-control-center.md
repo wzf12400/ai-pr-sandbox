@@ -53,6 +53,11 @@ The first `watch` asks for:
 - a dedicated read-only username;
 - a password entered without echo.
 
+After the non-secret source is configured, interactive `logs` and `--logs`
+reuse its Discover target and read-only username. They ask only for the
+process-only password. Explicit `--discover-url` or `--username` values may
+still override the local defaults.
+
 The parsed base URL, data-view ID, bounded relative time range, read-only
 username, and interval are saved in the ignored owner-only local configuration.
 The password is held in process memory only. It may also be supplied as

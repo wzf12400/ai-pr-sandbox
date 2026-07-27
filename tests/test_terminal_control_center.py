@@ -13,6 +13,7 @@ from src.terminal_control_center import (
     _interactive_input,
     _load_or_create_log_key,
     _review_incident,
+    _resolved_log_connection,
     _run_record,
     _run_resume,
     _watch_logs,
@@ -159,6 +160,34 @@ class FakeInbox:
 
 
 class TerminalControlCenterTest(unittest.TestCase):
+    def test_log_mode_reuses_configured_url_and_username(self):
+        configured = SimpleNamespace(
+            log_source=SimpleNamespace(
+                discover_url="https://logs.example.test/discover",
+                username="configured-reader",
+            )
+        )
+
+        self.assertEqual(
+            (
+                "https://logs.example.test/discover",
+                "configured-reader",
+            ),
+            _resolved_log_connection(
+                configured,
+                discover_url="",
+                username="",
+            ),
+        )
+        self.assertEqual(
+            ("https://override.example.test/discover", "override-reader"),
+            _resolved_log_connection(
+                configured,
+                discover_url="https://override.example.test/discover",
+                username="override-reader",
+            ),
+        )
+
     def test_interactive_commands_are_not_sent_as_change_requests(self):
         for value in ("/logs", "logs", "LOG", "日志", "日志平台"):
             self.assertEqual(("logs", ""), _interactive_input(value))

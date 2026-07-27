@@ -379,6 +379,19 @@ def _temporary_environment(values: Mapping[str, str]):
                 os.environ[key] = value
 
 
+def _resolved_log_connection(
+    config: ControlCenterConfig,
+    *,
+    discover_url: str,
+    username: str,
+) -> tuple[str, str]:
+    configured = config.log_source
+    return (
+        discover_url or (configured.discover_url if configured else ""),
+        username or (configured.username if configured else ""),
+    )
+
+
 def _fetch_log_candidate(
     *,
     root: Path,
@@ -957,12 +970,17 @@ def main(
             use_logs = action == "logs"
             request = value
         if use_logs:
+            discover_url, username = _resolved_log_connection(
+                config,
+                discover_url=args.discover_url,
+                username=args.username,
+            )
             evidence = _fetch_log_candidate(
                 root=root,
                 terminal=terminal,
                 input_fn=input_fn,
-                discover_url=args.discover_url,
-                username=args.username,
+                discover_url=discover_url,
+                username=username,
                 output_path=args.log_output,
                 key_path=args.log_key,
                 password_fn=password_fn,
