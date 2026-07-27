@@ -293,11 +293,14 @@ approval. Approval publishes the Issue, applies repository-owned approval
 labels, claims the exact Issue snapshot, runs Copilot and policy tests, and
 creates a Draft PR. It never merges or deploys.
 
-Log mode asks for a complete bounded Discover URL, a read-only username, and a
-password entered without echo. The password is never stored. The connector
-fetches at most 50 whitelisted-field records, sanitizes and groups them before
-showing candidates, and persists only sanitized artifacts. The selected
-candidate enters the same Issue preview and approval path.
+The persistent log path starts with `./bin/ai-agent watch --once` or
+`./bin/ai-agent watch`. It stores only parsed non-secret connection settings,
+sanitized artifacts, and deduplicated inbox state; the read-only password stays
+in process memory. `./bin/ai-agent inbox` lists incidents and
+`./bin/ai-agent review INCIDENT_ID` displays the exact Issue preview. Action
+`a` approves Issue publication through Copilot, tests, and Draft PR; action `i`
+publishes only the Issue and cannot authorize code work. The watcher runs in
+the foreground, while the inbox survives terminal restarts.
 
 Use `./bin/ai-agent --configure` to replace the local repository configuration,
 `--request '...'` to supply a request directly, `--logs` for log mode, or

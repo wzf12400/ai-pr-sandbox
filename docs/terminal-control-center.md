@@ -27,23 +27,51 @@ repositories, the evidence-grounded resolver remains mandatory.
 
 ## Log platform path
 
-Log mode asks for:
+The preferred log path is a persistent local inbox:
+
+```bash
+# Poll once while validating the connection and inbox behavior
+./bin/ai-agent watch --once
+
+# Keep polling in the foreground
+./bin/ai-agent watch
+
+# List safe, deduplicated incidents
+./bin/ai-agent inbox
+
+# Generate the exact Issue preview and make the human decision
+./bin/ai-agent review INC-123456789ABC
+```
+
+The first `watch` asks for:
 
 - a complete HTTPS OpenSearch Dashboards Discover URL with a bounded relative
   time range;
 - a dedicated read-only username;
 - a password entered without echo.
 
-The password is held in process memory only. A local owner-only HMAC key is
+The parsed base URL, data-view ID, bounded relative time range, read-only
+username, and interval are saved in the ignored owner-only local configuration.
+The password is held in process memory only. It may also be supplied as
+`OPENSEARCH_PASSWORD` by the employee's local process manager; it is never
+written by this application. A local owner-only HMAC key is
 created under `.issue-entry-state/` so event references remain stable without
 storing raw identifiers. The connector requests at most 50 records and only
 whitelisted fields, sanitizes each record, groups related events
-deterministically, and displays at most five candidates. Raw responses and
-credentials are not written to disk. Blocked records do not enter AI.
+deterministically, and adds at most five candidates per poll. Raw responses and
+credentials are not written to disk. Blocked records do not enter AI. Repeated
+incident references or deterministic issue signatures update the existing
+inbox record instead of creating a second item.
 
-The selected sanitized incident uses the same no-tools Copilot Issue generator,
-independent reviewer, repository resolver, preview, and approval path as a
-natural-language request.
+`review` sends only the selected minimized incident through the same no-tools
+Copilot Issue generator, independent reviewer, repository resolver, preview,
+and approval path as a natural-language request. Ambiguous repositories,
+insufficient evidence, and safety failures disable code approval and leave the
+incident locally blocked until the employee adds context.
+
+The inbox survives terminal restarts. The watcher itself is currently a
+foreground polling process, not an installed launch service or durable remote
+queue. Closing the terminal stops new polling but does not lose inbox state.
 
 ## One approval
 
@@ -54,7 +82,20 @@ Before any remote write, the terminal shows:
 - approval labels and allowed write paths;
 - Issue publication, code modification, tests, and Draft PR scope.
 
-Only `y` approves the displayed digest. Any other input cancels without
+Natural-language mode keeps its single `y` approval. Log review offers these
+explicit actions after the exact Issue preview:
+
+- `a`: publish or reuse the Issue, internally apply the repository-owned
+  `ai-code-approved` evidence, claim the exact snapshot, run Copilot and tests,
+  and create a Draft PR;
+- `i`: publish or reuse the Issue only, without adding the code-approval label
+  and without calling the code dispatcher;
+- `e`: add sanitized human context and regenerate on the next review;
+- `s`: snooze locally for 24 hours;
+- `x`: ignore locally without remote writes.
+
+The `a` and `i` plans have different approval digests. An Issue-only approval
+cannot authorize code modification. Any other input cancels without
 creating an Issue or modifying code. After approval, the agent may publish the
 Issue, apply its repository-owned approval labels, claim the exact Issue
 snapshot, call Copilot, validate the diff, run policy-listed tests, and create
@@ -86,6 +127,12 @@ high-entropy and credential checks.
 # Read from the log platform
 ./bin/ai-agent --logs
 
+# Preferred persistent log inbox
+./bin/ai-agent watch --once
+./bin/ai-agent watch
+./bin/ai-agent inbox
+./bin/ai-agent review INC-123456789ABC
+
 # Generate the preview and stop before all remote writes
 ./bin/ai-agent --request '...' --preview-only
 
@@ -116,7 +163,7 @@ written to a new audit file (`dispatch-resume.json`,
 are never overwritten. There is no automatic retry loop.
 
 The ignored configuration stores only the GitHub login, selected Copilot
-model, repository names, and local checkout paths. GitHub and Copilot
-credentials stay in their existing CLI sessions. The application runs in the
-foreground and is not a durable queue, scheduler, merge service, or deployment
-system.
+model, repository names, local checkout paths, and non-secret parsed log-source
+settings. GitHub and Copilot credentials stay in their existing CLI sessions;
+the log password stays in the current process. The application runs in the
+foreground and is not a merge service or deployment system.

@@ -4,14 +4,17 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from src.terminal_control_center import (
     Terminal,
     _fetch_log_candidate,
     _load_or_create_log_key,
+    _review_incident,
     _run_record,
     _run_resume,
+    _watch_logs,
 )
 
 
@@ -30,6 +33,10 @@ def prepared_record():
             "required_labels": ["ai-code-approved"],
             "allowed_write_paths": ["src/**", "tests/**"],
             "approval_digest": "a" * 64,
+            "approval_digests": {
+                "draft_pr": "a" * 64,
+                "issue_only": "c" * 64,
+            },
         },
     }
 
@@ -38,18 +45,24 @@ class FakeWorkflow:
     def __init__(self, record):
         self.record = record
         self.approvals = []
+        self.approval_modes = []
 
     def read(self, run_id):
         return self.record
 
-    def approve(self, run_id, digest):
+    def approve(self, run_id, digest, *, mode="draft_pr"):
         self.approvals.append((run_id, digest))
+        self.approval_modes.append(mode)
         self.record = {
             "run_id": run_id,
             "status": "completed",
             "result": {
                 "issue_url": "https://github.com/example/ai-pr-sandbox/issues/1",
-                "draft_pr_url": "https://github.com/example/ai-pr-sandbox/pull/2",
+                "draft_pr_url": (
+                    "https://github.com/example/ai-pr-sandbox/pull/2"
+                    if mode == "draft_pr"
+                    else None
+                ),
             },
         }
         return {"run_id": run_id, "status": "executing"}
@@ -103,6 +116,45 @@ class FakeResumeWorkflow(FakeWorkflow):
             },
         }
         return {"run_id": run_id, "status": "executing"}
+
+
+class FakeInbox:
+    def __init__(self):
+        self.record = {
+            "incident_id": "INC-123456789ABC",
+            "status": "pending",
+            "services": ["calculator"],
+            "event_count": 1,
+            "first_seen_at": "2099-01-01T00:00:00Z",
+            "last_seen_at": "2099-01-01T00:00:00Z",
+            "workflow_run_id": RUN_ID,
+            "issue_url": None,
+            "draft_pr_url": None,
+            "evidence": {"safe": True},
+        }
+
+    def get(self, incident_id):
+        self.assert_id = incident_id
+        return dict(self.record)
+
+    def update(self, incident_id, **changes):
+        self.assert_id = incident_id
+        self.record.update(changes)
+        return dict(self.record)
+
+    def add_context(self, incident_id, context):
+        self.record.update(
+            {"status": "pending", "workflow_run_id": None, "context": context}
+        )
+        return dict(self.record)
+
+    def snooze(self, incident_id):
+        self.record["status"] = "snoozed"
+        return dict(self.record)
+
+    def ignore(self, incident_id):
+        self.record["status"] = "ignored"
+        return dict(self.record)
 
 
 class TerminalControlCenterTest(unittest.TestCase):
@@ -287,6 +339,79 @@ class TerminalControlCenterTest(unittest.TestCase):
         self.assertEqual("sanitized", evidence["safety"]["status"])
         self.assertNotIn("temporary-password", persisted)
         self.assertNotIn("temporary-password", output.getvalue())
+
+    def test_log_review_issue_only_does_not_select_code_scope(self):
+        output = io.StringIO()
+        workflow = FakeWorkflow(prepared_record())
+        inbox = FakeInbox()
+
+        code = _review_incident(
+            incident_id="INC-123456789ABC",
+            inbox=inbox,
+            workflow=workflow,
+            terminal=Terminal(output, color=False),
+            input_fn=lambda _prompt: "i",
+            preview_only=False,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(["issue_only"], workflow.approval_modes)
+        self.assertEqual([(RUN_ID, "c" * 64)], workflow.approvals)
+        self.assertEqual("completed", inbox.record["status"])
+        self.assertIsNone(inbox.record["draft_pr_url"])
+        self.assertIn("未授权 AI 修改代码", output.getvalue())
+
+    def test_watch_once_persists_candidate_without_remote_workflow(self):
+        output = io.StringIO()
+        discover_url = (
+            "https://logs.example.test/_dashboards/app/discover#/?"
+            "_g=(time:(from:now-2h,to:now))&_a=(index:view-1)"
+        )
+        log_source = SimpleNamespace(
+            discover_url=discover_url,
+            username="reader",
+            interval_seconds=300,
+        )
+        config = SimpleNamespace(log_source=log_source)
+        store = mock.Mock()
+        inbox = mock.Mock()
+        inbox.ingest_summary.return_value = {
+            "candidates": 1,
+            "added": 1,
+            "deduplicated": 0,
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "src.terminal_control_center._poll_log_candidates",
+            return_value=(
+                Path(directory) / "summary.json",
+                {"selection": {"scanned_hits": 2}},
+            ),
+        ) as poll, mock.patch.dict(
+            os.environ,
+            {"OPENSEARCH_PASSWORD": "process-only-password"},
+            clear=True,
+        ):
+            code = _watch_logs(
+                root=Path(directory),
+                store=store,
+                config=config,
+                inbox=inbox,
+                terminal=Terminal(output, color=False),
+                input_fn=lambda _prompt: "",
+                password_fn=lambda _prompt: self.fail("password prompt was unexpected"),
+                discover_url="",
+                username="",
+                output_path=Path(directory) / "logs",
+                key_path=Path(directory) / "key.json",
+                interval_seconds=None,
+                max_runs=1,
+            )
+
+        self.assertEqual(0, code)
+        store.save_log_source.assert_not_called()
+        poll.assert_called_once()
+        inbox.ingest_summary.assert_called_once()
+        self.assertNotIn("process-only-password", output.getvalue())
 
 
 if __name__ == "__main__":

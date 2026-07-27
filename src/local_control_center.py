@@ -32,6 +32,7 @@ from src.copilot_code_modifier import (
 from src.copilot_issue_provider import CopilotCLIIssueProvider
 from src.issue_draft import _atomic_write_json, _atomic_write_text
 from src.issue_entry import compose_evidence
+from src.kibana_issue_connector import parse_discover_url
 from src.natural_language_issue_automation import (
     GitHubCLICodeSearchAdapter,
     GitHubCLIIssueClient,
@@ -53,6 +54,8 @@ MAX_DESCRIPTION_CHARS = 4_000
 LOGIN_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 RUN_ID_PATTERN = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
 MAX_RESUME_ATTEMPTS = 3
+MIN_LOG_INTERVAL_SECONDS = 60
+MAX_LOG_INTERVAL_SECONDS = 3600
 RESUMABLE_PRE_MODIFIER_FAILURES = frozenset(
     {
         "modifier_execution_failed",
@@ -97,6 +100,20 @@ def _canonical_json(value: Mapping[str, Any]) -> bytes:
 
 def _sha256(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
+
+
+def _approval_plan(preview: Mapping[str, Any], mode: str) -> Dict[str, Any]:
+    if mode not in {"draft_pr", "issue_only"}:
+        raise ValueError("approval mode is invalid")
+    plan = {
+        key: value
+        for key, value in preview.items()
+        if key not in {"approval_digest", "approval_digests"}
+    }
+    plan["approval_mode"] = mode
+    if mode == "issue_only":
+        plan["actions"] = list(plan.get("issue_only_actions", []))
+    return plan
 
 
 def _generation_failure_code(generation: Mapping[str, Any]) -> str:
@@ -211,10 +228,39 @@ class ManagedRepository:
 
 
 @dataclass(frozen=True)
+class LogSourceConfig:
+    base_url: str
+    data_view_id: str
+    time_from: str
+    time_to: str
+    username: str
+    interval_seconds: int
+
+    @property
+    def discover_url(self) -> str:
+        return (
+            f"{self.base_url}/app/discover#/?"
+            f"_g=(time:(from:{self.time_from},to:{self.time_to}))&"
+            f"_a=(index:{self.data_view_id})"
+        )
+
+    def public_dict(self) -> Dict[str, Any]:
+        return {
+            "base_url": self.base_url,
+            "data_view_id": self.data_view_id,
+            "time_from": self.time_from,
+            "time_to": self.time_to,
+            "username": self.username,
+            "interval_seconds": self.interval_seconds,
+        }
+
+
+@dataclass(frozen=True)
 class ControlCenterConfig:
     github_login: str
     copilot_model: str
     repositories: Tuple[ManagedRepository, ...]
+    log_source: Optional[LogSourceConfig]
     sha256: str
 
     @property
@@ -227,6 +273,7 @@ class ControlCenterConfig:
             "github": {"login": self.github_login},
             "copilot": {"model": self.copilot_model},
             "repositories": [item.public_dict() for item in self.repositories],
+            "logs": self.log_source.public_dict() if self.log_source else None,
             "sha256": self.sha256,
         }
 
@@ -313,10 +360,47 @@ class LocalConfigStore:
             allowed_write_paths=policy.allowed_write_paths,
         )
 
+    def _log_source(self, value: Any) -> Optional[LogSourceConfig]:
+        if value in (None, {}):
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("log source configuration must be an object")
+        username = str(value.get("username", "")).strip()
+        if not username or len(username) > 128 or any(
+            character in username for character in "\r\n\0"
+        ):
+            raise ValueError("log source username is invalid")
+        interval = value.get("interval_seconds", 300)
+        if (
+            not isinstance(interval, int)
+            or not MIN_LOG_INTERVAL_SECONDS <= interval <= MAX_LOG_INTERVAL_SECONDS
+        ):
+            raise ValueError("log polling interval must be between 60 and 3600 seconds")
+        discover_url = str(value.get("discover_url", "")).strip()
+        if discover_url:
+            target = parse_discover_url(discover_url)
+        else:
+            reconstructed = (
+                f"{str(value.get('base_url', '')).rstrip('/')}/app/discover#/?"
+                f"_g=(time:(from:{value.get('time_from', '')},"
+                f"to:{value.get('time_to', '')}))&"
+                f"_a=(index:{value.get('data_view_id', '')})"
+            )
+            target = parse_discover_url(reconstructed)
+        return LogSourceConfig(
+            base_url=target.base_url,
+            data_view_id=target.data_view_id,
+            time_from=target.time_from,
+            time_to=target.time_to,
+            username=username,
+            interval_seconds=interval,
+        )
+
     def parse(self, payload: Mapping[str, Any]) -> ControlCenterConfig:
         github = payload.get("github")
         copilot = payload.get("copilot")
         raw_repositories = payload.get("repositories")
+        log_source = self._log_source(payload.get("logs"))
         if not isinstance(github, dict) or not isinstance(copilot, dict):
             raise ValueError("GitHub and Copilot configuration are required")
         login = str(github.get("login", "")).strip()
@@ -369,6 +453,7 @@ class LocalConfigStore:
             github_login=login,
             copilot_model=model,
             repositories=repositories,
+            log_source=log_source,
             sha256=_sha256(normalized),
         )
 
@@ -424,9 +509,54 @@ class LocalConfigStore:
                 }
                 for item in config.repositories
             ],
+            "logs": config.log_source.public_dict() if config.log_source else None,
         }
         _atomic_replace_json(self.path, persisted)
         return config
+
+    def save_log_source(
+        self,
+        config: ControlCenterConfig,
+        *,
+        discover_url: str,
+        username: str,
+        interval_seconds: int,
+    ) -> ControlCenterConfig:
+        payload = {
+            "schema_version": CONFIG_SCHEMA_VERSION,
+            "github": {"login": config.github_login},
+            "copilot": {"model": config.copilot_model},
+            "repositories": [
+                {
+                    "repository": item.repository,
+                    "local_path": item.local_path,
+                    "enabled": item.enabled,
+                }
+                for item in config.repositories
+            ],
+            "logs": {
+                "discover_url": discover_url,
+                "username": username,
+                "interval_seconds": interval_seconds,
+            },
+        }
+        updated = self.parse(payload)
+        persisted = {
+            "schema_version": CONFIG_SCHEMA_VERSION,
+            "github": {"login": updated.github_login},
+            "copilot": {"model": updated.copilot_model},
+            "repositories": [
+                {
+                    "repository": item.repository,
+                    "local_path": item.local_path,
+                    "enabled": item.enabled,
+                }
+                for item in updated.repositories
+            ],
+            "logs": updated.log_source.public_dict() if updated.log_source else None,
+        }
+        _atomic_replace_json(self.path, persisted)
+        return updated
 
 
 def inspect_identity(cwd: Path) -> Dict[str, Any]:
@@ -838,10 +968,21 @@ class ControlCenterWorkflow:
                         "run_policy_tests",
                         "create_draft_pr",
                     ],
+                    "issue_only_actions": [
+                        (
+                            "reuse_existing_github_issue"
+                            if issue_mode == "reuse_existing"
+                            else "publish_github_issue"
+                        ),
+                    ],
                     "auto_merge": False,
                     "deploy": False,
                 }
-                preview["approval_digest"] = _sha256(preview)
+                preview["approval_digests"] = {
+                    mode: _sha256(_approval_plan(preview, mode))
+                    for mode in ("draft_pr", "issue_only")
+                }
+                preview["approval_digest"] = preview["approval_digests"]["draft_pr"]
                 record.update(
                     {
                         "status": "awaiting_approval",
@@ -877,14 +1018,35 @@ class ControlCenterWorkflow:
                 )
             self._write_record(run_id, record)
 
-    def approve(self, run_id: str, approval_digest: str) -> Dict[str, Any]:
+    def approve(
+        self,
+        run_id: str,
+        approval_digest: str,
+        *,
+        mode: str = "draft_pr",
+    ) -> Dict[str, Any]:
         with self._lock(run_id):
             record = self.read(run_id)
             if record.get("status") != "awaiting_approval":
                 raise ValueError("run is not awaiting approval")
-            expected = str(record.get("preview", {}).get("approval_digest", ""))
+            if mode not in {"draft_pr", "issue_only"}:
+                raise ValueError("approval mode is invalid")
+            preview = record.get("preview", {})
+            digests = preview.get("approval_digests", {})
+            expected = str(
+                digests.get(mode, "")
+                if isinstance(digests, dict)
+                else ""
+            )
+            if not expected and mode == "draft_pr":
+                expected = str(preview.get("approval_digest", ""))
             if not secrets.compare_digest(expected, approval_digest):
                 raise ValueError("approval digest does not match the displayed plan")
+            combined_scope = ["issue_publication"]
+            if mode == "draft_pr":
+                combined_scope.extend(
+                    ["code_modification", "draft_pr_publication"]
+                )
             record.update(
                 {
                     "status": "executing",
@@ -892,11 +1054,8 @@ class ControlCenterWorkflow:
                     "approval": {
                         "approved_at": _utc_now(),
                         "approval_digest": expected,
-                        "combined_scope": [
-                            "issue_publication",
-                            "code_modification",
-                            "draft_pr_publication",
-                        ],
+                        "mode": mode,
+                        "combined_scope": combined_scope,
                     },
                 }
             )
@@ -1358,6 +1517,25 @@ class ControlCenterWorkflow:
                 issue_url = str(publication.get("issue_url", ""))
                 repository = str(publication.get("repository", ""))
                 if repository != record["preview"]["repository"]:
+                    raise RuntimeError("configuration_changed")
+                approval_mode = str(
+                    record.get("approval", {}).get("mode", "draft_pr")
+                )
+                if approval_mode == "issue_only":
+                    record.update(
+                        {
+                            "status": "completed",
+                            "updated_at": _utc_now(),
+                            "result": {
+                                "issue_url": issue_url,
+                                "draft_pr_url": None,
+                            },
+                            "failure": None,
+                        }
+                    )
+                    self._write_record(run_id, record)
+                    return
+                if approval_mode != "draft_pr":
                     raise RuntimeError("configuration_changed")
                 managed = next(
                     item
