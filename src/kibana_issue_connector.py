@@ -242,7 +242,6 @@ class OpenSearchDashboardsClient:
             raise ValueError(f"max scan hits must be between 1 and {MAX_SCAN_HITS}")
         payload = {
             "size": fetch_size,
-            "track_total_hits": False,
             "_source": [
                 "@timestamp",
                 "stream",

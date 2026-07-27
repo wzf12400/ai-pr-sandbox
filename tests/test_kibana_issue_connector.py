@@ -197,6 +197,7 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertEqual(request.headers["Authorization"], expected_auth)
         payload = json.loads(request.data)
         self.assertEqual(payload["size"], 25)
+        self.assertNotIn("track_total_hits", payload)
         self.assertIn("message", payload["_source"])
         self.assertNotIn("kubernetes.pod_name", payload["_source"])
         self.assertEqual(
