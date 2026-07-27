@@ -67,7 +67,9 @@ The same `logs` object stores `max_scan_hits` (default `1000`, maximum `5000`),
 so the persistent limit can be changed without changing the startup command.
 The password is held in process memory only. It may also be supplied as
 `OPENSEARCH_PASSWORD` by the employee's local process manager; it is never
-written by this application. A local owner-only HMAC key is
+written by this application. HTTP 401 responses trigger up to three hidden
+password attempts within the current action; an empty retry returns to the
+interactive prompt. A local owner-only HMAC key is
 created under `.issue-entry-state/` so event references remain stable without
 storing raw identifiers. Each poll reads 50-record pages from one fixed
 OpenSearch snapshot and follows every page up to a configurable complete-scan

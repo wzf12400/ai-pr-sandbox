@@ -13,6 +13,7 @@ from src.terminal_control_center import (
     _fetch_log_candidate,
     _interactive_input,
     _load_or_create_log_key,
+    _poll_with_auth_retry,
     _review_incident,
     _resolved_log_connection,
     _run_interactive_session,
@@ -163,6 +164,41 @@ class FakeInbox:
 
 
 class TerminalControlCenterTest(unittest.TestCase):
+    def test_log_authentication_retries_without_persisting_passwords(self):
+        output = io.StringIO()
+        passwords = iter(["wrong-password", "right-password"])
+        expected = (Path("/safe/summary.json"), {"candidates": []})
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
+            "src.terminal_control_center._poll_log_candidates",
+            side_effect=[
+                ValueError(
+                    "OpenSearch Dashboards returned HTTP 401: "
+                    "Authentication Exception"
+                ),
+                expected,
+            ],
+        ) as poll:
+            summary_path, summary, password = _poll_with_auth_retry(
+                root=Path("/safe"),
+                terminal=Terminal(output, color=False),
+                password_fn=lambda _prompt: next(passwords),
+                initial_password="",
+                discover_url="https://logs.example.test/discover",
+                username="reader",
+                output_path=Path("logs"),
+                key_path=Path("key.json"),
+                scan_state_path=Path("cursor.json"),
+                max_scan_hits=1000,
+            )
+
+        self.assertEqual(summary_path, expected[0])
+        self.assertEqual(summary, expected[1])
+        self.assertEqual(password, "right-password")
+        self.assertEqual(poll.call_count, 2)
+        self.assertIn("认证失败，请重新输入", output.getvalue())
+        self.assertNotIn("wrong-password", output.getvalue())
+        self.assertNotIn("right-password", output.getvalue())
+
     def test_spinner_keeps_slow_log_scan_visibly_active(self):
         output = io.StringIO()
 
@@ -259,7 +295,7 @@ class TerminalControlCenterTest(unittest.TestCase):
 
         rendered = output.getvalue()
         self.assertEqual(code, 0)
-        self.assertIn("日志平台密码不能为空", rendered)
+        self.assertIn("已取消日志登录", rendered)
         self.assertGreaterEqual(rendered.count("功能入口"), 2)
         self.assertIn("会话已结束", rendered)
 

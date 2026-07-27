@@ -39,6 +39,7 @@ DEFAULT_LOG_KEY_PATH = Path(".issue-entry-state/log-sanitizer-key.json")
 DEFAULT_LOG_INBOX_PATH = Path(".issue-entry-state/log-inbox.json")
 DEFAULT_LOG_SCAN_STATE_PATH = Path(".issue-entry-state/log-scan-cursor.json")
 MAX_DISPLAYED_LOG_CANDIDATES = 20
+MAX_LOG_AUTH_ATTEMPTS = 3
 TERMINAL_STATES = {"awaiting_approval", "completed", "blocked"}
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 INTERACTIVE_LOG_ALIASES = frozenset({"/logs", "logs", "log", "日志", "日志平台"})
@@ -459,17 +460,13 @@ def _fetch_log_candidate(
         "粘贴 OpenSearch Dashboards Discover 完整 URL: ",
     )
     username = username or _prompt(input_fn, "只读日志账号: ")
-    password = os.environ.get(kibana_issue_connector.PASSWORD_ENV, "") or password_fn(
-        "› 日志密码: "
-    )
-    if not password:
-        raise ValueError("日志平台密码不能为空。")
-    summary_path, summary = _poll_log_candidates(
+    summary_path, summary, _password = _poll_with_auth_retry(
         root=root,
         terminal=terminal,
+        password_fn=password_fn,
+        initial_password=os.environ.get(kibana_issue_connector.PASSWORD_ENV, ""),
         discover_url=discover_url,
         username=username,
-        password=password,
         output_path=output_path,
         key_path=key_path,
         scan_state_path=scan_state_path,
@@ -530,13 +527,13 @@ def _poll_log_candidates(
     scan_state_path = (
         scan_state_path if scan_state_path.is_absolute() else root / scan_state_path
     )
-    terminal.section("读取日志")
     stdout = io.StringIO()
     stderr = io.StringIO()
     environment = {
         kibana_sanitizer.HMAC_KEY_ENV: _load_or_create_log_key(key_path),
         kibana_issue_connector.PASSWORD_ENV: password,
     }
+
     def run_connector() -> int:
         with _temporary_environment(environment), contextlib.redirect_stdout(
             stdout
@@ -569,6 +566,56 @@ def _poll_log_candidates(
     summary_path = output_path / run_name / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     return summary_path, summary
+
+
+def _poll_with_auth_retry(
+    *,
+    root: Path,
+    terminal: Terminal,
+    password_fn: Callable[[str], str],
+    initial_password: str,
+    discover_url: str,
+    username: str,
+    output_path: Path,
+    key_path: Path,
+    scan_state_path: Path,
+    max_scan_hits: int,
+) -> tuple[Path, Dict[str, Any], str]:
+    password = initial_password or password_fn("› 日志密码: ")
+    if not password:
+        raise ValueError("已取消日志登录。")
+    terminal.section("读取日志")
+    for attempt in range(1, MAX_LOG_AUTH_ATTEMPTS + 1):
+        try:
+            summary_path, summary = _poll_log_candidates(
+                root=root,
+                terminal=terminal,
+                discover_url=discover_url,
+                username=username,
+                password=password,
+                output_path=output_path,
+                key_path=key_path,
+                scan_state_path=scan_state_path,
+                max_scan_hits=max_scan_hits,
+            )
+            return summary_path, summary, password
+        except ValueError as exc:
+            detail = str(exc)
+            authentication_failed = (
+                "HTTP 401" in detail
+                or "credentials were not accepted" in detail
+            )
+            if not authentication_failed:
+                raise
+            if attempt >= MAX_LOG_AUTH_ATTEMPTS:
+                raise ValueError(
+                    "日志认证连续失败，请检查配置账号或重置密码。"
+                ) from None
+            terminal.warn("认证失败，请重新输入。")
+            password = password_fn("› 日志密码: ")
+            if not password:
+                raise ValueError("已取消日志登录。") from None
+    raise AssertionError("unreachable authentication retry state")
 
 
 def _show_inbox(terminal: Terminal, inbox: LogIncidentInbox) -> int:
@@ -852,23 +899,20 @@ def _watch_logs(
             max_scan_hits=max_scan_hits,
         )
         terminal.ok("日志地址、只读账号和轮询间隔已保存；密码未保存。")
-    password = os.environ.get(kibana_issue_connector.PASSWORD_ENV, "") or password_fn(
-        "› 日志密码: "
-    )
-    if not password:
-        raise ValueError("日志平台密码不能为空。")
+    password = os.environ.get(kibana_issue_connector.PASSWORD_ENV, "")
     run_count = 0
     terminal.section("日志监听")
     terminal.field("Mode", "前台轮询")
     terminal.field("Interval", f"{interval}s")
     while max_runs == 0 or run_count < max_runs:
         run_count += 1
-        summary_path, summary = _poll_log_candidates(
+        summary_path, summary, password = _poll_with_auth_retry(
             root=root,
             terminal=terminal,
+            password_fn=password_fn,
+            initial_password=password,
             discover_url=resolved_url,
             username=resolved_username,
-            password=password,
             output_path=output_path,
             key_path=key_path,
             scan_state_path=scan_state_path,
