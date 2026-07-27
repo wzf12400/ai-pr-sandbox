@@ -33,7 +33,9 @@ from src.copilot_issue_provider import CopilotCLIIssueProvider
 from src.issue_draft import _atomic_write_json, _atomic_write_text
 from src.issue_entry import compose_evidence
 from src.kibana_issue_connector import (
+    DEFAULT_INITIAL_SCAN_HITS,
     DEFAULT_MAX_SCAN_HITS,
+    MAX_INITIAL_SCAN_HITS,
     MAX_SCAN_HITS,
     parse_discover_url,
 )
@@ -240,6 +242,7 @@ class LogSourceConfig:
     username: str
     interval_seconds: int
     max_scan_hits: int
+    initial_scan_hits: int
 
     @property
     def discover_url(self) -> str:
@@ -258,6 +261,7 @@ class LogSourceConfig:
             "username": self.username,
             "interval_seconds": self.interval_seconds,
             "max_scan_hits": self.max_scan_hits,
+            "initial_scan_hits": self.initial_scan_hits,
         }
 
 
@@ -390,6 +394,18 @@ class LocalConfigStore:
             raise ValueError(
                 f"log scan limit must be between 1 and {MAX_SCAN_HITS}"
             )
+        initial_scan_hits = value.get(
+            "initial_scan_hits",
+            DEFAULT_INITIAL_SCAN_HITS,
+        )
+        if (
+            not isinstance(initial_scan_hits, int)
+            or not 1 <= initial_scan_hits <= MAX_INITIAL_SCAN_HITS
+        ):
+            raise ValueError(
+                f"initial log scan size must be between 1 and "
+                f"{MAX_INITIAL_SCAN_HITS}"
+            )
         discover_url = str(value.get("discover_url", "")).strip()
         if discover_url:
             target = parse_discover_url(discover_url)
@@ -409,6 +425,7 @@ class LocalConfigStore:
             username=username,
             interval_seconds=interval,
             max_scan_hits=max_scan_hits,
+            initial_scan_hits=initial_scan_hits,
         )
 
     def parse(self, payload: Mapping[str, Any]) -> ControlCenterConfig:
@@ -537,6 +554,7 @@ class LocalConfigStore:
         username: str,
         interval_seconds: int,
         max_scan_hits: int,
+        initial_scan_hits: int,
     ) -> ControlCenterConfig:
         payload = {
             "schema_version": CONFIG_SCHEMA_VERSION,
@@ -555,6 +573,7 @@ class LocalConfigStore:
                 "username": username,
                 "interval_seconds": interval_seconds,
                 "max_scan_hits": max_scan_hits,
+                "initial_scan_hits": initial_scan_hits,
             },
         }
         updated = self.parse(payload)

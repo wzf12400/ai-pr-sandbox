@@ -60,7 +60,10 @@ separately authorized publication may add `--publish --confirm`, but must keep
 OpenSearch password, or claim that foreground polling provides scheduling or
 durable retries. Bounded local scans may use fixed-snapshot scroll pages and a
 non-secret watermark, but must fail without advancing that watermark when the
-configured scan limit is reached.
+configured scan limit is reached. A newly created watermark may explicitly
+initialize from a small latest-error sample; after initialization, polling
+must use the completed watermark rather than repeatedly sampling only the
+latest page.
 
 The connector deterministically groups eligible sanitized events before the
 candidate limit and before any AI call. Inspect each

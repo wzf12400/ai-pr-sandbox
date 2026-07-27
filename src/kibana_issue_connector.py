@@ -38,6 +38,8 @@ MAX_PUBLISH_CANDIDATES = 3
 MAX_FETCH_SIZE = 100
 DEFAULT_MAX_SCAN_HITS = 1000
 MAX_SCAN_HITS = 5000
+DEFAULT_INITIAL_SCAN_HITS = 30
+MAX_INITIAL_SCAN_HITS = 100
 DEFAULT_SCAN_OVERLAP_SECONDS = 300
 MAX_SCAN_OVERLAP_SECONDS = 3600
 SCROLL_KEEP_ALIVE = "2m"
@@ -319,6 +321,69 @@ class OpenSearchDashboardsClient:
                     pass
         return collected
 
+    def fetch_latest_error_hits(
+        self,
+        index_pattern: str,
+        time_field: str,
+        fetch_size: int,
+        *,
+        time_from: Optional[str] = None,
+        time_to: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if not 1 <= fetch_size <= MAX_INITIAL_SCAN_HITS:
+            raise ValueError(
+                f"initial scan size must be between 1 and {MAX_INITIAL_SCAN_HITS}"
+            )
+        payload = {
+            "size": fetch_size,
+            "_source": [
+                "@timestamp",
+                "stream",
+                "logtag",
+                "message",
+                "kubernetes.namespace_name",
+                "kubernetes.container_name",
+                "kubernetes.container_image",
+                "kubernetes.labels.app_kubernetes_io/name",
+                "kubernetes.labels.topology_kubernetes_io/region",
+                "kubernetes.labels.topology_kubernetes_io/zone",
+            ],
+            "query": {
+                "bool": {
+                    "filter": [
+                        {
+                            "range": {
+                                time_field: {
+                                    "gte": time_from or self.target.time_from,
+                                    "lte": time_to or self.target.time_to,
+                                }
+                            }
+                        },
+                        {
+                            "query_string": {
+                                "query": 'message:(ERROR OR FATAL OR Exception OR "Caused by")',
+                                "analyze_wildcard": True,
+                            }
+                        },
+                    ]
+                }
+            },
+            "sort": [
+                {
+                    time_field: {
+                        "order": "desc",
+                        "unmapped_type": "date",
+                    }
+                }
+            ],
+        }
+        response = self._console_request(
+            "POST",
+            f"{index_pattern}/_search",
+            payload,
+        )
+        return self._hits(response)
+
 
 def _scan_source_sha256(target: DiscoverTarget) -> str:
     encoded = json.dumps(
@@ -505,6 +570,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Complete-scan safety limit, maximum {MAX_SCAN_HITS}.",
     )
     parser.add_argument(
+        "--initial-scan-hits",
+        type=int,
+        default=DEFAULT_INITIAL_SCAN_HITS,
+        help=(
+            "Latest errors retained when initializing a new scan cursor; "
+            f"maximum {MAX_INITIAL_SCAN_HITS}."
+        ),
+    )
+    parser.add_argument(
         "--scan-state-file",
         type=Path,
         help="Optional local non-secret cursor advanced only after a complete scan.",
@@ -554,6 +628,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not 1 <= args.max_scan_hits <= MAX_SCAN_HITS:
         print(
             f"error: --max-scan-hits must be between 1 and {MAX_SCAN_HITS}",
+            file=sys.stderr,
+        )
+        return 2
+    if not 1 <= args.initial_scan_hits <= MAX_INITIAL_SCAN_HITS:
+        print(
+            f"error: --initial-scan-hits must be between 1 and "
+            f"{MAX_INITIAL_SCAN_HITS}",
             file=sys.stderr,
         )
         return 2
@@ -614,8 +695,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         target = parse_discover_url(args.discover_url)
         scan_cutoff = datetime.now(timezone.utc)
+        initializing_cursor = False
         if args.scan_state_file is not None:
             cursor = _load_scan_cursor(args.scan_state_file, target)
+            initializing_cursor = cursor is None
             effective_time_from, effective_time_to, scan_cutoff = _scan_window(
                 target,
                 cursor,
@@ -637,14 +720,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             timeout_seconds=args.timeout_seconds,
         )
         index_pattern, time_field = client.resolve_index_pattern()
-        hits = client.fetch_error_hits(
-            index_pattern,
-            time_field,
-            args.fetch_size,
-            time_from=effective_time_from,
-            time_to=effective_time_to,
-            max_scan_hits=args.max_scan_hits,
-        )
+        if initializing_cursor:
+            hits = client.fetch_latest_error_hits(
+                index_pattern,
+                time_field,
+                args.initial_scan_hits,
+                time_from=effective_time_from,
+                time_to=effective_time_to,
+            )
+        else:
+            hits = client.fetch_error_hits(
+                index_pattern,
+                time_field,
+                args.fetch_size,
+                time_from=effective_time_from,
+                time_to=effective_time_to,
+                max_scan_hits=args.max_scan_hits,
+            )
         published_state = _load_published(args.state_file)
         seen = published_state.setdefault("published", {})
 
@@ -767,6 +859,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "resolved_index_pattern": index_pattern,
                 "fetch_size": args.fetch_size,
                 "max_scan_hits": args.max_scan_hits,
+                "initial_scan_hits": args.initial_scan_hits,
+                "scan_mode": (
+                    "initial_latest"
+                    if initializing_cursor
+                    else "incremental_cursor"
+                    if args.scan_state_file is not None
+                    else "bounded_window"
+                ),
                 "effective_time_from": effective_time_from,
                 "effective_time_to": effective_time_to,
                 "cursor_overlap_seconds": args.scan_overlap_seconds,

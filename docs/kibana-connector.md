@@ -74,16 +74,18 @@ The per-request timeout defaults to 30 seconds and can be raised with
 `--timeout-seconds` up to 120 seconds for a slow read-only endpoint. A timeout
 stops the run safely; it does not trigger automatic retries or partial output.
 
-Remote results are read in 50-hit scroll pages from one fixed OpenSearch
-snapshot. The default complete-scan ceiling is 1,000 hits and may be raised,
-explicitly, to 5,000 with `--max-scan-hits`. Reaching the ceiling does not
-silently truncate the result: the run fails and its cursor remains unchanged.
-When `--scan-state-file` is set, the connector stores only a source-bound UTC
-watermark and local summary path. The next run starts five minutes before that
-watermark to cover delayed ingestion, drains every page through a new fixed
-cutoff, and advances the watermark only after sanitized artifacts are written.
-The scroll ID and raw responses remain in process memory and the scroll context
-is closed at the end of the request.
+When a new `--scan-state-file` has no cursor, the connector initializes from
+the latest 30 errors (`--initial-scan-hits`, maximum 100) instead of attempting
+to drain the entire historical Discover window. This deliberately establishes
+a current starting point. Later runs start five minutes before the completed
+watermark to cover delayed ingestion and read 50-hit scroll pages from one
+fixed OpenSearch snapshot through a new cutoff. The default incremental ceiling
+is 1,000 hits and may be raised, explicitly, to 5,000 with
+`--max-scan-hits`. Reaching the ceiling does not silently truncate the result:
+the run fails and its cursor remains unchanged. The cursor stores only a
+source-bound UTC watermark and local summary path and advances only after
+sanitized artifacts are written. Scroll IDs and raw responses remain in
+process memory and the scroll context is closed at the end of the request.
 
 Sanitization minimizes request URLs to a checked route plus query-key names;
 the host, fragment, and every query value are removed. Credential-like keys

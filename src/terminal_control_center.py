@@ -162,6 +162,7 @@ def _configure_one_repository(
             "username": _prompt(input_fn, "只读日志账号: "),
             "interval_seconds": 300,
             "max_scan_hits": kibana_issue_connector.DEFAULT_MAX_SCAN_HITS,
+            "initial_scan_hits": kibana_issue_connector.DEFAULT_INITIAL_SCAN_HITS,
         }
     config = store.save(payload)
     terminal.ok("配置已保存；未保存 GitHub、Copilot 或日志平台密码。")
@@ -188,6 +189,7 @@ def _show_config(
         terminal.field("Log source", config.log_source.base_url)
         terminal.field("Log interval", f"{config.log_source.interval_seconds}s")
         terminal.field("Scan limit", str(config.log_source.max_scan_hits))
+        terminal.field("Initial scan", str(config.log_source.initial_scan_hits))
 
 
 def _wait_for_terminal_state(
@@ -452,6 +454,7 @@ def _fetch_log_candidate(
     key_path: Path,
     scan_state_path: Path = DEFAULT_LOG_SCAN_STATE_PATH,
     max_scan_hits: int = kibana_issue_connector.DEFAULT_MAX_SCAN_HITS,
+    initial_scan_hits: int = kibana_issue_connector.DEFAULT_INITIAL_SCAN_HITS,
     inbox: Optional[LogIncidentInbox] = None,
     password_fn: Callable[[str], str] = getpass.getpass,
 ) -> Dict[str, Any]:
@@ -471,6 +474,7 @@ def _fetch_log_candidate(
         key_path=key_path,
         scan_state_path=scan_state_path,
         max_scan_hits=max_scan_hits,
+        initial_scan_hits=initial_scan_hits,
     )
     if inbox is not None:
         inbox.ingest_summary(summary_path)
@@ -516,6 +520,7 @@ def _poll_log_candidates(
     key_path: Path,
     scan_state_path: Path,
     max_scan_hits: int,
+    initial_scan_hits: int,
 ) -> tuple[Path, Dict[str, Any]]:
     run_name = (
         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -550,6 +555,8 @@ def _poll_log_candidates(
                     "50",
                     "--max-scan-hits",
                     str(max_scan_hits),
+                    "--initial-scan-hits",
+                    str(initial_scan_hits),
                     "--scan-state-file",
                     str(scan_state_path),
                     "--output-dir",
@@ -580,6 +587,7 @@ def _poll_with_auth_retry(
     key_path: Path,
     scan_state_path: Path,
     max_scan_hits: int,
+    initial_scan_hits: int,
 ) -> tuple[Path, Dict[str, Any], str]:
     password = initial_password or password_fn("› 日志密码: ")
     if not password:
@@ -597,6 +605,7 @@ def _poll_with_auth_retry(
                 key_path=key_path,
                 scan_state_path=scan_state_path,
                 max_scan_hits=max_scan_hits,
+                initial_scan_hits=initial_scan_hits,
             )
             return summary_path, summary, password
         except ValueError as exc:
@@ -862,6 +871,7 @@ def _watch_logs(
     key_path: Path,
     scan_state_path: Path,
     max_scan_hits: int,
+    initial_scan_hits: int,
     interval_seconds: Optional[int],
     max_runs: int,
 ) -> int:
@@ -890,6 +900,7 @@ def _watch_logs(
         or configured.username != resolved_username
         or configured.interval_seconds != interval
         or configured.max_scan_hits != max_scan_hits
+        or configured.initial_scan_hits != initial_scan_hits
     ):
         config = store.save_log_source(
             config,
@@ -897,6 +908,7 @@ def _watch_logs(
             username=resolved_username,
             interval_seconds=interval,
             max_scan_hits=max_scan_hits,
+            initial_scan_hits=initial_scan_hits,
         )
         terminal.ok("日志地址、只读账号和轮询间隔已保存；密码未保存。")
     password = os.environ.get(kibana_issue_connector.PASSWORD_ENV, "")
@@ -917,6 +929,7 @@ def _watch_logs(
             key_path=key_path,
             scan_state_path=scan_state_path,
             max_scan_hits=max_scan_hits,
+            initial_scan_hits=initial_scan_hits,
         )
         result = inbox.ingest_summary(summary_path)
         selection = summary.get("selection", {})
@@ -985,6 +998,13 @@ def _run_interactive_session(
                     if config.log_source is not None
                     else kibana_issue_connector.DEFAULT_MAX_SCAN_HITS
                 )
+                initial_scan_hits = (
+                    args.initial_scan_hits
+                    if args.initial_scan_hits is not None
+                    else config.log_source.initial_scan_hits
+                    if config.log_source is not None
+                    else kibana_issue_connector.DEFAULT_INITIAL_SCAN_HITS
+                )
                 discover_url, username = _resolved_log_connection(
                     config,
                     discover_url=args.discover_url,
@@ -1000,6 +1020,7 @@ def _run_interactive_session(
                     key_path=args.log_key,
                     scan_state_path=args.log_scan_state,
                     max_scan_hits=max_scan_hits,
+                    initial_scan_hits=initial_scan_hits,
                     inbox=inbox,
                     password_fn=password_fn,
                 )
@@ -1062,6 +1083,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument(
+        "--initial-scan-hits",
+        type=int,
+        default=None,
+    )
+    parser.add_argument(
         "--interval-seconds",
         type=int,
         default=None,
@@ -1104,6 +1130,13 @@ def main(
             f"--max-scan-hits must be between 1 and "
             f"{kibana_issue_connector.MAX_SCAN_HITS}"
         )
+    if args.initial_scan_hits is not None and not (
+        1 <= args.initial_scan_hits <= kibana_issue_connector.MAX_INITIAL_SCAN_HITS
+    ):
+        raise SystemExit(
+            f"--initial-scan-hits must be between 1 and "
+            f"{kibana_issue_connector.MAX_INITIAL_SCAN_HITS}"
+        )
     root = Path.cwd().resolve()
     config_path = args.config if args.config.is_absolute() else root / args.config
     runs_path = args.runs if args.runs.is_absolute() else root / args.runs
@@ -1130,6 +1163,13 @@ def main(
                 if config.log_source is not None
                 else kibana_issue_connector.DEFAULT_MAX_SCAN_HITS
             )
+            initial_scan_hits = (
+                args.initial_scan_hits
+                if args.initial_scan_hits is not None
+                else config.log_source.initial_scan_hits
+                if config.log_source is not None
+                else kibana_issue_connector.DEFAULT_INITIAL_SCAN_HITS
+            )
             output_path = (
                 args.log_output
                 if args.log_output.is_absolute()
@@ -1152,6 +1192,7 @@ def main(
                 key_path=key_path,
                 scan_state_path=args.log_scan_state,
                 max_scan_hits=max_scan_hits,
+                initial_scan_hits=initial_scan_hits,
                 interval_seconds=args.interval_seconds,
                 max_runs=1 if args.once else args.max_runs,
             )
@@ -1200,6 +1241,13 @@ def main(
                 if config.log_source is not None
                 else kibana_issue_connector.DEFAULT_MAX_SCAN_HITS
             )
+            initial_scan_hits = (
+                args.initial_scan_hits
+                if args.initial_scan_hits is not None
+                else config.log_source.initial_scan_hits
+                if config.log_source is not None
+                else kibana_issue_connector.DEFAULT_INITIAL_SCAN_HITS
+            )
             discover_url, username = _resolved_log_connection(
                 config,
                 discover_url=args.discover_url,
@@ -1215,6 +1263,7 @@ def main(
                 key_path=args.log_key,
                 scan_state_path=args.log_scan_state,
                 max_scan_hits=max_scan_hits,
+                initial_scan_hits=initial_scan_hits,
                 inbox=inbox,
                 password_fn=password_fn,
             )

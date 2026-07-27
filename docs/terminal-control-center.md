@@ -63,23 +63,25 @@ still override the local defaults.
 
 The parsed base URL, data-view ID, bounded relative time range, read-only
 username, and interval are saved in the ignored owner-only local configuration.
-The same `logs` object stores `max_scan_hits` (default `1000`, maximum `5000`),
-so the persistent limit can be changed without changing the startup command.
+The same `logs` object stores `initial_scan_hits` (default `30`, maximum `100`)
+and `max_scan_hits` (default `1000`, maximum `5000`), so both persistent limits
+can be changed without changing the startup command.
 The password is held in process memory only. It may also be supplied as
 `OPENSEARCH_PASSWORD` by the employee's local process manager; it is never
 written by this application. HTTP 401 responses trigger up to three hidden
 password attempts within the current action; an empty retry returns to the
 interactive prompt. A local owner-only HMAC key is
 created under `.issue-entry-state/` so event references remain stable without
-storing raw identifiers. Each poll reads 50-record pages from one fixed
-OpenSearch snapshot and follows every page up to a configurable complete-scan
-limit. The local cursor overlaps the previous completed window by five minutes
-and advances only after the whole bounded scan succeeds. If the backlog exceeds
-the limit, the poll fails without advancing the cursor. All sanitized incidents
-are retained in the inbox even when the interactive selector shows only the
-first 20. Raw responses and credentials are not written to disk. Blocked
-records do not enter AI. Repeated incident references or deterministic issue
-signatures update the existing inbox record instead of creating a second item.
+storing raw identifiers. A new cursor starts from the latest 30 errors rather
+than draining the historical two-hour backlog. Later polls overlap the previous
+completed window by five minutes, read 50-record pages from one fixed snapshot,
+and advance the cursor only after the whole bounded incremental scan succeeds.
+If new backlog exceeds the limit, the poll fails without advancing the cursor.
+All sanitized incidents are retained in the inbox even when the interactive
+selector shows only the first 20. Raw responses and credentials are not written
+to disk. Blocked records do not enter AI. Repeated incident references or
+deterministic issue signatures update the existing inbox record instead of
+creating a second item.
 
 `review` sends only the selected minimized incident through the same no-tools
 Copilot Issue generator, independent reviewer, repository resolver, preview,

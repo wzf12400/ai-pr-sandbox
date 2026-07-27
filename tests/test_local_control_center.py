@@ -148,6 +148,7 @@ class LocalConfigStoreTest(unittest.TestCase):
         self.assertEqual("read-only-user", config.log_source.username)
         self.assertEqual("now-2h", config.log_source.time_from)
         self.assertEqual(1000, config.log_source.max_scan_hits)
+        self.assertEqual(30, config.log_source.initial_scan_hits)
         self.assertEqual(
             "ee351460-8261-11f0-bb8a-4fb3796753f3",
             persisted["logs"]["data_view_id"],

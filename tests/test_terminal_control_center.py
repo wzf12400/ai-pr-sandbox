@@ -189,6 +189,7 @@ class TerminalControlCenterTest(unittest.TestCase):
                 key_path=Path("key.json"),
                 scan_state_path=Path("cursor.json"),
                 max_scan_hits=1000,
+                initial_scan_hits=30,
             )
 
         self.assertEqual(summary_path, expected[0])
@@ -269,11 +270,13 @@ class TerminalControlCenterTest(unittest.TestCase):
                 discover_url="https://logs.example.test/discover",
                 username="reader",
                 max_scan_hits=1000,
+                initial_scan_hits=30,
             )
         )
         args = SimpleNamespace(
             preview_only=False,
             max_scan_hits=None,
+            initial_scan_hits=None,
             discover_url="",
             username="",
             log_output=Path("logs"),
@@ -518,6 +521,7 @@ class TerminalControlCenterTest(unittest.TestCase):
             username="reader",
             interval_seconds=300,
             max_scan_hits=1000,
+            initial_scan_hits=30,
         )
         config = SimpleNamespace(log_source=log_source)
         store = mock.Mock()
@@ -552,6 +556,7 @@ class TerminalControlCenterTest(unittest.TestCase):
                 key_path=Path(directory) / "key.json",
                 scan_state_path=Path(directory) / "cursor.json",
                 max_scan_hits=1000,
+                initial_scan_hits=30,
                 interval_seconds=None,
                 max_runs=1,
             )

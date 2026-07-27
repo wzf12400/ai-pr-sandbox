@@ -237,6 +237,41 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertEqual(proxy_calls[1]["path"], ["_search/scroll"])
         self.assertEqual(proxy_calls[-1]["method"], ["DELETE"])
 
+    def test_client_initial_scan_reads_latest_hits_without_scroll(self):
+        opener = FakeOpener()
+        target = DiscoverTarget(
+            base_url="https://logs.example.test/_dashboards",
+            data_view_id="data-view-1",
+            time_from="now-2h",
+            time_to="now",
+        )
+        client = OpenSearchDashboardsClient(
+            target,
+            DashboardCredentials("reader", "password"),
+            opener=opener,
+        )
+
+        hits = client.fetch_latest_error_hits(
+            "logs-*",
+            "@timestamp",
+            30,
+            time_to="2026-07-27T08:05:00.000Z",
+        )
+
+        self.assertEqual(len(hits), 1)
+        request = opener.requests[0][0]
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(request.full_url).query
+        )
+        payload = json.loads(request.data)
+        self.assertEqual(query["path"], ["logs-*/_search"])
+        self.assertEqual(payload["size"], 30)
+        self.assertEqual(
+            payload["sort"],
+            [{"@timestamp": {"order": "desc", "unmapped_type": "date"}}],
+        )
+        self.assertNotIn("track_total_hits", payload)
+
     def test_client_does_not_silently_truncate_scan_backlog(self):
         opener = PagedOpener()
         target = DiscoverTarget(
@@ -283,6 +318,55 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertEqual(time_from, "2026-07-27T07:55:00.000Z")
         self.assertEqual(time_to, "2026-07-27T08:05:00.000Z")
         self.assertEqual(cutoff, datetime(2026, 7, 27, 8, 5, tzinfo=timezone.utc))
+
+    def test_new_cursor_initializes_from_latest_thirty_hits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cursor_path = root / "cursor.json"
+            output = root / "output"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LOG_SANITIZER_HMAC_KEY": HMAC_KEY,
+                    "OPENSEARCH_PASSWORD": "password",
+                },
+                clear=True,
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern",
+                return_value=("logs-*", "@timestamp"),
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_latest_error_hits",
+                return_value=[error_hit()],
+            ) as latest, mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits"
+            ) as incremental, contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--discover-url",
+                        DISCOVER_URL,
+                        "--username",
+                        "reader",
+                        "--initial-scan-hits",
+                        "30",
+                        "--scan-state-file",
+                        str(cursor_path),
+                        "--output-dir",
+                        str(output),
+                        "--name",
+                        "initial-scan",
+                    ]
+                )
+            summary = json.loads(
+                (output / "initial-scan" / "summary.json").read_text()
+            )
+            cursor_exists = cursor_path.exists()
+
+        self.assertEqual(code, 0)
+        latest.assert_called_once()
+        incremental.assert_not_called()
+        self.assertEqual(summary["query"]["scan_mode"], "initial_latest")
+        self.assertEqual(summary["query"]["initial_scan_hits"], 30)
+        self.assertTrue(cursor_exists)
 
     def test_failed_scan_does_not_advance_existing_cursor(self):
         target = parse_discover_url(DISCOVER_URL)
