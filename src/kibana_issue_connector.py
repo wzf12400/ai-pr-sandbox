@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -13,7 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,9 +32,20 @@ from src.issue_intake import find_sensitive_data
 USERNAME_ENV = "OPENSEARCH_USERNAME"
 PASSWORD_ENV = "OPENSEARCH_PASSWORD"
 TENANT_ENV = "OPENSEARCH_TENANT"
-MAX_CANDIDATES = 20
+MAX_CANDIDATES = 5000
+MAX_GENERATE_CANDIDATES = 20
 MAX_PUBLISH_CANDIDATES = 3
 MAX_FETCH_SIZE = 100
+DEFAULT_MAX_SCAN_HITS = 1000
+MAX_SCAN_HITS = 5000
+DEFAULT_INITIAL_SCAN_HITS = 30
+MAX_INITIAL_SCAN_HITS = 100
+DEFAULT_SCAN_OVERLAP_SECONDS = 300
+MAX_SCAN_OVERLAP_SECONDS = 3600
+SCROLL_KEEP_ALIVE = "2m"
+SCAN_CURSOR_SCHEMA_VERSION = "kibana-scan-cursor/v1"
+SCAN_QUERY_VERSION = "opensearch-error-scan/v2"
+MAX_SCAN_CURSOR_BYTES = 16_384
 MAX_BLOCKED_ERROR_PREVIEWS = 10
 MAX_TIMEOUT_SECONDS = 120
 MAX_BLOCKED_CONTEXTS = 3
@@ -183,15 +195,55 @@ class OpenSearchDashboardsClient:
             raise ValueError("only @timestamp data views are supported in phase one")
         return title, time_field
 
-    def fetch_error_hits(self, index_pattern: str, time_field: str, fetch_size: int) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _hits(response: Dict[str, Any]) -> List[Dict[str, Any]]:
+        container = response.get("hits")
+        if not isinstance(container, dict):
+            raise ValueError("OpenSearch search response has no hits object")
+        hits = container.get("hits")
+        if not isinstance(hits, list):
+            raise ValueError("OpenSearch search response has invalid hits")
+        if any(
+            not isinstance(hit, dict) or not isinstance(hit.get("_source"), dict)
+            for hit in hits
+        ):
+            raise ValueError("OpenSearch search response contains an invalid hit")
+        return hits
+
+    @staticmethod
+    def _scroll_id(response: Dict[str, Any]) -> str:
+        value = response.get("_scroll_id", "")
+        return value.strip() if isinstance(value, str) else ""
+
+    def _console_request(
+        self,
+        method: str,
+        path: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        search_path = urllib.parse.urlencode({"path": path, "method": method})
+        return self._request_json(
+            "POST",
+            f"/api/console/proxy?{search_path}",
+            payload,
+        )
+
+    def fetch_error_hits(
+        self,
+        index_pattern: str,
+        time_field: str,
+        fetch_size: int,
+        *,
+        time_from: Optional[str] = None,
+        time_to: Optional[str] = None,
+        max_scan_hits: int = DEFAULT_MAX_SCAN_HITS,
+    ) -> List[Dict[str, Any]]:
         if not 1 <= fetch_size <= MAX_FETCH_SIZE:
             raise ValueError(f"fetch size must be between 1 and {MAX_FETCH_SIZE}")
-        search_path = urllib.parse.urlencode(
-            {"path": f"{index_pattern}/_search", "method": "POST"}
-        )
+        if not 1 <= max_scan_hits <= MAX_SCAN_HITS:
+            raise ValueError(f"max scan hits must be between 1 and {MAX_SCAN_HITS}")
         payload = {
             "size": fetch_size,
-            "track_total_hits": False,
             "_source": [
                 "@timestamp",
                 "stream",
@@ -210,8 +262,8 @@ class OpenSearchDashboardsClient:
                         {
                             "range": {
                                 time_field: {
-                                    "gte": self.target.time_from,
-                                    "lte": self.target.time_to,
+                                    "gte": time_from or self.target.time_from,
+                                    "lte": time_to or self.target.time_to,
                                 }
                             }
                         },
@@ -224,13 +276,203 @@ class OpenSearchDashboardsClient:
                     ]
                 }
             },
-            "sort": [{time_field: {"order": "desc", "unmapped_type": "date"}}],
+            "sort": ["_doc"],
         }
-        response = self._request_json("POST", f"/api/console/proxy?{search_path}", payload)
-        hits = response.get("hits", {}).get("hits", []) if isinstance(response.get("hits"), dict) else []
-        if not isinstance(hits, list):
-            raise ValueError("OpenSearch search response has invalid hits")
-        return [hit for hit in hits if isinstance(hit, dict) and isinstance(hit.get("_source"), dict)]
+        response = self._console_request(
+            "POST",
+            f"{index_pattern}/_search?scroll={SCROLL_KEEP_ALIVE}",
+            payload,
+        )
+        scroll_id = self._scroll_id(response)
+        collected: List[Dict[str, Any]] = []
+        try:
+            while True:
+                page = self._hits(response)
+                if len(collected) + len(page) > max_scan_hits:
+                    raise ValueError(
+                        f"error backlog exceeds the per-run limit of {max_scan_hits}; "
+                        "scan cursor was not advanced"
+                    )
+                collected.extend(page)
+                if len(page) < fetch_size:
+                    break
+                if not scroll_id:
+                    raise ValueError(
+                        "OpenSearch did not return a scroll cursor for the next page"
+                    )
+                response = self._console_request(
+                    "POST",
+                    "_search/scroll",
+                    {
+                        "scroll": SCROLL_KEEP_ALIVE,
+                        "scroll_id": scroll_id,
+                    },
+                )
+                scroll_id = self._scroll_id(response) or scroll_id
+        finally:
+            if scroll_id:
+                try:
+                    self._console_request(
+                        "DELETE",
+                        "_search/scroll",
+                        {"scroll_id": [scroll_id]},
+                    )
+                except (OSError, ValueError):
+                    pass
+        return collected
+
+    def fetch_latest_error_hits(
+        self,
+        index_pattern: str,
+        time_field: str,
+        fetch_size: int,
+        *,
+        time_from: Optional[str] = None,
+        time_to: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if not 1 <= fetch_size <= MAX_INITIAL_SCAN_HITS:
+            raise ValueError(
+                f"initial scan size must be between 1 and {MAX_INITIAL_SCAN_HITS}"
+            )
+        payload = {
+            "size": fetch_size,
+            "_source": [
+                "@timestamp",
+                "stream",
+                "logtag",
+                "message",
+                "kubernetes.namespace_name",
+                "kubernetes.container_name",
+                "kubernetes.container_image",
+                "kubernetes.labels.app_kubernetes_io/name",
+                "kubernetes.labels.topology_kubernetes_io/region",
+                "kubernetes.labels.topology_kubernetes_io/zone",
+            ],
+            "query": {
+                "bool": {
+                    "filter": [
+                        {
+                            "range": {
+                                time_field: {
+                                    "gte": time_from or self.target.time_from,
+                                    "lte": time_to or self.target.time_to,
+                                }
+                            }
+                        },
+                        {
+                            "query_string": {
+                                "query": 'message:(ERROR OR FATAL OR Exception OR "Caused by")',
+                                "analyze_wildcard": True,
+                            }
+                        },
+                    ]
+                }
+            },
+            "sort": [
+                {
+                    time_field: {
+                        "order": "desc",
+                        "unmapped_type": "date",
+                    }
+                }
+            ],
+        }
+        response = self._console_request(
+            "POST",
+            f"{index_pattern}/_search",
+            payload,
+        )
+        return self._hits(response)
+
+
+def _scan_source_sha256(target: DiscoverTarget) -> str:
+    encoded = json.dumps(
+        {
+            "query_version": SCAN_QUERY_VERSION,
+            "base_url": target.base_url,
+            "data_view_id": target.data_view_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _parse_utc_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("scan cursor timestamp is invalid") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("scan cursor timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_utc_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _load_scan_cursor(
+    path: Optional[Path],
+    target: DiscoverTarget,
+) -> Optional[Dict[str, Any]]:
+    if path is None or not path.exists():
+        return None
+    if path.is_symlink() or path.stat().st_size > MAX_SCAN_CURSOR_BYTES:
+        raise ValueError("scan cursor file is invalid")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("scan cursor file is unreadable") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != SCAN_CURSOR_SCHEMA_VERSION
+        or payload.get("source_sha256") != _scan_source_sha256(target)
+    ):
+        raise ValueError("scan cursor does not match the configured log source")
+    completed = str(payload.get("completed_through", "")).strip()
+    _parse_utc_timestamp(completed)
+    return payload
+
+
+def _scan_window(
+    target: DiscoverTarget,
+    cursor: Optional[Dict[str, Any]],
+    overlap_seconds: int,
+    *,
+    now: Optional[datetime] = None,
+) -> Tuple[str, str, datetime]:
+    if target.time_to != "now":
+        raise ValueError("scan cursor requires a Discover window ending at now")
+    cutoff = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if cursor is None:
+        time_from = target.time_from
+    else:
+        completed = _parse_utc_timestamp(str(cursor["completed_through"]))
+        time_from = _format_utc_timestamp(
+            completed - timedelta(seconds=overlap_seconds)
+        )
+    return time_from, _format_utc_timestamp(cutoff), cutoff
+
+
+def _save_scan_cursor(
+    path: Path,
+    target: DiscoverTarget,
+    completed_through: datetime,
+    summary_path: Path,
+) -> None:
+    _atomic_write_json(
+        path,
+        {
+            "schema_version": SCAN_CURSOR_SCHEMA_VERSION,
+            "source_sha256": _scan_source_sha256(target),
+            "completed_through": _format_utc_timestamp(completed_through),
+            "last_summary": str(summary_path),
+            "updated_at": _format_utc_timestamp(datetime.now(timezone.utc)),
+        },
+    )
 
 
 def _credentials(prompt_password: bool, username: str) -> DashboardCredentials:
@@ -322,6 +564,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-candidates", type=int, default=5, help=f"Candidate limit, maximum {MAX_CANDIDATES}.")
     parser.add_argument("--fetch-size", type=int, default=50, help=f"Remote hit limit, maximum {MAX_FETCH_SIZE}.")
     parser.add_argument(
+        "--max-scan-hits",
+        type=int,
+        default=DEFAULT_MAX_SCAN_HITS,
+        help=f"Complete-scan safety limit, maximum {MAX_SCAN_HITS}.",
+    )
+    parser.add_argument(
+        "--initial-scan-hits",
+        type=int,
+        default=DEFAULT_INITIAL_SCAN_HITS,
+        help=(
+            "Latest errors retained when initializing a new scan cursor; "
+            f"maximum {MAX_INITIAL_SCAN_HITS}."
+        ),
+    )
+    parser.add_argument(
+        "--scan-state-file",
+        type=Path,
+        help="Optional local non-secret cursor advanced only after a complete scan.",
+    )
+    parser.add_argument(
+        "--scan-overlap-seconds",
+        type=int,
+        default=DEFAULT_SCAN_OVERLAP_SECONDS,
+        help=(
+            "Overlap before the completed cursor to include delayed events; "
+            f"maximum {MAX_SCAN_OVERLAP_SECONDS} seconds."
+        ),
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=float,
         default=30,
@@ -353,6 +624,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     auto_publish = args.auto_publish_policy is not None
     if not 1 <= args.max_candidates <= MAX_CANDIDATES:
         print(f"error: --max-candidates must be between 1 and {MAX_CANDIDATES}", file=sys.stderr)
+        return 2
+    if not 1 <= args.max_scan_hits <= MAX_SCAN_HITS:
+        print(
+            f"error: --max-scan-hits must be between 1 and {MAX_SCAN_HITS}",
+            file=sys.stderr,
+        )
+        return 2
+    if not 1 <= args.initial_scan_hits <= MAX_INITIAL_SCAN_HITS:
+        print(
+            f"error: --initial-scan-hits must be between 1 and "
+            f"{MAX_INITIAL_SCAN_HITS}",
+            file=sys.stderr,
+        )
+        return 2
+    if not 0 <= args.scan_overlap_seconds <= MAX_SCAN_OVERLAP_SECONDS:
+        print(
+            "error: --scan-overlap-seconds must be between 0 and "
+            f"{MAX_SCAN_OVERLAP_SECONDS}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.generate and args.max_candidates > MAX_GENERATE_CANDIDATES:
+        print(
+            f"error: generation is limited to {MAX_GENERATE_CANDIDATES} candidates per run",
+            file=sys.stderr,
+        )
         return 2
     if not 1 <= args.timeout_seconds <= MAX_TIMEOUT_SECONDS:
         print(
@@ -397,6 +694,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             else None
         )
         target = parse_discover_url(args.discover_url)
+        scan_cutoff = datetime.now(timezone.utc)
+        initializing_cursor = False
+        if args.scan_state_file is not None:
+            cursor = _load_scan_cursor(args.scan_state_file, target)
+            initializing_cursor = cursor is None
+            effective_time_from, effective_time_to, scan_cutoff = _scan_window(
+                target,
+                cursor,
+                args.scan_overlap_seconds,
+                now=scan_cutoff,
+            )
+        else:
+            effective_time_from = target.time_from
+            effective_time_to = target.time_to
         raw_key = os.environ.get(kibana_sanitizer.HMAC_KEY_ENV, "").encode("utf-8")
         if len(raw_key) < kibana_sanitizer.MIN_HMAC_KEY_BYTES:
             raise ValueError(
@@ -409,7 +720,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             timeout_seconds=args.timeout_seconds,
         )
         index_pattern, time_field = client.resolve_index_pattern()
-        hits = client.fetch_error_hits(index_pattern, time_field, args.fetch_size)
+        if initializing_cursor:
+            hits = client.fetch_latest_error_hits(
+                index_pattern,
+                time_field,
+                args.initial_scan_hits,
+                time_from=effective_time_from,
+                time_to=effective_time_to,
+            )
+        else:
+            hits = client.fetch_error_hits(
+                index_pattern,
+                time_field,
+                args.fetch_size,
+                time_from=effective_time_from,
+                time_to=effective_time_to,
+                max_scan_hits=args.max_scan_hits,
+            )
         published_state = _load_published(args.state_file)
         seen = published_state.setdefault("published", {})
 
@@ -509,6 +836,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         selection["rejected_candidate_limit"] = max(
             0, len(unpublished_incidents) - len(candidates)
         )
+        if args.scan_state_file is not None and selection["rejected_candidate_limit"]:
+            raise ValueError(
+                "incident backlog exceeds the candidate limit; "
+                "scan cursor was not advanced"
+            )
 
         config = _gateway_config(args.prompt_api_key) if args.generate else None
         repository = args.repository or _infer_repository() if args.publish else ""
@@ -526,6 +858,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             "query": {
                 "resolved_index_pattern": index_pattern,
                 "fetch_size": args.fetch_size,
+                "max_scan_hits": args.max_scan_hits,
+                "initial_scan_hits": args.initial_scan_hits,
+                "scan_mode": (
+                    "initial_latest"
+                    if initializing_cursor
+                    else "incremental_cursor"
+                    if args.scan_state_file is not None
+                    else "bounded_window"
+                ),
+                "effective_time_from": effective_time_from,
+                "effective_time_to": effective_time_to,
+                "cursor_overlap_seconds": args.scan_overlap_seconds,
+                "cursor_enabled": args.scan_state_file is not None,
                 "timeout_seconds": args.timeout_seconds,
                 "returned_hits": len(hits),
                 "incident_candidate_limit": args.max_candidates,
@@ -669,7 +1014,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                             _atomic_write_json(args.state_file, published_state)
                     item["publication"] = publication
             summary["candidates"].append(item)
-        _atomic_write_json(run_dir / "summary.json", summary)
+        summary_path = run_dir / "summary.json"
+        _atomic_write_json(summary_path, summary)
+        if args.scan_state_file is not None:
+            _save_scan_cursor(
+                args.scan_state_file,
+                target,
+                scan_cutoff,
+                summary_path,
+            )
     except (FileExistsError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

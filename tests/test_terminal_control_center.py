@@ -2,16 +2,25 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from src.terminal_control_center import (
     Terminal,
     _fetch_log_candidate,
+    _interactive_input,
     _load_or_create_log_key,
+    _poll_with_auth_retry,
+    _review_incident,
+    _resolved_log_connection,
+    _run_interactive_session,
     _run_record,
     _run_resume,
+    _run_with_spinner,
+    _watch_logs,
 )
 
 
@@ -30,6 +39,10 @@ def prepared_record():
             "required_labels": ["ai-code-approved"],
             "allowed_write_paths": ["src/**", "tests/**"],
             "approval_digest": "a" * 64,
+            "approval_digests": {
+                "draft_pr": "a" * 64,
+                "issue_only": "c" * 64,
+            },
         },
     }
 
@@ -38,18 +51,24 @@ class FakeWorkflow:
     def __init__(self, record):
         self.record = record
         self.approvals = []
+        self.approval_modes = []
 
     def read(self, run_id):
         return self.record
 
-    def approve(self, run_id, digest):
+    def approve(self, run_id, digest, *, mode="draft_pr"):
         self.approvals.append((run_id, digest))
+        self.approval_modes.append(mode)
         self.record = {
             "run_id": run_id,
             "status": "completed",
             "result": {
                 "issue_url": "https://github.com/example/ai-pr-sandbox/issues/1",
-                "draft_pr_url": "https://github.com/example/ai-pr-sandbox/pull/2",
+                "draft_pr_url": (
+                    "https://github.com/example/ai-pr-sandbox/pull/2"
+                    if mode == "draft_pr"
+                    else None
+                ),
             },
         }
         return {"run_id": run_id, "status": "executing"}
@@ -105,7 +124,195 @@ class FakeResumeWorkflow(FakeWorkflow):
         return {"run_id": run_id, "status": "executing"}
 
 
+class FakeInbox:
+    def __init__(self):
+        self.record = {
+            "incident_id": "INC-123456789ABC",
+            "status": "pending",
+            "services": ["calculator"],
+            "event_count": 1,
+            "first_seen_at": "2099-01-01T00:00:00Z",
+            "last_seen_at": "2099-01-01T00:00:00Z",
+            "workflow_run_id": RUN_ID,
+            "issue_url": None,
+            "draft_pr_url": None,
+            "evidence": {"safe": True},
+        }
+
+    def get(self, incident_id):
+        self.assert_id = incident_id
+        return dict(self.record)
+
+    def update(self, incident_id, **changes):
+        self.assert_id = incident_id
+        self.record.update(changes)
+        return dict(self.record)
+
+    def add_context(self, incident_id, context):
+        self.record.update(
+            {"status": "pending", "workflow_run_id": None, "context": context}
+        )
+        return dict(self.record)
+
+    def snooze(self, incident_id):
+        self.record["status"] = "snoozed"
+        return dict(self.record)
+
+    def ignore(self, incident_id):
+        self.record["status"] = "ignored"
+        return dict(self.record)
+
+
 class TerminalControlCenterTest(unittest.TestCase):
+    def test_banner_uses_minimal_pixel_mascot_without_old_flow_box(self):
+        output = io.StringIO()
+
+        Terminal(output, color=False).banner()
+
+        rendered = output.getvalue()
+        self.assertIn("▄████▄", rendered)
+        self.assertIn("输入需求 · help 查看功能", rendered)
+        self.assertNotIn("AI Change Control", rendered)
+        self.assertNotIn("自然语言 / 日志异常", rendered)
+
+    def test_log_authentication_retries_without_persisting_passwords(self):
+        output = io.StringIO()
+        passwords = iter(["wrong-password", "right-password"])
+        expected = (Path("/safe/summary.json"), {"candidates": []})
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
+            "src.terminal_control_center._poll_log_candidates",
+            side_effect=[
+                ValueError(
+                    "OpenSearch Dashboards returned HTTP 401: "
+                    "Authentication Exception"
+                ),
+                expected,
+            ],
+        ) as poll:
+            summary_path, summary, password = _poll_with_auth_retry(
+                root=Path("/safe"),
+                terminal=Terminal(output, color=False),
+                password_fn=lambda _prompt: next(passwords),
+                initial_password="",
+                discover_url="https://logs.example.test/discover",
+                username="reader",
+                output_path=Path("logs"),
+                key_path=Path("key.json"),
+                scan_state_path=Path("cursor.json"),
+                max_scan_hits=1000,
+                initial_scan_hits=30,
+            )
+
+        self.assertEqual(summary_path, expected[0])
+        self.assertEqual(summary, expected[1])
+        self.assertEqual(password, "right-password")
+        self.assertEqual(poll.call_count, 2)
+        self.assertIn("认证失败，请重新输入", output.getvalue())
+        self.assertNotIn("wrong-password", output.getvalue())
+        self.assertNotIn("right-password", output.getvalue())
+
+    def test_spinner_keeps_slow_log_scan_visibly_active(self):
+        output = io.StringIO()
+
+        def slow_action():
+            time.sleep(0.12)
+            return 0
+
+        code = _run_with_spinner(
+            Terminal(output, color=True),
+            "扫描中",
+            slow_action,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertIn("扫描中", output.getvalue())
+
+    def test_log_mode_reuses_configured_url_and_username(self):
+        configured = SimpleNamespace(
+            log_source=SimpleNamespace(
+                discover_url="https://logs.example.test/discover",
+                username="configured-reader",
+            )
+        )
+
+        self.assertEqual(
+            (
+                "https://logs.example.test/discover",
+                "configured-reader",
+            ),
+            _resolved_log_connection(
+                configured,
+                discover_url="",
+                username="",
+            ),
+        )
+        self.assertEqual(
+            ("https://override.example.test/discover", "override-reader"),
+            _resolved_log_connection(
+                configured,
+                discover_url="https://override.example.test/discover",
+                username="override-reader",
+            ),
+        )
+
+    def test_interactive_commands_are_not_sent_as_change_requests(self):
+        for value in ("/logs", "logs", "LOG", "日志", "日志平台"):
+            self.assertEqual(("logs", ""), _interactive_input(value))
+        for value in ("inbox", "/inbox", "收件箱", "异常收件箱"):
+            self.assertEqual(("inbox", ""), _interactive_input(value))
+        self.assertEqual(
+            ("review", "INC-123456789ABC"),
+            _interactive_input("review inc-123456789abc"),
+        )
+        self.assertEqual(("help", ""), _interactive_input("帮助"))
+        self.assertEqual(("exit", ""), _interactive_input("退出"))
+        self.assertEqual(("empty", ""), _interactive_input("  "))
+        self.assertEqual(
+            ("request", "在计算器模块新增乘法功能"),
+            _interactive_input("在计算器模块新增乘法功能"),
+        )
+        with self.assertRaisesRegex(ValueError, "未知终端命令"):
+            _interactive_input("/unknown")
+
+    def test_interactive_session_recovers_from_empty_log_password(self):
+        output = io.StringIO()
+        config = SimpleNamespace(
+            log_source=SimpleNamespace(
+                discover_url="https://logs.example.test/discover",
+                username="reader",
+                max_scan_hits=1000,
+                initial_scan_hits=30,
+            )
+        )
+        args = SimpleNamespace(
+            preview_only=False,
+            max_scan_hits=None,
+            initial_scan_hits=None,
+            discover_url="",
+            username="",
+            log_output=Path("logs"),
+            log_key=Path("key.json"),
+            log_scan_state=Path("cursor.json"),
+        )
+        answers = iter(["log", "help", "exit"])
+        with tempfile.TemporaryDirectory() as directory:
+            code = _run_interactive_session(
+                root=Path(directory),
+                config=config,
+                workflow=mock.Mock(),
+                inbox=mock.Mock(),
+                terminal=Terminal(output, color=False),
+                input_fn=lambda _prompt: next(answers),
+                password_fn=lambda _prompt: "",
+                args=args,
+            )
+
+        rendered = output.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("已取消日志登录", rendered)
+        self.assertEqual(rendered.count("功能入口"), 1)
+        self.assertIn("会话已结束", rendered)
+
     def test_terminal_preview_can_be_cancelled_without_approval(self):
         output = io.StringIO()
         workflow = FakeWorkflow(prepared_record())
@@ -263,6 +470,7 @@ class TerminalControlCenterTest(unittest.TestCase):
                 return 0
 
             answers = iter(["1"])
+            inbox = mock.Mock()
             with mock.patch(
                 "src.terminal_control_center.kibana_issue_connector.main",
                 side_effect=fake_connector,
@@ -275,6 +483,7 @@ class TerminalControlCenterTest(unittest.TestCase):
                     username="reader",
                     output_path=log_output,
                     key_path=root / "log-key.json",
+                    inbox=inbox,
                     password_fn=lambda _prompt: "temporary-password",
                 )
                 self.assertNotIn("OPENSEARCH_PASSWORD", os.environ)
@@ -287,6 +496,87 @@ class TerminalControlCenterTest(unittest.TestCase):
         self.assertEqual("sanitized", evidence["safety"]["status"])
         self.assertNotIn("temporary-password", persisted)
         self.assertNotIn("temporary-password", output.getvalue())
+        self.assertNotIn("原始响应不落盘", output.getvalue())
+        self.assertIn("扫描 1 · 有效 1 · 异常 1", output.getvalue())
+        inbox.ingest_summary.assert_called_once()
+
+    def test_log_review_issue_only_does_not_select_code_scope(self):
+        output = io.StringIO()
+        workflow = FakeWorkflow(prepared_record())
+        inbox = FakeInbox()
+
+        code = _review_incident(
+            incident_id="INC-123456789ABC",
+            inbox=inbox,
+            workflow=workflow,
+            terminal=Terminal(output, color=False),
+            input_fn=lambda _prompt: "i",
+            preview_only=False,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(["issue_only"], workflow.approval_modes)
+        self.assertEqual([(RUN_ID, "c" * 64)], workflow.approvals)
+        self.assertEqual("completed", inbox.record["status"])
+        self.assertIsNone(inbox.record["draft_pr_url"])
+        self.assertIn("未授权 AI 修改代码", output.getvalue())
+
+    def test_watch_once_persists_candidate_without_remote_workflow(self):
+        output = io.StringIO()
+        discover_url = (
+            "https://logs.example.test/_dashboards/app/discover#/?"
+            "_g=(time:(from:now-2h,to:now))&_a=(index:view-1)"
+        )
+        log_source = SimpleNamespace(
+            discover_url=discover_url,
+            username="reader",
+            interval_seconds=300,
+            max_scan_hits=1000,
+            initial_scan_hits=30,
+        )
+        config = SimpleNamespace(log_source=log_source)
+        store = mock.Mock()
+        inbox = mock.Mock()
+        inbox.ingest_summary.return_value = {
+            "candidates": 1,
+            "added": 1,
+            "deduplicated": 0,
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "src.terminal_control_center._poll_log_candidates",
+            return_value=(
+                Path(directory) / "summary.json",
+                {"selection": {"scanned_hits": 2}},
+            ),
+        ) as poll, mock.patch.dict(
+            os.environ,
+            {"OPENSEARCH_PASSWORD": "process-only-password"},
+            clear=True,
+        ):
+            code = _watch_logs(
+                root=Path(directory),
+                store=store,
+                config=config,
+                inbox=inbox,
+                terminal=Terminal(output, color=False),
+                input_fn=lambda _prompt: "",
+                password_fn=lambda _prompt: self.fail("password prompt was unexpected"),
+                discover_url="",
+                username="",
+                output_path=Path(directory) / "logs",
+                key_path=Path(directory) / "key.json",
+                scan_state_path=Path(directory) / "cursor.json",
+                max_scan_hits=1000,
+                initial_scan_hits=30,
+                interval_seconds=None,
+                max_runs=1,
+            )
+
+        self.assertEqual(0, code)
+        store.save_log_source.assert_not_called()
+        poll.assert_called_once()
+        inbox.ingest_summary.assert_called_once()
+        self.assertNotIn("process-only-password", output.getvalue())
 
 
 if __name__ == "__main__":

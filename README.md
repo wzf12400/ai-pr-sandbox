@@ -281,6 +281,15 @@ Start it from the project checkout:
 ./bin/ai-agent
 ```
 
+With no arguments, the terminal shows a compact pixel mascot and goes directly
+to the input prompt. The natural-language, log, inbox, incident-review, and
+exit entries appear only after `help`. `logs`, `/logs`, and `日志` are
+equivalent; command-like input is classified locally before any
+Issue-generation call.
+This interactive session remains open after completed operations and
+recoverable errors. Use `exit`/`退出` or Ctrl-D to close it. Explicit CLI
+commands remain one-shot for automation.
+
 Natural-language input is recorded as an explicit requested change, so feature,
 refactor, and documentation requests do not need to invent an error or current
 behavior. Bug, performance, and security reports still require an observed
@@ -293,11 +302,14 @@ approval. Approval publishes the Issue, applies repository-owned approval
 labels, claims the exact Issue snapshot, runs Copilot and policy tests, and
 creates a Draft PR. It never merges or deploys.
 
-Log mode asks for a complete bounded Discover URL, a read-only username, and a
-password entered without echo. The password is never stored. The connector
-fetches at most 50 whitelisted-field records, sanitizes and groups them before
-showing candidates, and persists only sanitized artifacts. The selected
-candidate enters the same Issue preview and approval path.
+The persistent log path starts with `./bin/ai-agent watch --once` or
+`./bin/ai-agent watch`. It stores only parsed non-secret connection settings,
+sanitized artifacts, and deduplicated inbox state; the read-only password stays
+in process memory. `./bin/ai-agent inbox` lists incidents and
+`./bin/ai-agent review INCIDENT_ID` displays the exact Issue preview. Action
+`a` approves Issue publication through Copilot, tests, and Draft PR; action `i`
+publishes only the Issue and cannot authorize code work. The watcher runs in
+the foreground, while the inbox survives terminal restarts.
 
 Use `./bin/ai-agent --configure` to replace the local repository configuration,
 `--request '...'` to supply a request directly, `--logs` for log mode, or

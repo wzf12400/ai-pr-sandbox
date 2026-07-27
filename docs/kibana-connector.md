@@ -74,6 +74,19 @@ The per-request timeout defaults to 30 seconds and can be raised with
 `--timeout-seconds` up to 120 seconds for a slow read-only endpoint. A timeout
 stops the run safely; it does not trigger automatic retries or partial output.
 
+When a new `--scan-state-file` has no cursor, the connector initializes from
+the latest 30 errors (`--initial-scan-hits`, maximum 100) instead of attempting
+to drain the entire historical Discover window. This deliberately establishes
+a current starting point. Later runs start five minutes before the completed
+watermark to cover delayed ingestion and read 50-hit scroll pages from one
+fixed OpenSearch snapshot through a new cutoff. The default incremental ceiling
+is 1,000 hits and may be raised, explicitly, to 5,000 with
+`--max-scan-hits`. Reaching the ceiling does not silently truncate the result:
+the run fails and its cursor remains unchanged. The cursor stores only a
+source-bound UTC watermark and local summary path and advances only after
+sanitized artifacts are written. Scroll IDs and raw responses remain in
+process memory and the scroll context is closed at the end of the request.
+
 Sanitization minimizes request URLs to a checked route plus query-key names;
 the host, fragment, and every query value are removed. Credential-like keys
 such as `appKey`, `sign`, and `signature` still mark the incident as requiring
@@ -201,10 +214,12 @@ deduplication.
 
 ## Current boundary
 
-Each poll still implements one bounded query and in-process deterministic
-grouping. The watcher is a foreground polling loop, not a scheduler, durable
-queue, durable retry system, or cross-window incident lifecycle. There is no
-cursor pagination beyond the first 100 hits and no Jira API retrieval. A
-production rollout should add durable supervision, backoff, metrics, policy
-deployment, and cursor semantics only after a read-only live trial confirms
-the data-view API, permissions, query volume, and field mappings.
+Each poll implements bounded scroll pagination over a fixed snapshot and
+in-process deterministic grouping. The local scan watermark prevents a newer
+page from skipping older errors between polls, but it is not a distributed
+consumer offset or a cross-window incident lifecycle. The watcher remains a
+foreground polling loop, not a scheduler, durable queue, or durable retry
+system, and there is no Jira API retrieval. A production rollout should still
+add durable supervision, backoff, metrics, and policy deployment after a
+read-only live trial confirms the data-view API, scroll permissions, query
+volume, and field mappings.

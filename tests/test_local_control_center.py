@@ -72,6 +72,7 @@ class LocalConfigStoreTest(unittest.TestCase):
                 "github",
                 "copilot",
                 "repositories",
+                "logs",
             },
             set(persisted),
         )
@@ -121,6 +122,38 @@ class LocalConfigStoreTest(unittest.TestCase):
             mode = os.stat(path).st_mode & 0o777
 
         self.assertEqual(0o600, mode)
+
+    def test_log_source_saves_only_nonsecret_structured_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = initialize_repo(root)
+            path = root / "config.json"
+            payload = config_payload(repo)
+            payload["logs"] = {
+                "discover_url": (
+                    "https://logs.example.test/_dashboards/app/discover#/?"
+                    "_g=(time:(from:now-2h,to:now))&"
+                    "_a=(index:ee351460-8261-11f0-bb8a-4fb3796753f3)"
+                ),
+                "username": "read-only-user",
+                "interval_seconds": 300,
+            }
+            with mock.patch(
+                "src.local_control_center.inspect_identity",
+                return_value=IDENTITY,
+            ):
+                config = LocalConfigStore(path).save(payload)
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual("read-only-user", config.log_source.username)
+        self.assertEqual("now-2h", config.log_source.time_from)
+        self.assertEqual(1000, config.log_source.max_scan_hits)
+        self.assertEqual(30, config.log_source.initial_scan_hits)
+        self.assertEqual(
+            "ee351460-8261-11f0-bb8a-4fb3796753f3",
+            persisted["logs"]["data_view_id"],
+        )
+        self.assertNotIn("password", json.dumps(persisted).lower())
 
 
 class FakeApprovalClient:
@@ -507,6 +540,54 @@ class ControlCenterWorkflowTest(unittest.TestCase):
             dispatch.call_args.kwargs["target_issue_url"],
         )
         self.assertEqual("gpt-5.6-sol", dispatch.call_args.kwargs["model"])
+
+    def test_issue_only_approval_publishes_without_label_or_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, workflow, approval, prepared = self._prepared_run(Path(directory))
+            digest = prepared["preview"]["approval_digests"]["issue_only"]
+            self.assertNotEqual(
+                digest,
+                prepared["preview"]["approval_digests"]["draft_pr"],
+            )
+            with mock.patch("src.local_control_center.threading.Thread"):
+                workflow.approve(
+                    prepared["run_id"],
+                    digest,
+                    mode="issue_only",
+                )
+            with mock.patch(
+                "src.local_control_center.automate_repository_issue",
+                return_value={
+                    "publication": {
+                        "status": "created",
+                        "repository": REPOSITORY,
+                        "issue_url": f"https://github.com/{REPOSITORY}/issues/17",
+                    }
+                },
+            ), mock.patch("src.local_control_center.dispatch_once") as dispatch:
+                workflow._execute(prepared["run_id"])
+
+            completed = workflow.read(prepared["run_id"])
+
+        self.assertEqual("completed", completed["status"])
+        self.assertEqual(
+            f"https://github.com/{REPOSITORY}/issues/17",
+            completed["result"]["issue_url"],
+        )
+        self.assertIsNone(completed["result"]["draft_pr_url"])
+        self.assertEqual([], approval.calls)
+        dispatch.assert_not_called()
+
+    def test_issue_only_digest_cannot_authorize_code_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, workflow, _, prepared = self._prepared_run(Path(directory))
+
+            with self.assertRaisesRegex(ValueError, "displayed plan"):
+                workflow.approve(
+                    prepared["run_id"],
+                    prepared["preview"]["approval_digests"]["issue_only"],
+                    mode="draft_pr",
+                )
 
     def test_fresh_approval_can_reuse_exact_deduplicated_issue(self):
         with tempfile.TemporaryDirectory() as directory:
