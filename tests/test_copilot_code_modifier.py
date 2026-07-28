@@ -15,6 +15,7 @@ from src.copilot_code_modifier import (
     build_copilot_prompt,
     evaluate_issue_approval,
     execute_issue_code_workflow,
+    load_code_change_skill,
     load_issue_code_policy,
     validate_changes,
 )
@@ -192,6 +193,32 @@ class FakePublisher:
 
 
 class CopilotCodeModifierTest(unittest.TestCase):
+    def test_bundled_code_change_skill_is_valid(self):
+        skill = load_code_change_skill()
+
+        self.assertEqual("approved-issue-code-change", skill.name)
+        self.assertEqual(64, len(skill.sha256))
+        self.assertIn("general fix", skill.instructions)
+        self.assertIn("same class of regression", skill.instructions)
+
+    def test_code_change_skill_rejects_a_symbolic_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.md"
+            target.write_text(
+                "---\n"
+                "name: approved-issue-code-change\n"
+                "description: Synthetic test skill.\n"
+                "---\n\n"
+                "Edit code.\n",
+                encoding="utf-8",
+            )
+            link = root / "SKILL.md"
+            link.symlink_to(target)
+
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                load_code_change_skill(link)
+
     def test_localization_masks_only_the_validated_policy_repository_line(self):
         body = (
             "- Repository: wzf12400/ai-pr-sandbox\n"
@@ -350,6 +377,12 @@ class CopilotCodeModifierTest(unittest.TestCase):
         self.assertIn("use the available file-editing tool", prompt)
         self.assertIn("Do not return a plan or patch as prose", prompt)
         self.assertIn("src/calculator.py", prompt)
+        self.assertIn("Trusted code-change skill: approved-issue-code-change", prompt)
+        self.assertIn("<trusted-code-change-skill>", prompt)
+        self.assertLess(
+            prompt.index("<trusted-code-change-skill>"),
+            prompt.index("Canonical Issue URL"),
+        )
 
     def test_blocked_path_change_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -380,6 +413,11 @@ class CopilotCodeModifierTest(unittest.TestCase):
             self.assertEqual([], modifier.calls)
             self.assertEqual("main", result["repository"]["base_branch"])
             self.assertEqual([], result["changes"]["paths"])
+            self.assertEqual(
+                "approved-issue-code-change",
+                result["code_skill"]["name"],
+            )
+            self.assertEqual(64, len(result["code_skill"]["sha256"]))
 
     def test_execute_modifies_and_runs_only_policy_tests(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -403,6 +441,7 @@ class CopilotCodeModifierTest(unittest.TestCase):
             )
             self.assertEqual(0, result["tests"][0]["returncode"])
             self.assertIn("Canonical Issue URL", modifier.calls[0][1])
+            self.assertIn("<trusted-code-change-skill>", modifier.calls[0][1])
             self.assertEqual("gpt-5.6-sol", modifier.calls[0][2])
 
     def test_copilot_invocation_failure_removes_empty_work_branch(self):

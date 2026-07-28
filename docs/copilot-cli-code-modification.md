@@ -76,7 +76,16 @@ Copilot receives only:
 
 - local repository view, search, and edit tools;
 - the pinned model;
+- the bundled `approved-issue-code-change` skill as trusted prompt context;
 - no interactive questions.
+
+The bundled skill is loaded immediately before code modification. It requires
+the agent to inspect candidate code and adjacent tests, fix the responsible
+code path instead of special-casing one example, preserve established
+interfaces, and add focused regression coverage. The audit records the skill
+name and SHA-256. The canonical Issue remains untrusted task data and cannot
+override the skill or repository policy. The skill cannot grant tools, widen
+write paths, run tests, or authorize publication.
 
 The invocation disables built-in GitHub MCP access, remote session export,
 memory, URL access, all shell commands, custom instructions, and experimental
@@ -145,6 +154,7 @@ CI, and human review remain authoritative.
 - base commit and Issue-bound branch;
 - approval rule outcomes;
 - Copilot CLI version and pinned model;
+- bundled code-change skill name and SHA-256;
 - localization candidates;
 - changed paths, line counts, and diff SHA-256;
 - test commands, exit codes, timings, and output hashes;

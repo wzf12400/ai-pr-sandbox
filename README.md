@@ -221,7 +221,11 @@ Run a read-only preflight first:
 ```
 
 `--execute` creates an Issue-bound local branch, asks Copilot to make bounded
-changes, validates the diff, and runs only the policy test commands.
+changes using the bundled
+[`approved-issue-code-change`](.agents/skills/approved-issue-code-change/SKILL.md)
+skill, validates the diff, and runs only the policy test commands. The skill
+requires a root-cause-oriented implementation and focused regression tests; it
+cannot grant extra tools, writable paths, or publication authority.
 `--publish-pr` additionally commits, pushes, and creates a Draft PR after all
 gates pass. Neither mode can merge or deploy.
 

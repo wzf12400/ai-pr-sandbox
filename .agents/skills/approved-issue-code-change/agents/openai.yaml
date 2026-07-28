@@ -1,0 +1,4 @@
+interface:
+  display_name: "Approved Issue Code Change"
+  short_description: "Safely implement approved Issues with tests"
+  default_prompt: "Use $approved-issue-code-change to implement one approved Issue and add focused tests."

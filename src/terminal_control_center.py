@@ -30,7 +30,10 @@ from src.local_control_center import (
     _atomic_replace_json,
     inspect_identity,
 )
-from src.copilot_code_modifier import load_issue_code_policy
+from src.copilot_code_modifier import (
+    CODE_CHANGE_SKILL_NAME,
+    load_issue_code_policy,
+)
 from src.log_incident_inbox import LogIncidentInbox
 
 
@@ -186,6 +189,7 @@ def _show_config(
     terminal.section("运行环境")
     terminal.field("GitHub", config.github_login)
     terminal.field("Copilot", config.copilot_model)
+    terminal.field("Code skill", CODE_CHANGE_SKILL_NAME)
     terminal.field(
         "CLI",
         str(identity.get("copilot", {}).get("version") or "未检测到"),
