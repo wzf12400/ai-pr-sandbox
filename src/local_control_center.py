@@ -64,6 +64,18 @@ MAX_DESCRIPTION_CHARS = 8_000
 LOGIN_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 RUN_ID_PATTERN = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
 MAX_RESUME_ATTEMPTS = 3
+REVISION_SCHEMA_VERSION = "issue-revision/v1"
+GENERIC_REVISION_REQUESTS = frozenset(
+    {
+        "redo",
+        "retry",
+        "重做",
+        "重新做",
+        "再做一次",
+        "继续",
+        "继续修改",
+    }
+)
 MIN_LOG_INTERVAL_SECONDS = 60
 MAX_LOG_INTERVAL_SECONDS = 3600
 RESUMABLE_PRE_MODIFIER_FAILURES = frozenset(
@@ -922,6 +934,43 @@ class ControlCenterWorkflow:
         digest = hashlib.sha256(_canonical_json(compact)).hexdigest()
         return self._create_run(compact, "sanitized_evidence", digest)
 
+    def create_revision(
+        self,
+        parent_issue_url: str,
+        revision_description: str,
+    ) -> Dict[str, Any]:
+        config = self.config_store.load()
+        if config is None:
+            raise ValueError("configuration must be saved before starting")
+        parent_issue_url = parent_issue_url.strip()
+        valid_parent = any(
+            re.fullmatch(
+                rf"https://github\.com/{re.escape(item.repository)}/issues/[1-9][0-9]*",
+                parent_issue_url,
+                flags=re.IGNORECASE,
+            )
+            for item in config.enabled_repositories
+        )
+        if not valid_parent:
+            raise ValueError("修订来源必须是当前已配置仓库中的 GitHub Issue。")
+        revision_description = revision_description.strip()
+        if (
+            len(revision_description) < 8
+            or len(revision_description) > MAX_DESCRIPTION_CHARS
+            or revision_description.casefold() in GENERIC_REVISION_REQUESTS
+        ):
+            raise ValueError("请描述本轮未完成项、新行为或新的验收标准。")
+        payload = {
+            "schema_version": REVISION_SCHEMA_VERSION,
+            "parent_issue_url": parent_issue_url,
+            "revision_description": revision_description,
+        }
+        return self._create_run(
+            payload,
+            "revision",
+            hashlib.sha256(_canonical_json(payload)).hexdigest(),
+        )
+
     def _create_run(
         self,
         input_payload: Any,
@@ -1011,6 +1060,7 @@ class ControlCenterWorkflow:
     ) -> None:
         with self._lock(run_id):
             record = self.read(run_id)
+            revision_metadata: Optional[Dict[str, Any]] = None
             try:
                 config = self.config_store.load()
                 if config is None or config.sha256 != record["config_sha256"]:
@@ -1060,6 +1110,38 @@ class ControlCenterWorkflow:
                             evidence["facts"]["repository"] = (
                                 config.enabled_repositories[0].repository
                             )
+                    elif input_type == "revision":
+                        if (
+                            not isinstance(input_payload, dict)
+                            or set(input_payload)
+                            != {
+                                "schema_version",
+                                "parent_issue_url",
+                                "revision_description",
+                            }
+                            or input_payload.get("schema_version")
+                            != REVISION_SCHEMA_VERSION
+                        ):
+                            raise ValueError("revision input is invalid")
+                        parent_issue_url = str(
+                            input_payload.get("parent_issue_url", "")
+                        )
+                        revision_description = str(
+                            input_payload.get("revision_description", "")
+                        )
+                        evidence = _compose_managed_evidence(
+                            revision_description,
+                            config,
+                        )
+                        evidence["facts"] = dict(evidence.get("facts", {}))
+                        evidence["facts"]["revision_of_issue"] = parent_issue_url
+                        revision_metadata = {
+                            "schema_version": REVISION_SCHEMA_VERSION,
+                            "parent_issue_url": parent_issue_url,
+                            "request_sha256": hashlib.sha256(
+                                revision_description.encode("utf-8")
+                            ).hexdigest(),
+                        }
                     else:
                         raise ValueError("unsupported workflow input type")
                 except ValueError as exc:
@@ -1079,6 +1161,11 @@ class ControlCenterWorkflow:
                     provider,
                     provider,
                 )
+                if revision_metadata is not None:
+                    generation = {
+                        **dict(generation),
+                        "revision": revision_metadata,
+                    }
                 ai_issue_generator.write_result(
                     generation,
                     run_dir / "generation.json",
@@ -1147,6 +1234,11 @@ class ControlCenterWorkflow:
                     "existing_issue_url": (
                         str(publication.get("issue_url", ""))
                         if issue_mode == "reuse_existing"
+                        else None
+                    ),
+                    "revision_of": (
+                        revision_metadata["parent_issue_url"]
+                        if revision_metadata is not None
                         else None
                     ),
                     "copilot_model": config.copilot_model,

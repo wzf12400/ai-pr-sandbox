@@ -28,8 +28,15 @@ Unknown facts remain unknown.
 
 An exact fingerprint may reuse only an OPEN Issue. If the exact match is
 closed, preparation stops before the approval prompt and reports that completed
-Issue; a later revision must describe new expected behavior or acceptance
-criteria. Code execution uses a fresh per-run checkout at the current
+Issue. The terminal then offers `r` to create an independent revision task.
+The employee must describe a concrete unfinished item, new behavior, or new
+acceptance criterion; generic inputs such as “retry” or “重做” are rejected.
+The revision keeps the closed Issue as immutable lineage, uses a fingerprint
+bound to the parent Issue and sanitized revision request, and presents a new
+human approval before any Issue or code write. It never silently reopens the
+old Issue or reuses its claim, branch, or PR.
+
+Code execution uses a fresh per-run checkout at the current
 `origin/main`, so a branch retained in the configured source checkout cannot
 silently become the next run's base. The source checkout is not switched,
 reset, or cleaned by this preparation.

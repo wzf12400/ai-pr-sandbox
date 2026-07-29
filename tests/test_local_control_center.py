@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -678,6 +679,76 @@ class ControlCenterWorkflowTest(unittest.TestCase):
 
         self.assertEqual("sanitized_evidence", record["input_type"])
         self.assertEqual(64, len(record["input_sha256"]))
+
+    def test_revision_requires_a_configured_parent_and_specific_delta(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, workflow, _ = self._configured_workflow(root)
+            issue_url = f"https://github.com/{REPOSITORY}/issues/24"
+
+            with self.assertRaisesRegex(ValueError, "未完成项"):
+                workflow.create_revision(issue_url, "重做")
+            with self.assertRaisesRegex(ValueError, "当前已配置仓库"):
+                workflow.create_revision(
+                    "https://github.com/example-org/other/issues/24",
+                    "增加负数输入的验收测试",
+                )
+            with mock.patch("src.local_control_center.threading.Thread"):
+                record = workflow.create_revision(
+                    issue_url,
+                    "增加负数输入的验收测试",
+                )
+
+        self.assertEqual("revision", record["input_type"])
+        self.assertEqual(64, len(record["input_sha256"]))
+
+    def test_revision_preparation_binds_parent_and_delta_to_new_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, workflow, _ = self._configured_workflow(root)
+            issue_url = f"https://github.com/{REPOSITORY}/issues/24"
+            description = "增加负数输入的验收测试，并修复对应行为"
+            with mock.patch(
+                "src.local_control_center.threading.Thread"
+            ):
+                record = workflow.create_revision(issue_url, description)
+            with mock.patch(
+                "src.local_control_center.ai_issue_generator.generate_issue",
+                return_value=generation(),
+            ), mock.patch(
+                "src.local_control_center.automate_repository_issue",
+                return_value={
+                    "publication": {
+                        "status": "approved_not_published",
+                        "repository": REPOSITORY,
+                    }
+                },
+            ):
+                workflow._prepare(
+                    record["run_id"],
+                    {
+                        "schema_version": "issue-revision/v1",
+                        "parent_issue_url": issue_url,
+                        "revision_description": description,
+                    },
+                    "revision",
+                )
+
+            prepared = workflow.read(record["run_id"])
+            generated = json.loads(
+                (
+                    workflow._run_dir(record["run_id"])
+                    / "generation.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("awaiting_approval", prepared["status"])
+        self.assertEqual(issue_url, prepared["preview"]["revision_of"])
+        self.assertEqual(issue_url, generated["revision"]["parent_issue_url"])
+        self.assertEqual(
+            hashlib.sha256(description.encode("utf-8")).hexdigest(),
+            generated["revision"]["request_sha256"],
+        )
 
     def test_approval_publishes_exact_issue_then_runs_claimed_draft_pr_flow(self):
         with tempfile.TemporaryDirectory() as directory:

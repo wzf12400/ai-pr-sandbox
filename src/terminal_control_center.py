@@ -293,6 +293,8 @@ def _render_preview(
         terminal.warn("输入 i：只创建或复用 Issue，不授权 AI 修改。")
     elif preview.get("issue_mode") == "reuse_existing":
         terminal.field("Existing", str(preview.get("existing_issue_url") or ""))
+    if preview.get("revision_of"):
+        terminal.field("Revision of", str(preview["revision_of"]))
     terminal.line()
     terminal.line(str(preview["body"]))
     terminal.line()
@@ -320,10 +322,42 @@ def _run_record(
         timeout_seconds=420,
     )
     if prepared.get("status") == "blocked":
-        terminal.fail(str(prepared.get("failure", {}).get("message") or "流程已停止。"))
-        if prepared.get("result", {}).get("issue_url"):
-            terminal.field("Issue", str(prepared["result"]["issue_url"]))
+        failure = prepared.get("failure", {})
+        result = prepared.get("result", {})
+        terminal.fail(str(failure.get("message") or "流程已停止。"))
+        if result.get("issue_url"):
+            terminal.field("Issue", str(result["issue_url"]))
         terminal.field("Audit", str(workflow._run_dir(prepared["run_id"])))
+        if (
+            failure.get("code") == "request_already_completed"
+            and result.get("issue_url")
+            and not preview_only
+        ):
+            terminal.warn(
+                "如有未完成项或新增验收标准，可创建独立修订任务；"
+                "不会重开或覆盖原 Issue。"
+            )
+            action = _prompt(
+                input_fn,
+                "输入 r 创建修订任务，其他输入返回: ",
+            ).casefold()
+            if action in {"r", "revision", "修订"}:
+                revision_description = _prompt(
+                    input_fn,
+                    "描述本轮未完成项、新行为或新的验收标准: ",
+                )
+                revised = workflow.create_revision(
+                    str(result["issue_url"]),
+                    revision_description,
+                )
+                terminal.section("生成修订计划")
+                return _run_record(
+                    workflow,
+                    revised,
+                    terminal,
+                    input_fn,
+                    preview_only=preview_only,
+                )
         return 2
     _render_preview(terminal, prepared)
     if preview_only:

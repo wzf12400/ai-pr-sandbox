@@ -343,10 +343,14 @@ creates a Draft PR. It never merges or deploys.
 
 Only an OPEN exact-fingerprint Issue can be reused for code work. A closed
 exact match is reported as already completed before approval, rather than
-failing later in the dispatcher. Each approved code run creates an ignored,
-per-run checkout from the latest `origin/main`; the configured source checkout
-is never switched, reset, or cleaned, so a branch left by an earlier run does
-not become the next run's execution base.
+failing later in the dispatcher. The same terminal screen offers an `r`
+revision path that requires a concrete unfinished item, new behavior, or new
+acceptance criterion. A revision receives parent-bound fingerprint lineage and
+a completely new human approval; it does not reopen the closed Issue or reuse
+its claim, branch, or PR. Each approved code run creates an ignored, per-run
+checkout from the latest `origin/main`; the configured source checkout is never
+switched, reset, or cleaned, so a branch left by an earlier run does not become
+the next run's execution base.
 
 The persistent log path starts with `./bin/ai-agent watch --once` or
 `./bin/ai-agent watch`. It stores only parsed non-secret connection settings,

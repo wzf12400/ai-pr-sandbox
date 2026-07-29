@@ -337,6 +337,69 @@ class RepositoryIssueAutomationTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertRegex(first, r"^[0-9a-f]{64}$")
 
+    def test_revision_fingerprint_is_versioned_from_parent_and_new_request(self):
+        generated = generation()
+        base = issue_fingerprint(generated, REPOSITORIES[0])
+        generated["revision"] = {
+            "schema_version": "issue-revision/v1",
+            "parent_issue_url": (
+                f"https://github.com/{REPOSITORIES[0]}/issues/7"
+            ),
+            "request_sha256": "d" * 64,
+        }
+
+        revised = issue_fingerprint(generated, REPOSITORIES[0])
+        body, _ = render_automated_issue_body(
+            generated,
+            REPOSITORIES[0],
+            policy(),
+        )
+
+        self.assertNotEqual(base, revised)
+        self.assertEqual(revised, issue_fingerprint(generated, REPOSITORIES[0]))
+        self.assertIn("## Revision lineage", body)
+        self.assertIn("/issues/7", body)
+
+    def test_revision_does_not_heuristically_reuse_the_parent_issue(self):
+        generated = generation()
+        parent_body, _ = render_automated_issue_body(
+            generated,
+            REPOSITORIES[0],
+            policy(),
+        )
+        generated["revision"] = {
+            "schema_version": "issue-revision/v1",
+            "parent_issue_url": (
+                f"https://github.com/{REPOSITORIES[0]}/issues/7"
+            ),
+            "request_sha256": "e" * 64,
+        }
+        parent = {
+            "number": 7,
+            "title": generated["draft"]["title"],
+            "body": parent_body,
+            "url": f"https://github.com/{REPOSITORIES[0]}/issues/7",
+            "state": "CLOSED",
+        }
+        client = FakeIssueClient([parent])
+
+        result = automate_repository_issue(
+            generated,
+            {"safety": {"ai_allowed": True, "security_review_required": False}},
+            scope(),
+            FakeSearchAdapter(),
+            "github-tree-probe",
+            policy(),
+            client,
+            False,
+        )
+
+        self.assertEqual("new_issue", result["issue_match"]["status"])
+        self.assertEqual(
+            "approved_not_published",
+            result["publication"]["status"],
+        )
+
     def test_policy_digest_and_scope_digest_are_both_bound(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
