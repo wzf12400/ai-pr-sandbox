@@ -403,6 +403,8 @@ class TerminalControlCenterTest(unittest.TestCase):
 
         timeout_index = captured.index("--timeout-seconds")
         self.assertEqual("60", captured[timeout_index + 1])
+        fetch_size_index = captured.index("--fetch-size")
+        self.assertEqual("100", captured[fetch_size_index + 1])
 
     def test_spinner_keeps_slow_log_scan_visibly_active(self):
         output = io.StringIO()

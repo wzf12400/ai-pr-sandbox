@@ -86,8 +86,9 @@ When a new `--scan-state-file` has no cursor, the connector initializes from
 the latest 30 errors (`--initial-scan-hits`, maximum 100) instead of attempting
 to drain the entire historical Discover window. This deliberately establishes
 a current starting point. Later runs start five minutes before the completed
-watermark to cover delayed ingestion and read 50-hit scroll pages in ascending
-event time through a fixed cutoff. The default batch ceiling is 1,000 hits and
+watermark to cover delayed ingestion and read 100-hit scroll pages in ascending
+event time through a fixed cutoff. This reduces serial remote requests while
+retaining the same complete scan. The default batch ceiling is 1,000 hits and
 may be raised, explicitly, to 5,000 with `--max-scan-hits`. Larger windows are
 split only at a complete timestamp boundary. The cursor records both the safe
 batch boundary and the original fixed cutoff. The terminal watcher first sends
