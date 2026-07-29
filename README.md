@@ -62,7 +62,9 @@ container identifiers, and performs a final secret scan. Unclassified
 high-entropy values block downstream AI and Issue processing. Recognized
 traceback/source paths are normalized first: machine and user prefixes are
 removed, opaque path segments are redacted, and only the useful code suffix is
-retained.
+retained. Short business identifiers assigned to transaction, order, payment,
+purchase, receipt, or trade-number fields are redacted by semantic key even
+when their length or entropy would not trigger the generic detector.
 
 ## Run the phase-one flow
 
@@ -340,6 +342,11 @@ repository resolution, the terminal shows the exact Issue body and one combined
 approval. Approval publishes the Issue, applies repository-owned approval
 labels, claims the exact Issue snapshot, runs Copilot and policy tests, and
 creates a Draft PR. It never merges or deploys.
+Selected Kibana evidence is re-sanitized immediately before the Issue model,
+including incidents already stored in the local inbox. A non-JSON Copilot
+response is retried once with the same safe prompt; neither invalid response is
+persisted or included in the next request. A renewed scan that still finds
+unclassified data remains blocked.
 
 Only an OPEN exact-fingerprint Issue can be reused for code work. A closed
 exact match is reported as already completed before approval, rather than

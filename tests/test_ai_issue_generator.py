@@ -137,6 +137,57 @@ class AIIssueGeneratorTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not allowed"):
             compact_evidence(payload)
 
+    def test_legacy_kibana_evidence_is_resanitized_before_model_use(self):
+        identifier = "123456789012345"
+        payload = {
+            "schema_version": "ai-issue-evidence/v1",
+            "source": {
+                "type": "kibana",
+                "reference": "incident_ref:test",
+                "url": "",
+            },
+            "safety": {"status": "sanitized", "ai_allowed": True},
+            "event": {
+                "level": "ERROR",
+                "observations": [
+                    {
+                        "summary": f"iap_lost_transactionId={identifier}",
+                    }
+                ],
+            },
+        }
+
+        compact = compact_evidence(payload)
+        serialized = json.dumps(compact, ensure_ascii=False)
+
+        self.assertNotIn(identifier, serialized)
+        self.assertIn("[REDACTED:transaction_identifier]", serialized)
+        self.assertIn(
+            "transaction_identifier",
+            compact["safety"]["redacted_categories"],
+        )
+
+    def test_legacy_kibana_evidence_with_unknown_entropy_remains_blocked(self):
+        payload = {
+            "schema_version": "ai-issue-evidence/v1",
+            "source": {
+                "type": "kibana",
+                "reference": "incident_ref:test",
+                "url": "",
+            },
+            "safety": {"status": "sanitized", "ai_allowed": True},
+            "event": {
+                "level": "ERROR",
+                "summary": (
+                    "unknownBlob="
+                    "QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ=="
+                ),
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "renewed safety review"):
+            compact_evidence(payload)
+
     def test_known_claim_requires_evidence_mapping(self):
         draft = valid_draft()
         draft["evidence"] = [

@@ -126,6 +126,12 @@ redacted, and useful package/file suffixes remain. Long Java/Python identifiers
 are retained only in explicit exception, stack-frame, notebook, callable,
 schema, or linter syntax. An unexplained high-entropy value anywhere else
 still blocks AI and GitHub processing.
+Short values assigned to semantic transaction, order, payment, purchase,
+receipt, or trade-number identifier keys are redacted regardless of entropy.
+Before Issue generation, the minimized Kibana summary is sanitized again, so a
+candidate stored under an older local sanitizer policy cannot bypass the
+current model-boundary rules. Known removable identifiers continue
+automatically; an unclassified finding still fails closed.
 
 MyBatis-style `### SQL:` statements are removed as a whole before entropy
 analysis. The surrounding mapper, exception, and database error evidence is
@@ -167,6 +173,10 @@ Configure the existing AI gateway variables, then run:
 
 Review each `candidate-*/sanitized-incident.json` and generated
 `candidate-*/issue.md` before publication.
+The local Copilot provider retries one malformed non-JSON structured response
+with the same sanitized prompt. The rejected response is neither persisted nor
+included in the retry. A second malformed response or any failed safety gate
+still stops before publication.
 
 ## 3. Publish reviewed Issues
 

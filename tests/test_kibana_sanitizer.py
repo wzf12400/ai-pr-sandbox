@@ -112,6 +112,37 @@ class KibanaSanitizerTest(unittest.TestCase):
                 self.assertNotIn(secret, sanitized)
                 self.assertTrue(findings)
 
+    def test_short_business_identifiers_are_removed_by_semantic_key(self) -> None:
+        samples = (
+            "iap_lost_transactionId=123456789012345",
+            '"original_transaction_id":"123456789012345"',
+            "out_trade_no=12345678",
+            "payment-id: short-payment-reference",
+            "receiptId=receipt-123",
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                sanitized, findings = redact_free_text(sample)
+
+                self.assertIn("[REDACTED:", sanitized)
+                self.assertNotRegex(sanitized, r"123456789012345|12345678")
+                self.assertTrue(
+                    any(
+                        item.rule_id == "semantic-identifier-assignment"
+                        and item.action == "removed"
+                        for item in findings
+                    )
+                )
+                self.assertFalse(any(item.action == "blocked" for item in findings))
+
+    def test_business_identifier_name_without_value_is_preserved(self) -> None:
+        sample = "The transactionId field is missing."
+
+        sanitized, findings = redact_free_text(sample)
+
+        self.assertEqual(sample, sanitized)
+        self.assertEqual([], findings)
+
     def test_unknown_high_entropy_value_blocks_processing(self) -> None:
         payload = raw_hit()
         payload["_source"]["message"] += " unknownBlob=QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ=="

@@ -18,6 +18,7 @@ from src.copilot_code_modifier import _run_process
 
 MAX_RESPONSE_BYTES = 1_000_000
 MODEL_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,100}")
+DEFAULT_STRUCTURED_RESPONSE_ATTEMPTS = 2
 
 
 class CopilotIssueProviderError(ValueError):
@@ -79,14 +80,20 @@ class CopilotCLIIssueProvider:
         *,
         executable: str = "copilot",
         timeout_seconds: int = 180,
+        structured_response_attempts: int = DEFAULT_STRUCTURED_RESPONSE_ATTEMPTS,
     ):
         if not MODEL_PATTERN.fullmatch(model):
             raise ValueError("Copilot Issue model is invalid")
         if not 1 <= timeout_seconds <= 300:
             raise ValueError("Copilot Issue timeout must be between 1 and 300 seconds")
+        if not 1 <= structured_response_attempts <= 3:
+            raise ValueError(
+                "Copilot structured response attempts must be between 1 and 3"
+            )
         self.model = model
         self.executable = executable
         self.timeout_seconds = timeout_seconds
+        self.structured_response_attempts = structured_response_attempts
 
     def _environment(self) -> Dict[str, str]:
         inherited: Sequence[str] = (
@@ -114,7 +121,7 @@ class CopilotCLIIssueProvider:
         if not shutil.which(self.executable):
             raise CopilotIssueProviderError("cli_not_installed")
         prompt = _structured_prompt(system_prompt, user_payload, schema_name, schema)
-        args = [
+        base_args = [
             self.executable,
             "-s",
             "--no-ask-user",
@@ -133,29 +140,39 @@ class CopilotCLIIssueProvider:
             "--log-level=none",
         ]
         started = time.monotonic()
-        environment = self._environment()
-        with tempfile.TemporaryDirectory(prefix="issue-copilot-provider-") as directory:
-            root = Path(directory)
-            environment["COPILOT_HOME"] = str(root / "copilot-home")
-            args.append(f"--log-dir={root / 'logs'}")
+        content: Dict[str, Any] | None = None
+        for attempt in range(self.structured_response_attempts):
+            environment = self._environment()
+            with tempfile.TemporaryDirectory(
+                prefix="issue-copilot-provider-"
+            ) as directory:
+                root = Path(directory)
+                environment["COPILOT_HOME"] = str(root / "copilot-home")
+                args = [*base_args, f"--log-dir={root / 'logs'}"]
+                try:
+                    result = _run_process(
+                        args,
+                        root,
+                        self.timeout_seconds,
+                        input_text=prompt,
+                        env=environment,
+                    )
+                except ValueError as exc:
+                    raise CopilotIssueProviderError(
+                        "cli_invocation_failed"
+                    ) from exc
+            if result.returncode != 0:
+                raise CopilotIssueProviderError("cli_returned_failure")
             try:
-                result = _run_process(
-                    args,
-                    root,
-                    self.timeout_seconds,
-                    input_text=prompt,
-                    env=environment,
-                )
+                content = _parse_json_object(result.stdout)
+                break
             except ValueError as exc:
-                raise CopilotIssueProviderError("cli_invocation_failed") from exc
-        if result.returncode != 0:
-            raise CopilotIssueProviderError("cli_returned_failure")
-        try:
-            content = _parse_json_object(result.stdout)
-        except ValueError as exc:
-            raise CopilotIssueProviderError(
-                "invalid_structured_response"
-            ) from exc
+                if attempt + 1 >= self.structured_response_attempts:
+                    raise CopilotIssueProviderError(
+                        "invalid_structured_response"
+                    ) from exc
+        if content is None:
+            raise AssertionError("unreachable structured response retry state")
         request_material = (
             f"{self.model}\n{schema_name}\n"
             f"{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}\n"
@@ -167,5 +184,5 @@ class CopilotCLIIssueProvider:
                 request_material.encode("utf-8")
             ).hexdigest()[:24],
             model=self.model,
-            usage={},
+            usage={"structured_response_attempts": attempt + 1},
         )

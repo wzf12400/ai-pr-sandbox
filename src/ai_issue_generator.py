@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Set, Tuple
 
+from src import kibana_sanitizer
 from src.issue_draft import _atomic_write_json, _atomic_write_text
 from src.issue_intake import find_sensitive_data
 
@@ -347,6 +348,51 @@ def _github_repository(payload: Dict[str, Any]) -> str:
     return repository_url.rsplit("/repos/", 1)[-1] if "/repos/" in repository_url else ""
 
 
+def _renew_kibana_evidence_safety(compact: Dict[str, Any]) -> Dict[str, Any]:
+    source = _mapping(compact.get("source"))
+    safety = _mapping(compact.get("safety"))
+    if source.get("type") != "kibana" or safety.get("status") != "sanitized":
+        return compact
+
+    renewed = json.loads(json.dumps(compact, ensure_ascii=False))
+    summaries: List[Tuple[Dict[str, Any], str]] = []
+    event = _mapping(renewed.get("event"))
+    if isinstance(event.get("summary"), str):
+        summaries.append((event, "summary"))
+    observations = event.get("observations")
+    if isinstance(observations, list):
+        for observation in observations:
+            if isinstance(observation, dict) and isinstance(
+                observation.get("summary"),
+                str,
+            ):
+                summaries.append((observation, "summary"))
+
+    existing_categories = safety.get("redacted_categories")
+    if not isinstance(existing_categories, list):
+        existing_categories = []
+    categories = set(
+        item
+        for item in existing_categories
+        if isinstance(item, str)
+    )
+    for container, key in summaries:
+        sanitized, findings = kibana_sanitizer.redact_free_text(
+            container[key],
+            "ai_evidence.event.summary",
+        )
+        if any(item.action == "blocked" for item in findings):
+            raise ValueError(
+                "stored sanitized Kibana evidence failed renewed safety review"
+            )
+        container[key] = sanitized
+        categories.update(item.category for item in findings)
+    if categories:
+        renewed["safety"] = dict(safety)
+        renewed["safety"]["redacted_categories"] = sorted(categories)
+    return renewed
+
+
 def compact_evidence(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Allow only known, minimized source shapes to cross the model boundary."""
     if payload.get("schema_version") == "sanitized-kibana-event/v1":
@@ -558,6 +604,7 @@ def compact_evidence(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         raise ValueError("unsupported AI evidence input shape")
 
+    compact = _renew_kibana_evidence_safety(compact)
     encoded = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
     if len(encoded) > MAX_INPUT_CHARS:
         raise ValueError(f"AI evidence exceeds {MAX_INPUT_CHARS} characters")
@@ -845,7 +892,9 @@ has no path in explicit_expected_behavior_source_paths, expected_behavior must b
 "unknown" and acceptance_criteria must be empty. Otherwise acceptance criteria may only
 restate expected behavior supported by the evidence. Reproduction steps must be concise
 user actions or executable commands; never split stack traces, separators, or observed
-output into separate steps. Put observed errors in the error fields. For every known critical claim, add an evidence item whose
+output into separate steps. Standard [REDACTED:category] markers mean that a value was
+removed locally; never reconstruct or reinterpret the removed value. Put observed errors
+in the error fields. For every known critical claim, add an evidence item whose
 claim_path is an exact scalar JSON leaf path in the draft and whose source_paths are exact leaf paths from
 available_evidence_paths. When facts.qualified_class and facts.code_method are present,
 copy them exactly to object.code_object and interface.method and map each claim to its
@@ -857,6 +906,9 @@ claim with the supplied evidence. Reject fabricated or sensitive content. Use
 needs_clarification when the draft is faithful but critical facts are unknown. Return only
 the requested strict JSON. The exact string "unknown" and empty arrays represent missing
 information, not unsupported claims; do not list them in unsupported_claim_paths.
+Standard [REDACTED:category] markers contain no original value and are not themselves
+sensitive data; reject only residual sensitive content, and never reconstruct a removed
+value.
 request_type and severity are classifications, not factual claims. missing_information
 and clarifying_questions are meta-level descriptions of absent evidence, not positive
 factual claims. Do not mark them unsupported merely because the missing fact is absent;

@@ -113,6 +113,43 @@ class CopilotIssueProviderTest(unittest.TestCase):
             "invalid_structured_response",
             raised.exception.reason_category,
         )
+        self.assertEqual(2, run_process.call_count)
+
+    @mock.patch("src.copilot_issue_provider.shutil.which", return_value="/usr/bin/copilot")
+    @mock.patch("src.copilot_issue_provider._run_process")
+    def test_invalid_structured_output_is_retried_once_without_reusing_it(
+        self, run_process, _which
+    ):
+        run_process.side_effect = [
+            ProcessOutput(
+                returncode=0,
+                stdout="not one JSON object",
+                stderr="first response must not be persisted",
+            ),
+            ProcessOutput(
+                returncode=0,
+                stdout=json.dumps({"verdict": "pass"}),
+                stderr="",
+            ),
+        ]
+
+        completion = CopilotCLIIssueProvider("gpt-5.6-sol").complete(
+            system_prompt="Review.",
+            user_payload={"draft": {"title": "Synthetic"}},
+            schema_name="review",
+            schema={"type": "object"},
+        )
+
+        self.assertEqual({"verdict": "pass"}, completion.content)
+        self.assertEqual(2, run_process.call_count)
+        self.assertEqual(
+            {"structured_response_attempts": 2},
+            completion.usage,
+        )
+        first_prompt = run_process.call_args_list[0].kwargs["input_text"]
+        second_prompt = run_process.call_args_list[1].kwargs["input_text"]
+        self.assertEqual(first_prompt, second_prompt)
+        self.assertNotIn("not one JSON object", second_prompt)
 
 
 if __name__ == "__main__":

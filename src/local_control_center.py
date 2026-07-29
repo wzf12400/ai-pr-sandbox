@@ -108,7 +108,8 @@ SAFE_ERROR_MESSAGES = {
         "本次没有创建 Issue 或修改代码。"
     ),
     "issue_provider_invalid_response": (
-        "Issue 生成模型未返回合规的结构化结果。请重新输入需求重试；"
+        "Issue 生成模型自动重试后仍未返回合规的结构化结果。"
+        "请重新输入需求重试；"
         "本次没有创建 Issue 或修改代码。"
     ),
     "issue_draft_validation_failed": "Issue 草案结构或证据映射未通过本地校验。",

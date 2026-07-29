@@ -71,6 +71,14 @@ IDENTIFIER_KEYS = {
     "userid": "user_identifier",
     "sessionid": "session_identifier",
 }
+SENSITIVE_IDENTIFIER_SUFFIXES = {
+    "transactionid": "transaction_identifier",
+    "tradeno": "transaction_identifier",
+    "orderid": "order_identifier",
+    "receiptid": "receipt_identifier",
+    "paymentid": "payment_identifier",
+    "purchaseid": "purchase_identifier",
+}
 SAFE_COMMON_PARAM_FIELDS = {
     "appName": "app_name",
     "appVersion": "app_version",
@@ -120,6 +128,11 @@ SECRET_ASSIGNMENT_PATTERN = re.compile(
     r"client[_-]?secret|private[_-]?key|sign(?:ature)?|database[_-]?url|connection[_-]?string|"
     r"datasource[_-]?password)[\"']?\s*[:=]\s*[\"']?"
     r"(?P<value>[^\s,;)\]}\"']+)"
+)
+IDENTIFIER_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)\b(?P<key>[A-Za-z_][A-Za-z0-9_.-]{0,80})"
+    r"(?P<separator>[\"']?\s*[:=]\s*[\"']?)"
+    r"(?P<value>[^\s,;)\]}\"']{1,256})"
 )
 HIGH_ENTROPY_CANDIDATE_PATTERN = re.compile(r"[A-Za-z0-9+/_-]{20,}={0,2}")
 REQUEST_URL_PATTERN = re.compile(r"https?://[^\s]+")
@@ -656,6 +669,31 @@ def redact_free_text(text: str, path: str = "message") -> Tuple[str, List[Findin
         return f"{key}=[REDACTED:{category}]"
 
     sanitized = SECRET_ASSIGNMENT_PATTERN.sub(redact_assignment, sanitized)
+
+    def redact_identifier_assignment(match: re.Match[str]) -> str:
+        canonical = _canonical_key(match.group("key"))
+        category = next(
+            (
+                candidate_category
+                for suffix, candidate_category in SENSITIVE_IDENTIFIER_SUFFIXES.items()
+                if canonical.endswith(suffix)
+            ),
+            "",
+        )
+        if not category:
+            return match.group(0)
+        findings.append(
+            Finding(path, category, "removed", "semantic-identifier-assignment")
+        )
+        return (
+            f"{match.group('key')}{match.group('separator')}"
+            f"[REDACTED:{category}]"
+        )
+
+    sanitized = IDENTIFIER_ASSIGNMENT_PATTERN.sub(
+        redact_identifier_assignment,
+        sanitized,
+    )
     sanitized, path_findings, protected_spans = _normalize_absolute_source_paths(
         sanitized,
         path,
