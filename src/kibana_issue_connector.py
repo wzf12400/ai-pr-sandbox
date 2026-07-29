@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import ssl
 import sys
 import urllib.error
 import urllib.parse
@@ -133,6 +134,16 @@ def _safe_http_detail(exc: urllib.error.HTTPError) -> str:
     return "" if any(item.action == "blocked" for item in findings) else sanitized
 
 
+def _transport_timed_out(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, BaseException):
+            return _transport_timed_out(reason)
+    return isinstance(exc, ssl.SSLError) and "timed out" in str(exc).casefold()
+
+
 class OpenSearchDashboardsClient:
     def __init__(
         self,
@@ -187,6 +198,18 @@ class OpenSearchDashboardsClient:
                 f"OpenSearch Dashboards read timed out after {self.timeout_seconds:g} seconds"
             ) from exc
         except urllib.error.URLError as exc:
+            if _transport_timed_out(exc):
+                raise ValueError(
+                    "OpenSearch Dashboards read timed out after "
+                    f"{self.timeout_seconds:g} seconds"
+                ) from exc
+            raise ValueError("OpenSearch Dashboards request failed") from exc
+        except OSError as exc:
+            if _transport_timed_out(exc):
+                raise ValueError(
+                    "OpenSearch Dashboards read timed out after "
+                    f"{self.timeout_seconds:g} seconds"
+                ) from exc
             raise ValueError("OpenSearch Dashboards request failed") from exc
         if "/app/login" in final_url:
             raise ValueError("OpenSearch Dashboards credentials were not accepted")

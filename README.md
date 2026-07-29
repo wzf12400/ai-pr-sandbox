@@ -357,7 +357,10 @@ The persistent log path starts with `./bin/ai-agent watch --once` or
 sanitized artifacts, and deduplicated inbox state. In the interactive terminal,
 `log setup` stores the source and username locally and delegates one hidden
 password prompt to macOS Keychain; later scans load it automatically without
-putting it in JSON or a command argument. `log more` uses a separate backward
+putting it in JSON or a command argument. Interactive reads use a 60-second
+request timeout and make at most two short retries for transient timeouts,
+connection failures, rate limits, or gateway failures; exhaustion leaves both
+log cursors unchanged. `log more` uses a separate backward
 cursor to continue through older non-empty five-minute windows without changing
 the normal forward cursor. `./bin/ai-agent inbox` lists incidents and
 `./bin/ai-agent review INCIDENT_ID` displays the exact Issue preview. Action

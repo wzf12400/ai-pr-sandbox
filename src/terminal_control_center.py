@@ -55,6 +55,9 @@ DEFAULT_LOG_HISTORY_STATE_PATH = Path(
 LOG_INGESTION_SETTLE_DELAY_SECONDS = 900
 MAX_DISPLAYED_LOG_CANDIDATES = 20
 MAX_LOG_AUTH_ATTEMPTS = 3
+MAX_LOG_TRANSIENT_ATTEMPTS = 3
+LOG_READ_TIMEOUT_SECONDS = 60
+LOG_RETRY_DELAYS_SECONDS = (1.0, 2.0)
 TERMINAL_STATES = {"awaiting_approval", "completed", "blocked"}
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 INTERACTIVE_LOG_ALIASES = frozenset({"/logs", "logs", "log", "日志", "日志平台"})
@@ -822,6 +825,8 @@ def _poll_log_candidates(
                 str(max_scan_hits),
                 "--initial-scan-hits",
                 str(initial_scan_hits),
+                "--timeout-seconds",
+                str(LOG_READ_TIMEOUT_SECONDS),
             ]
             if history_scan:
                 arguments.extend(
@@ -971,12 +976,15 @@ def _poll_with_auth_retry(
     initial_scan_hits: int,
     history_state_path: Path = DEFAULT_LOG_HISTORY_STATE_PATH,
     history_scan: bool = False,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> tuple[Path, Dict[str, Any], str]:
     password = initial_password or password_fn("› 日志密码: ")
     if not password:
         raise ValueError("已取消日志登录。")
     terminal.section("读取日志")
-    for attempt in range(1, MAX_LOG_AUTH_ATTEMPTS + 1):
+    authentication_failures = 0
+    transient_failures = 0
+    while True:
         try:
             summary_path, summary = _poll_log_candidates(
                 root=root,
@@ -999,17 +1007,40 @@ def _poll_with_auth_retry(
                 "HTTP 401" in detail
                 or "credentials were not accepted" in detail
             )
-            if not authentication_failed:
+            if authentication_failed:
+                authentication_failures += 1
+                if authentication_failures >= MAX_LOG_AUTH_ATTEMPTS:
+                    raise ValueError(
+                        "日志认证连续失败，请检查配置账号或重置密码。"
+                    ) from None
+                terminal.warn("认证失败，请重新输入。")
+                password = password_fn("› 日志密码: ")
+                if not password:
+                    raise ValueError("已取消日志登录。") from None
+                continue
+            transient_failure = (
+                detail.startswith("OpenSearch Dashboards read timed out after ")
+                or detail == "OpenSearch Dashboards request failed"
+                or any(
+                    f"HTTP {status}" in detail
+                    for status in (429, 502, 503, 504)
+                )
+            )
+            if not transient_failure:
                 raise
-            if attempt >= MAX_LOG_AUTH_ATTEMPTS:
+            transient_failures += 1
+            if transient_failures >= MAX_LOG_TRANSIENT_ATTEMPTS:
                 raise ValueError(
-                    "日志认证连续失败，请检查配置账号或重置密码。"
+                    "日志平台连续读取超时或暂时不可用；游标未推进，"
+                    "请稍后再次输入 log。"
                 ) from None
-            terminal.warn("认证失败，请重新输入。")
-            password = password_fn("› 日志密码: ")
-            if not password:
-                raise ValueError("已取消日志登录。") from None
-    raise AssertionError("unreachable authentication retry state")
+            delay = LOG_RETRY_DELAYS_SECONDS[transient_failures - 1]
+            terminal.warn(
+                "日志读取超时或连接中断，"
+                f"{delay:g} 秒后自动重试"
+                f"（{transient_failures}/{MAX_LOG_TRANSIENT_ATTEMPTS - 1}）。"
+            )
+            sleep_fn(delay)
 
 
 def _show_inbox(terminal: Terminal, inbox: LogIncidentInbox) -> int:

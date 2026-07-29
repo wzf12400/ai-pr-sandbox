@@ -72,7 +72,12 @@ included; each context is sanitized again before it is written.
 
 The per-request timeout defaults to 30 seconds and can be raised with
 `--timeout-seconds` up to 120 seconds for a slow read-only endpoint. A timeout
-stops the run safely; it does not trigger automatic retries or partial output.
+stops the standalone connector safely; it does not trigger automatic retries or
+partial output. The interactive terminal invokes the connector with a 60-second
+request timeout and retries transient timeout, connection failure, HTTP 429, or
+HTTP 502/503/504 failures at most twice within the current user action. If all
+three attempts fail, it returns with both cursors unchanged. This bounded
+foreground retry is not a durable watcher or an unattended production service.
 
 When a new `--scan-state-file` has no cursor, the connector initializes from
 the latest 30 errors (`--initial-scan-hits`, maximum 100) instead of attempting

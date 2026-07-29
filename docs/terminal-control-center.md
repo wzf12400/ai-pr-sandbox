@@ -89,10 +89,13 @@ can be changed without changing the startup command.
 The password is held in process memory only while a scan is active. It may
 instead be supplied as `OPENSEARCH_PASSWORD` by the employee's local process
 manager. The application never writes it to JSON, Git, audit output, or a
-command argument. HTTP 401 responses trigger up to three hidden password
-attempts within the current action; an empty retry returns to the interactive
-prompt. Run `log setup` again to replace a stale Keychain item. A local
-owner-only HMAC key is
+command argument. Interactive reads use a 60-second per-request timeout and
+retry transient timeouts, connection failures, HTTP 429, or HTTP 502/503/504
+failures at most twice. Exhaustion reports a concise Chinese error and leaves
+both log cursors unchanged. HTTP 401 responses separately trigger up to three
+hidden password attempts within the current action; an empty retry returns to
+the interactive prompt. Run `log setup` again to replace a stale Keychain item.
+A local owner-only HMAC key is
 created under `.issue-entry-state/` so event references remain stable without
 storing raw identifiers. A new cursor starts from the latest 30 errors rather
 than draining the historical two-hour backlog. Later polls overlap the previous

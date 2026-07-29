@@ -21,6 +21,7 @@ from src.terminal_control_center import (
     _initial_log_password,
     _interactive_input,
     _load_or_create_log_key,
+    _poll_log_candidates,
     _poll_with_auth_retry,
     _review_incident,
     _resolved_log_connection,
@@ -295,6 +296,113 @@ class TerminalControlCenterTest(unittest.TestCase):
         self.assertIn("认证失败，请重新输入", output.getvalue())
         self.assertNotIn("wrong-password", output.getvalue())
         self.assertNotIn("right-password", output.getvalue())
+
+    def test_log_read_timeout_retries_without_reprompting_for_password(self):
+        output = io.StringIO()
+        expected = (Path("/safe/summary.json"), {"candidates": []})
+        password_prompt = mock.Mock(return_value="must-not-be-used")
+        sleep = mock.Mock()
+        with mock.patch(
+            "src.terminal_control_center._poll_log_candidates",
+            side_effect=[
+                ValueError(
+                    "OpenSearch Dashboards read timed out after 60 seconds"
+                ),
+                ValueError("OpenSearch Dashboards request failed"),
+                expected,
+            ],
+        ) as poll:
+            summary_path, summary, password = _poll_with_auth_retry(
+                root=Path("/safe"),
+                terminal=Terminal(output, color=False),
+                password_fn=password_prompt,
+                initial_password="keychain-password",
+                discover_url="https://logs.example.test/discover",
+                username="reader",
+                output_path=Path("logs"),
+                key_path=Path("key.json"),
+                scan_state_path=Path("cursor.json"),
+                max_scan_hits=1000,
+                initial_scan_hits=30,
+                sleep_fn=sleep,
+            )
+
+        self.assertEqual(expected[0], summary_path)
+        self.assertEqual(expected[1], summary)
+        self.assertEqual("keychain-password", password)
+        self.assertEqual(3, poll.call_count)
+        password_prompt.assert_not_called()
+        self.assertEqual([mock.call(1.0), mock.call(2.0)], sleep.call_args_list)
+        self.assertIn("自动重试", output.getvalue())
+
+    def test_log_read_timeout_exhaustion_keeps_cursor_for_later_retry(self):
+        output = io.StringIO()
+        sleep = mock.Mock()
+        with mock.patch(
+            "src.terminal_control_center._poll_log_candidates",
+            side_effect=ValueError(
+                "OpenSearch Dashboards read timed out after 60 seconds"
+            ),
+        ) as poll:
+            with self.assertRaisesRegex(ValueError, "游标未推进"):
+                _poll_with_auth_retry(
+                    root=Path("/safe"),
+                    terminal=Terminal(output, color=False),
+                    password_fn=mock.Mock(),
+                    initial_password="keychain-password",
+                    discover_url="https://logs.example.test/discover",
+                    username="reader",
+                    output_path=Path("logs"),
+                    key_path=Path("key.json"),
+                    scan_state_path=Path("cursor.json"),
+                    max_scan_hits=1000,
+                    initial_scan_hits=30,
+                    sleep_fn=sleep,
+                )
+
+        self.assertEqual(3, poll.call_count)
+        self.assertEqual([mock.call(1.0), mock.call(2.0)], sleep.call_args_list)
+
+    def test_terminal_log_scan_uses_sixty_second_request_timeout(self):
+        captured = []
+
+        def connector_main(arguments):
+            captured.extend(arguments)
+            output_dir = Path(arguments[arguments.index("--output-dir") + 1])
+            run_name = arguments[arguments.index("--name") + 1]
+            run_dir = output_dir / run_name
+            run_dir.mkdir(parents=True)
+            (run_dir / "summary.json").write_text(
+                json.dumps({"selection": {}, "candidates": []}),
+                encoding="utf-8",
+            )
+            return 0
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "src.terminal_control_center._load_or_create_log_key",
+            return_value="k" * 32,
+        ), mock.patch(
+            "src.terminal_control_center.kibana_issue_connector.main",
+            side_effect=connector_main,
+        ):
+            root = Path(directory)
+            _poll_log_candidates(
+                root=root,
+                terminal=Terminal(io.StringIO(), color=False),
+                discover_url="https://logs.example.test/discover",
+                username="reader",
+                password="process-only-password",
+                output_path=Path("logs"),
+                key_path=Path("key.json"),
+                scan_state_path=Path("cursor.json"),
+                history_state_path=Path("history.json"),
+                history_scan=False,
+                max_scan_hits=1000,
+                initial_scan_hits=30,
+            )
+
+        timeout_index = captured.index("--timeout-seconds")
+        self.assertEqual("60", captured[timeout_index + 1])
 
     def test_spinner_keeps_slow_log_scan_visibly_active(self):
         output = io.StringIO()
