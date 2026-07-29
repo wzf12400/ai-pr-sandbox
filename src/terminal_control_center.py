@@ -679,6 +679,7 @@ def _fetch_log_candidate(
     username = username or _prompt(input_fn, "只读日志账号: ")
     password = _initial_log_password(discover_url, username)
     displayed_entries: list[tuple[Dict[str, Any], Path]] = []
+    displayed_by_key: Dict[str, int] = {}
     total_scanned = 0
     total_eligible = 0
     total_candidates = 0
@@ -722,18 +723,60 @@ def _fetch_log_candidate(
         total_eligible += int(selection.get("eligible_events", 0))
         total_candidates += len(candidates)
         for item in candidates:
+            signature = item.get("issue_signature")
+            signature = signature if isinstance(signature, dict) else {}
+            fingerprint = str(signature.get("fingerprint", "")).strip()
+            display_key = (
+                fingerprint
+                or str(item.get("incident_ref", "")).strip()
+                or str(item.get("artifact", "")).strip()
+            )
+            existing_index = displayed_by_key.get(display_key)
+            if existing_index is not None:
+                existing, _ = displayed_entries[existing_index]
+                existing["event_count"] = int(
+                    existing.get("event_count", 0)
+                ) + int(item.get("event_count", 0))
+                first_seen_values = [
+                    value
+                    for value in (
+                        str(existing.get("first_seen_at", "")),
+                        str(item.get("first_seen_at", "")),
+                    )
+                    if value
+                ]
+                last_seen_values = [
+                    value
+                    for value in (
+                        str(existing.get("last_seen_at", "")),
+                        str(item.get("last_seen_at", "")),
+                    )
+                    if value
+                ]
+                existing["first_seen_at"] = (
+                    min(first_seen_values) if first_seen_values else ""
+                )
+                existing["last_seen_at"] = (
+                    max(last_seen_values) if last_seen_values else ""
+                )
+                continue
             if len(displayed_entries) >= MAX_DISPLAYED_LOG_CANDIDATES:
-                break
-            displayed_entries.append((item, summary_path.parent))
+                continue
+            displayed_by_key[display_key] = len(displayed_entries)
+            displayed_entries.append((dict(item), summary_path.parent))
         if not summary.get("query", {}).get("backlog_remaining", False):
             break
         terminal.warn("本轮达到批次上限；下次将从当前游标继续。")
         break
-    terminal.ok(
+    collapsed = total_candidates - len(displayed_entries)
+    summary_line = (
         f"扫描 {total_scanned} · "
         f"有效 {total_eligible} · "
-        f"异常 {total_candidates}"
+        f"异常 {len(displayed_entries)}"
     )
+    if collapsed > 0:
+        summary_line += f" · 同类归并 {collapsed}"
+    terminal.ok(summary_line)
     if not displayed_entries:
         query = summary.get("query", {})
         if history_scan and query.get("history_exhausted", False):
@@ -750,9 +793,21 @@ def _fetch_log_candidate(
     terminal.section("选择异常")
     for index, (item, _summary_parent) in enumerate(displayed_entries, start=1):
         services = ", ".join(item.get("services", [])) or "unknown"
+        signature = item.get("issue_signature")
+        signature = signature if isinstance(signature, dict) else {}
+        components = signature.get("components")
+        components = components if isinstance(components, dict) else {}
+        endpoints = components.get("paths")
+        endpoint = (
+            ", ".join(str(value) for value in endpoints[:2])
+            if isinstance(endpoints, list) and endpoints
+            else "unknown"
+        )
         terminal.line(
-            f"  {index}. {services} · {item.get('event_count', 0)} 条 · "
-            f"{item.get('first_seen_at', '')}"
+            f"  {index}. {services} · {endpoint} · "
+            f"{item.get('event_count', 0)} 条 · "
+            f"{item.get('first_seen_at', '')} → "
+            f"{item.get('last_seen_at', '') or item.get('first_seen_at', '')}"
         )
     if total_candidates > len(displayed_entries):
         terminal.line(
@@ -768,7 +823,17 @@ def _fetch_log_candidate(
     resolved = artifact.resolve()
     if not resolved.is_relative_to(selected_summary_parent.resolve()):
         raise ValueError("日志候选证据路径无效。")
-    return json.loads(resolved.read_text(encoding="utf-8"))
+    selected_evidence = json.loads(resolved.read_text(encoding="utf-8"))
+    if inbox is not None:
+        signature = selected_item.get("issue_signature")
+        signature = signature if isinstance(signature, dict) else {}
+        record = inbox.find(
+            source_reference=str(selected_item.get("incident_ref", "")),
+            issue_fingerprint=str(signature.get("fingerprint", "")),
+        )
+        if isinstance(record, dict) and isinstance(record.get("evidence"), dict):
+            return dict(record["evidence"])
+    return selected_evidence
 
 
 def _poll_log_candidates(
@@ -1051,9 +1116,12 @@ def _show_inbox(terminal: Terminal, inbox: LogIncidentInbox) -> int:
         return 0
     for item in records:
         services = ", ".join(item.get("services", [])) or "unknown"
+        endpoints = ", ".join(item.get("affected_endpoints", [])) or "unknown"
         terminal.line(
             f"  {item['incident_id']}  {str(item['status']).ljust(17)} "
-            f"{services} · {item.get('event_count', 0)} events · "
+            f"{services} · {endpoints} · "
+            f"本批 {item.get('latest_batch_event_count', 0)} / "
+            f"累计 {item.get('total_event_count', item.get('event_count', 0))} 条 · "
             f"{item.get('last_seen_at', '')}"
         )
     terminal.line()
@@ -1102,9 +1170,28 @@ def _review_incident(
     terminal.field("Incident", incident_id)
     terminal.field("Status", str(incident.get("status", "")))
     terminal.field("Service", ", ".join(incident.get("services", [])) or "unknown")
-    terminal.field("Events", str(incident.get("event_count", 0)))
+    terminal.field(
+        "Events",
+        (
+            f"本批 {incident.get('latest_batch_event_count', 0)} / "
+            f"累计 {incident.get('total_event_count', incident.get('event_count', 0))}"
+        ),
+    )
     terminal.field("First seen", str(incident.get("first_seen_at", "")))
     terminal.field("Last seen", str(incident.get("last_seen_at", "")))
+    terminal.field(
+        "Endpoints",
+        ", ".join(incident.get("affected_endpoints", [])) or "unknown",
+    )
+    user_min = incident.get("affected_user_count_min")
+    user_max = incident.get("affected_user_count_max")
+    if isinstance(user_min, int) and isinstance(user_max, int):
+        affected_users = (
+            str(user_min) if user_min == user_max else f"{user_min}-{user_max}"
+        )
+    else:
+        affected_users = "unknown"
+    terminal.field("Affected users", affected_users)
 
     if incident.get("status") == "ignored":
         terminal.warn("该异常已忽略；如需恢复，请重新补充上下文。")

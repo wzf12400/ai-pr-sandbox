@@ -64,6 +64,46 @@ class KibanaIncidentGrouperTest(unittest.TestCase):
         self.assertIn("frame:assistantcontroller.chat", signatures)
         self.assertIn("exception:nullpointerexception", signatures)
 
+    def test_incident_persists_only_user_counts_not_user_references(self):
+        events = [
+            sanitize_hit(
+                incident_hit(
+                    f"user-count-{index}",
+                    f"2026-07-21T07:34:4{index}.000Z",
+                    "assistant-service",
+                    "AssistantChatCommand",
+                    140,
+                    (
+                        f"CommonParams(userId=private-user-{index}) "
+                        "request_path=/v3/api/assistant/chat "
+                        "java.lang.NullPointerException "
+                        "at com.example.AssistantChatCommand.execute"
+                        "(AssistantChatCommand.java:140)"
+                    ),
+                    trace="shared-trace",
+                ),
+                TEST_KEY,
+                include_aggregation_refs=True,
+            )
+            for index in (1, 2)
+        ]
+
+        incident = group_sanitized_events(events)[0]
+        serialized = str(incident)
+
+        self.assertEqual(2, incident["statistics"]["batch_event_count"])
+        self.assertEqual(2, incident["statistics"]["affected_user_count"])
+        self.assertEqual(
+            2,
+            incident["statistics"]["user_identifier_event_count"],
+        )
+        self.assertEqual(
+            ["/v3/api/assistant/chat"],
+            incident["statistics"]["affected_endpoints"],
+        )
+        self.assertNotIn("_aggregation", serialized)
+        self.assertNotIn("user_ref:", serialized)
+
     def test_groups_same_s3_failure_but_not_unrelated_same_time_logs(self):
         events = [
             sanitize_hit(
@@ -251,6 +291,49 @@ class KibanaIncidentGrouperTest(unittest.TestCase):
 
         self.assertNotEqual(signatures[0]["fingerprint"], signatures[1]["fingerprint"])
 
+    def test_same_endpoint_and_error_share_statistics_despite_top_frame_change(self):
+        events = [
+            sanitize_hit(
+                incident_hit(
+                    f"same-endpoint-{index}",
+                    f"2026-07-21T09:03:0{index}.000Z",
+                    "assistant-service",
+                    "BusinessExceptionHandler",
+                    43,
+                    (
+                        "request_path=/v3/api/assistant/chat "
+                        "java.lang.NullPointerException | "
+                        f"at com.example.{frame}.execute"
+                        f"({frame}.java:140)"
+                    ),
+                    trace=f"trace-{index}",
+                ),
+                TEST_KEY,
+            )
+            for index, frame in (
+                (1, "AssistantChatCommand"),
+                (2, "AssistantRetryCommand"),
+            )
+        ]
+
+        signatures = [
+            issue_signature(incident)
+            for incident in group_sanitized_events(events)
+        ]
+
+        self.assertEqual(
+            signatures[0]["fingerprint"],
+            signatures[1]["fingerprint"],
+        )
+        self.assertEqual(
+            "same_service_endpoint_and_error",
+            signatures[0]["aggregation_mode"],
+        )
+        self.assertNotIn(
+            "top_frames",
+            signatures[0]["fingerprint_components"],
+        )
+
     def test_complete_link_prevents_transitive_bridge_grouping(self):
         first = sanitize_hit(
             incident_hit(
@@ -323,6 +406,10 @@ class KibanaIncidentGrouperTest(unittest.TestCase):
         self.assertEqual(compact["event"]["event_count"], 2)
         self.assertEqual(len(compact["event"]["observations"]), 2)
         self.assertEqual(compact["event"]["grouping"]["shared_signatures"], ["system:s3"])
+        self.assertEqual(
+            2,
+            compact["event"]["statistics"]["batch_event_count"],
+        )
 
         ineligible = copy.deepcopy(incident)
         ineligible["members"][0]["sanitization"]["ai_allowed"] = False

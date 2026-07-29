@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 INCIDENT_SCHEMA_VERSION = "sanitized-kibana-incident/v1"
 GROUPING_POLICY_VERSION = "kibana-incident-grouping/v1"
-ISSUE_SIGNATURE_POLICY_VERSION = "kibana-issue-signature/v1"
+ISSUE_SIGNATURE_POLICY_VERSION = "kibana-issue-signature/v2"
 FALLBACK_WINDOW_SECONDS = 5.0
 
 EXCEPTION_PATTERN = re.compile(
@@ -152,10 +152,6 @@ def issue_signature(incident: Dict[str, Any]) -> Dict[str, Any]:
                 f"{_text(first_frame.group('method')).lower()}"
             )
 
-    semantic_dimensions = sum(
-        bool(values) for values in (paths, exceptions, systems, top_frames)
-    )
-    eligible = len(services) == 1 and semantic_dimensions >= 2
     components = {
         "services": services,
         "paths": sorted(paths),
@@ -163,12 +159,33 @@ def issue_signature(incident: Dict[str, Any]) -> Dict[str, Any]:
         "systems": sorted(systems),
         "top_frames": sorted(top_frames),
     }
+    endpoint_error = (
+        len(services) == 1
+        and bool(paths)
+        and bool(exceptions)
+    )
+    semantic_dimensions = sum(
+        bool(values) for values in (paths, exceptions, systems, top_frames)
+    )
+    eligible = endpoint_error or (
+        len(services) == 1 and semantic_dimensions >= 2
+    )
+    if endpoint_error:
+        fingerprint_components = {
+            "services": services,
+            "paths": sorted(paths),
+            "exceptions": sorted(exceptions),
+        }
+        aggregation_mode = "same_service_endpoint_and_error"
+    else:
+        fingerprint_components = components
+        aggregation_mode = "exact_semantic_signature"
     fingerprint = ""
     if eligible:
         encoded = json.dumps(
             {
                 "policy_version": ISSUE_SIGNATURE_POLICY_VERSION,
-                **components,
+                **fingerprint_components,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -178,10 +195,16 @@ def issue_signature(incident: Dict[str, Any]) -> Dict[str, Any]:
         "policy_version": ISSUE_SIGNATURE_POLICY_VERSION,
         "eligible": eligible,
         "fingerprint": fingerprint,
+        "aggregation_mode": aggregation_mode,
+        "fingerprint_components": fingerprint_components,
         "criteria": [
             "one_nonempty_service",
-            "at_least_two_semantic_dimensions",
-            "exact_signature_equality",
+            (
+                "same_endpoint_and_exception"
+                if endpoint_error
+                else "at_least_two_semantic_dimensions"
+            ),
+            "exact_fingerprint_component_equality",
         ],
         "components": components,
     }
@@ -254,6 +277,32 @@ def _build_incident(
         _text(_mapping(member.get("source")).get("timestamp")) for member in ordered
     ]
     sanitizations = [_mapping(member.get("sanitization")) for member in ordered]
+    affected_endpoints = sorted(
+        {
+            match.group("path")
+            for member in ordered
+            for match in REQUEST_PATH_PATTERN.finditer(
+                _text(_mapping(member.get("event")).get("summary"))
+            )
+        }
+    )
+    user_refs = {
+        _text(_mapping(member.get("_aggregation")).get("user_ref"))
+        for member in ordered
+        if _text(_mapping(member.get("_aggregation")).get("user_ref"))
+    }
+    user_identifier_event_count = sum(
+        bool(_text(_mapping(member.get("_aggregation")).get("user_ref")))
+        for member in ordered
+    )
+    persisted_members = [
+        {
+            key: value
+            for key, value in member.items()
+            if key != "_aggregation"
+        }
+        for member in ordered
+    ]
     incident_ref = _incident_ref(strategy, ordered)
     criteria = {
         "trace_ref": ["equal_nonempty_trace_ref"],
@@ -278,6 +327,12 @@ def _build_incident(
             "event_count": len(ordered),
             "trace_ref": _trace_ref(ordered[0]) if strategy == "trace_ref" else "",
         },
+        "statistics": {
+            "batch_event_count": len(ordered),
+            "affected_endpoints": affected_endpoints,
+            "affected_user_count": len(user_refs) if user_refs else None,
+            "user_identifier_event_count": user_identifier_event_count,
+        },
         "grouping": {
             "policy_version": GROUPING_POLICY_VERSION,
             "strategy": strategy,
@@ -285,7 +340,7 @@ def _build_incident(
             "fallback_window_seconds": FALLBACK_WINDOW_SECONDS,
             "links": list(links),
         },
-        "members": ordered,
+        "members": persisted_members,
         "sanitization": {
             "status": "passed"
             if all(item.get("status") == "passed" for item in sanitizations)

@@ -475,6 +475,47 @@ class AIIssueGeneratorTest(unittest.TestCase):
         self.assertIn("## Interface", render_markdown(result))
         self.assertIn("## Error", render_markdown(result))
 
+    def test_log_issue_renders_deterministic_occurrence_statistics(self):
+        result = {
+            "draft": valid_draft(),
+            "source": {
+                "type": "kibana",
+                "reference": "incident_ref:test",
+                "url": "",
+            },
+            "observability": {
+                "first_seen_at": "2026-07-29T08:45:17Z",
+                "last_seen_at": "2026-07-29T08:49:50Z",
+                "batch_event_count": 9,
+                "total_event_count": 37,
+                "candidate_count": 5,
+                "affected_endpoints": ["/v1/wallpaper/list"],
+                "affected_user_count_min": 3,
+                "affected_user_count_max": 12,
+                "user_identifier_event_count": 30,
+                "aggregation_components": {
+                    "services": ["backend-wallpaper"],
+                    "paths": ["/v1/wallpaper/list"],
+                    "exceptions": ["nullpointerexception"],
+                    "systems": [],
+                    "top_frames": ["wallpaperservice.list"],
+                },
+            },
+            "state": "needs_human_context",
+            "validation": {"valid": True},
+            "review": {"verdict": "needs_clarification"},
+        }
+
+        markdown = render_markdown(result)
+
+        self.assertIn("## Error Occurrence Statistics", markdown)
+        self.assertIn("Current scan log events: 9", markdown)
+        self.assertIn("Historical matching log events: 37", markdown)
+        self.assertIn("Affected endpoints: /v1/wallpaper/list", markdown)
+        self.assertIn("Affected users: 3-12 (deduplicated range)", markdown)
+        self.assertIn("User identifier coverage: 30/37 log events", markdown)
+        self.assertIn("exception=nullpointerexception", markdown)
+
     def test_reviewer_unsupported_claim_blocks_result(self):
         review = passing_review()
         review["verdict"] = "reject"

@@ -895,6 +895,110 @@ class TerminalControlCenterTest(unittest.TestCase):
         self.assertIn("扫描 1 · 有效 1 · 异常 1", output.getvalue())
         inbox.ingest_summary.assert_called_once()
 
+    def test_log_fetch_collapses_same_issue_fingerprint_and_uses_inbox_totals(self):
+        output = io.StringIO()
+        aggregate = {
+            "schema_version": "ai-issue-evidence/v1",
+            "source": {
+                "type": "kibana",
+                "reference": "incident_ref:aggregate",
+                "url": "",
+            },
+            "safety": {"status": "sanitized", "ai_allowed": True},
+            "event": {
+                "statistics": {
+                    "total_event_count": 12,
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log_output = root / "logs"
+
+            def fake_connector(arguments):
+                name = arguments[arguments.index("--name") + 1]
+                run = Path(arguments[arguments.index("--output-dir") + 1]) / name
+                candidates = []
+                for index, event_count in enumerate((1, 2), start=1):
+                    candidate_dir = run / f"candidate-{index:02d}"
+                    candidate_dir.mkdir(parents=True)
+                    artifact = candidate_dir / "sanitized-incident.json"
+                    artifact.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": "ai-issue-evidence/v1",
+                                "source": {
+                                    "type": "kibana",
+                                    "reference": f"incident_ref:{index}",
+                                    "url": "",
+                                },
+                                "safety": {
+                                    "status": "sanitized",
+                                    "ai_allowed": True,
+                                },
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    candidates.append(
+                        {
+                            "artifact": str(artifact),
+                            "incident_ref": f"incident_ref:{index}",
+                            "services": ["calculator"],
+                            "event_count": event_count,
+                            "first_seen_at": f"2099-01-01T00:00:0{index}Z",
+                            "last_seen_at": f"2099-01-01T00:00:0{index}Z",
+                            "issue_signature": {
+                                "fingerprint": "issue_ref:1234567890abcdef1234",
+                                "components": {
+                                    "paths": ["/v1/calculator/multiply"],
+                                },
+                            },
+                        }
+                    )
+                (run / "summary.json").write_text(
+                    json.dumps(
+                        {
+                            "selection": {
+                                "scanned_hits": 3,
+                                "eligible_events": 3,
+                            },
+                            "candidates": candidates,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return 0
+
+            inbox = mock.Mock()
+            inbox.find.return_value = {"evidence": aggregate}
+            with mock.patch(
+                "src.terminal_control_center.kibana_issue_connector.main",
+                side_effect=fake_connector,
+            ):
+                evidence = _fetch_log_candidate(
+                    root=root,
+                    terminal=Terminal(output, color=False),
+                    input_fn=lambda _prompt: "1",
+                    discover_url="https://logs.example.test/_dashboards/app/discover#x",
+                    username="reader",
+                    output_path=log_output,
+                    key_path=root / "log-key.json",
+                    inbox=inbox,
+                    password_fn=lambda _prompt: "temporary-password",
+                )
+
+        self.assertEqual(aggregate, evidence)
+        self.assertIn(
+            "扫描 3 · 有效 3 · 异常 1 · 同类归并 1",
+            output.getvalue(),
+        )
+        self.assertIn("/v1/calculator/multiply · 3 条", output.getvalue())
+        inbox.find.assert_called_once_with(
+            source_reference="incident_ref:1",
+            issue_fingerprint="issue_ref:1234567890abcdef1234",
+        )
+
     def test_interactive_log_fetch_stops_after_one_backlog_batch(self):
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as directory:
