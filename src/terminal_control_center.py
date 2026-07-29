@@ -86,6 +86,48 @@ INTERACTIVE_EXIT_ALIASES = frozenset({"/exit", "exit", "quit", "q", "退出", "�
 LOG_KEYCHAIN_SERVICE = "github-ai-agent-opensearch"
 MAX_KEYCHAIN_PASSWORD_BYTES = 16_384
 
+PIXEL_MASCOT_PALETTE = {
+    "H": 223,  # horns and teeth
+    "M": 233,  # mane and pupils
+    "D": 94,   # dark brown hair
+    "B": 95,   # face
+    "L": 137,  # muzzle
+    "E": 230,  # eyes
+    "P": 210,  # lips
+    "R": 167,  # lip outline
+    "A": 173,  # ears
+}
+PIXEL_MASCOT_ROWS = (
+    "..........HHHH.............HHHH.........",
+    "..........HLHH.............HLHH.........",
+    "..........HLHH.............HLHH.........",
+    "..........HLHH.............HLHH.........",
+    "..........HLHH.............HLHH.........",
+    "..........HLHH.............HLHH.........",
+    "...........HHHH.MM......MMHHHH..........",
+    "...........HMMMMMMMMMMMMMMHHHH..........",
+    "............MMMMDMMMMMMMDMMMH...........",
+    "...........MMMMDDDMDDDMDDDMMMM..........",
+    "..........MMMDDDBBBBBBBBBBBBMMM.........",
+    ".....AAAAMMMMDDBBBBBBBBBBBBBBMMAAAA.....",
+    "....AAAAAMMMMDDLLLLLLLLLLLLLLLLAAAAA....",
+    "..AAAAAAAADMMDBLLLLLLLLLLLLLLLLBBAAAAA..",
+    "........ADDDMMBEEEEMMEEEEEEMMEEEB.......",
+    "........DDDDDMBBEEEMMEELEEEMMEEBB.......",
+    "........MMDDDDBBBEEEEERLPEEEEELL........",
+    ".......DMMDDDDBBLRPPPPPPPPPPPPPPPPPPPPP.",
+    "......DDDDDDDDBBRPPPPPPPPPPPPPPPPPPPPPP.",
+    "......DDDDDDDDBLRPPPPEEELEEELEEELEEEEPPP",
+    "......DMMDDDDDDRPPPPPEEELEEELEEELEEEERR.",
+    "......DMMDDDDDDMRRPRLEERLEEELEEELEEEER..",
+    ".....DDDDDDDDDDMBRPPPPPPRRRRRRRRRRRRRRR.",
+    ".....DDDDDDDDDMMRPPPPPPPPPPPPPPPPPPPPPR.",
+    ".....DDDDDDDDDMRPPPPPPPPPPPPPPPPPPPPPPPR",
+    "....DDDDDDMMDDMMMPMMMMMMMMMMM.......R...",
+    "...DDDDDDDMMDMMMMMMMMMMMMMMMM...........",
+    "..DDDDDDDDDDDMMMMMMMMMMMMMMM............",
+)
+
 
 class Terminal:
     def __init__(self, stream: TextIO = sys.stdout, *, color: Optional[bool] = None):
@@ -99,18 +141,57 @@ class Terminal:
     def line(self, value: str = "") -> None:
         print(value, file=self.stream, flush=True)
 
+    def _pixel_row(self, top: str, bottom: str) -> str:
+        if not self.color:
+            return "".join(
+                "█"
+                if upper != "." and lower != "."
+                else "▀"
+                if upper != "."
+                else "▄"
+                if lower != "."
+                else " "
+                for upper, lower in zip(top, bottom)
+            )
+        rendered = []
+        start = 0
+        while start < len(top):
+            pair = (top[start], bottom[start])
+            end = start + 1
+            while end < len(top) and (top[end], bottom[end]) == pair:
+                end += 1
+            upper, lower = pair
+            count = end - start
+            if upper == "." and lower == ".":
+                rendered.append(f"\033[0m{' ' * count}")
+            elif lower == ".":
+                rendered.append(
+                    f"\033[0m\033[38;5;{PIXEL_MASCOT_PALETTE[upper]}m"
+                    + "▀" * count
+                )
+            elif upper == ".":
+                rendered.append(
+                    f"\033[0m\033[38;5;{PIXEL_MASCOT_PALETTE[lower]}m"
+                    + "▄" * count
+                )
+            else:
+                rendered.append(
+                    f"\033[0m\033[38;5;{PIXEL_MASCOT_PALETTE[upper]}m"
+                    f"\033[48;5;{PIXEL_MASCOT_PALETTE[lower]}m"
+                    + "▀" * count
+                )
+            start = end
+        return "".join(rendered) + "\033[0m"
+
     def banner(self) -> None:
-        mascot = (
-            "       ▄████▄",
-            "      █▀    ▀█",
-            "     ██ ▀  ▀ ██",
-            "     ██  ▄▄  ██",
-            "      ▀██████▀",
-            "       ██  ██",
-            "      ▀▀    ▀▀",
-        )
-        for row in mascot:
-            self.line(self._paint("38;5;208", row))
+        for index in range(0, len(PIXEL_MASCOT_ROWS), 2):
+            self.line(
+                "  "
+                + self._pixel_row(
+                    PIXEL_MASCOT_ROWS[index],
+                    PIXEL_MASCOT_ROWS[index + 1],
+                )
+            )
         self.line(self._paint("2", "  输入需求 · help 查看功能"))
 
     def section(self, title: str) -> None:

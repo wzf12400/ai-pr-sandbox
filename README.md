@@ -322,11 +322,14 @@ Start it from the project checkout:
 ./bin/ai-agent
 ```
 
-With no arguments, the terminal shows a compact pixel mascot and goes directly
-to the input prompt. The natural-language, log, inbox, incident-review, and
-exit entries appear only after `help`. `logs`, `/logs`, and `日志` are
-equivalent; command-like input is classified locally before any
-Issue-generation call.
+With no arguments, the terminal shows a compact color pixel-art bovine mascot
+derived from the operator-provided reference and goes directly to the input
+prompt. It uses ANSI 256-color half-blocks in an interactive terminal and a
+Unicode silhouette when color is disabled. The natural-language, log, inbox,
+incident-review, and exit entries appear only after `help`. `logs`, `/logs`,
+and `日志` are equivalent; command-like input is classified locally before any
+Issue-generation call. A nearest-neighbor preview of the embedded palette is
+kept at [`assets/terminal-mascot-pixel.png`](assets/terminal-mascot-pixel.png).
 This interactive session remains open after completed operations and
 recoverable errors. Use `exit`/`退出` or Ctrl-D to close it. Explicit CLI
 commands remain one-shot for automation.
