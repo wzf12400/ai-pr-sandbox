@@ -10,19 +10,19 @@ class CalculatorTest(unittest.TestCase):
     def test_subtract(self) -> None:
         self.assertEqual(subtract(7, 4), 3)
 
-    def test_allows_operands_equal_to_100(self) -> None:
-        self.assertEqual(add(100, 0), 100)
-        self.assertEqual(subtract(100, 1), 99)
+    def test_allows_operands_equal_to_50(self) -> None:
+        self.assertEqual(add(50, 0), 50)
+        self.assertEqual(subtract(50, 1), 49)
 
-    def test_rejects_operands_greater_than_100(self) -> None:
+    def test_rejects_operands_greater_than_50(self) -> None:
         for operation, operands in (
-            (add, (101, 1)),
-            (add, (1, 101)),
-            (subtract, (101, 1)),
-            (subtract, (1, 101)),
+            (add, (51, 1)),
+            (add, (1, 51)),
+            (subtract, (51, 1)),
+            (subtract, (1, 51)),
         ):
             with self.subTest(operation=operation.__name__, operands=operands):
-                with self.assertRaisesRegex(ValueError, "must not exceed 100"):
+                with self.assertRaisesRegex(ValueError, "must not exceed 50"):
                     operation(*operands)
 
 

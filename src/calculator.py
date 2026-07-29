@@ -2,8 +2,8 @@
 
 
 def _validate_operand(value: float) -> None:
-    if value > 100:
-        raise ValueError("calculator operands must not exceed 100")
+    if value > 50:
+        raise ValueError("calculator operands must not exceed 50")
 
 
 def add(left: float, right: float) -> float:
