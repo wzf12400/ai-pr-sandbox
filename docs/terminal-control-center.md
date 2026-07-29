@@ -99,8 +99,10 @@ A local owner-only HMAC key is
 created under `.issue-entry-state/` so event references remain stable without
 storing raw identifiers. A new cursor starts from the latest 30 errors rather
 than draining the historical two-hour backlog. Later polls overlap the previous
-completed window by five minutes and read 50-record pages in ascending event
-time. To avoid sorting the full backlog, each poll first performs a count-only
+completed window by five minutes and read 100-record pages in ascending event
+time. This halves the serial page requests compared with the earlier 50-record
+page without reducing the scan range. To avoid sorting the full backlog, each
+poll first performs a count-only
 five-minute histogram (`size: 0`) using the same error predicate. Empty time
 buckets return no documents and can be skipped; only the earliest bucket that
 contains an error is fetched and sanitized. The safe cutoff remains 15 minutes

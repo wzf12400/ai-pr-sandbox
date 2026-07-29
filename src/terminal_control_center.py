@@ -885,7 +885,7 @@ def _poll_log_candidates(
                 "--max-candidates",
                 str(max_scan_hits),
                 "--fetch-size",
-                "50",
+                str(kibana_issue_connector.DEFAULT_FETCH_SIZE),
                 "--max-scan-hits",
                 str(max_scan_hits),
                 "--initial-scan-hits",

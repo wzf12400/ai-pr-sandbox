@@ -37,6 +37,7 @@ MAX_CANDIDATES = 5000
 MAX_GENERATE_CANDIDATES = 20
 MAX_PUBLISH_CANDIDATES = 3
 MAX_FETCH_SIZE = 100
+DEFAULT_FETCH_SIZE = MAX_FETCH_SIZE
 DEFAULT_MAX_SCAN_HITS = 1000
 MAX_SCAN_HITS = 5000
 DEFAULT_INITIAL_SCAN_HITS = 30
@@ -918,7 +919,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--username", default="", help=f"Read-only username; defaults to {USERNAME_ENV}.")
     parser.add_argument("--prompt-password", action="store_true", help="Read the password without echoing it.")
     parser.add_argument("--max-candidates", type=int, default=5, help=f"Candidate limit, maximum {MAX_CANDIDATES}.")
-    parser.add_argument("--fetch-size", type=int, default=50, help=f"Remote hit limit, maximum {MAX_FETCH_SIZE}.")
+    parser.add_argument(
+        "--fetch-size",
+        type=int,
+        default=DEFAULT_FETCH_SIZE,
+        help=f"Remote hit page size, maximum {MAX_FETCH_SIZE}.",
+    )
     parser.add_argument(
         "--max-scan-hits",
         type=int,
