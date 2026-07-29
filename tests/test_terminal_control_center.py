@@ -14,6 +14,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from src.terminal_control_center import (
+    PIXEL_MASCOT_PALETTE,
+    PIXEL_MASCOT_ROWS,
     Terminal,
     _commit_log_history_cursor,
     _commit_log_scan_cursor,
@@ -181,16 +183,37 @@ class FakeInbox:
 
 
 class TerminalControlCenterTest(unittest.TestCase):
-    def test_banner_uses_minimal_pixel_mascot_without_old_flow_box(self):
+    def test_pixel_mascot_matrix_is_complete_and_rectangular(self):
+        self.assertEqual(0, len(PIXEL_MASCOT_ROWS) % 2)
+        self.assertEqual({40}, {len(row) for row in PIXEL_MASCOT_ROWS})
+        self.assertLessEqual(
+            set("".join(PIXEL_MASCOT_ROWS)),
+            {".", *PIXEL_MASCOT_PALETTE},
+        )
+
+    def test_banner_uses_bovine_pixel_mascot_without_old_flow_box(self):
         output = io.StringIO()
 
         Terminal(output, color=False).banner()
 
         rendered = output.getvalue()
-        self.assertIn("▄████▄", rendered)
+        self.assertIn("▀▀▀▀", rendered)
+        self.assertIn("████████████", rendered)
         self.assertIn("输入需求 · help 查看功能", rendered)
         self.assertNotIn("AI Change Control", rendered)
         self.assertNotIn("自然语言 / 日志异常", rendered)
+        self.assertNotIn("\033[", rendered)
+
+    def test_color_banner_uses_pixel_palette_and_resets_terminal_style(self):
+        output = io.StringIO()
+
+        Terminal(output, color=True).banner()
+
+        rendered = output.getvalue()
+        self.assertIn("\033[38;5;223m", rendered)
+        self.assertIn("\033[38;5;210m", rendered)
+        self.assertEqual(15, len(rendered.splitlines()))
+        self.assertTrue(all(line.endswith("\033[0m") for line in rendered.splitlines()))
 
     @unittest.skipUnless(os.name == "posix", "requires a POSIX pseudo-terminal")
     def test_interactive_input_deletes_complete_chinese_characters(self):
