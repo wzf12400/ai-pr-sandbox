@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-POLICY_VERSION = "kibana-sanitizer/v1"
+POLICY_VERSION = "kibana-sanitizer/v2"
 HMAC_KEY_ENV = "LOG_SANITIZER_HMAC_KEY"
 MIN_HMAC_KEY_BYTES = 32
 MAX_SAFE_SUMMARY_LINES = 50
@@ -124,6 +124,18 @@ SECRET_ASSIGNMENT_PATTERN = re.compile(
 HIGH_ENTROPY_CANDIDATE_PATTERN = re.compile(r"[A-Za-z0-9+/_-]{20,}={0,2}")
 REQUEST_URL_PATTERN = re.compile(r"https?://[^\s]+")
 SAFE_ROUTE_SEGMENT_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,40}$")
+ABSOLUTE_SOURCE_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_.@+=\[\]-])"
+    r"(?P<path>(?:(?:[A-Za-z]:)?[\\/])"
+    r"(?:[A-Za-z0-9_.@+=\[\]-]+[\\/])+"
+    r"[A-Za-z0-9_.@+=\[\]-]+\."
+    r"(?:py|pyi|java|js|jsx|ts|tsx|go|rs|rb|php|cs|c|cc|cpp|h|hpp|"
+    r"xml|yaml|yml|toml))"
+    r"(?P<location>:\d+(?::\d+)?)?",
+    re.IGNORECASE,
+)
+SOURCE_PATH_ANCHORS = frozenset({"site-packages", "dist-packages"})
+MAX_SOURCE_PATH_SEGMENTS = 5
 CLIENT_DESCRIPTOR_PATTERN = re.compile(
     r"(?P<application>(?:[A-Za-z0-9_-]+\.){2,}[A-Za-z0-9_.-]+(?:/\d+)?)\s+"
     r"\((?P<identifiers>[^)\r\n]{1,300})\)(?=\s+Country/)"
@@ -219,6 +231,62 @@ def _is_allowlisted_code_identifier(text: str, match: re.Match[str]) -> bool:
     candidate = match.group(0)
     prefix = text[max(0, match.start() - 300):match.start()]
     suffix = text[match.end():match.end() + 160]
+    if re.fullmatch(r"ipython-input-\d+-[a-f0-9]{12}", candidate):
+        if prefix.endswith("<") and suffix.startswith(">"):
+            return True
+    if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]{19,}", candidate):
+        if re.search(r"(?:\bin\s+|\bdef\s+|\bclass\s+)$", prefix) and re.match(
+            r"(?:\(|\s|$)",
+            suffix,
+        ):
+            return True
+        if re.search(
+            r"\b(?:Attribute(?: name)?|Method|Function|Class)\s+[\"']$",
+            prefix,
+        ) and re.match(
+            r"[\"']",
+            suffix,
+        ):
+            return True
+        if re.match(r"\s*\(", suffix):
+            return True
+        uppercase_count = sum(character.isupper() for character in candidate)
+        if (
+            uppercase_count >= 2
+            and re.search(r"(?:\(|,)\s*$", prefix)
+            and re.match(r"\s*[,)]", suffix)
+        ):
+            return True
+        if re.search(r"\bCONSTRAINT\s+`$", prefix, flags=re.IGNORECASE) and re.match(
+            r"`\s+FOREIGN\s+KEY\b",
+            suffix,
+            flags=re.IGNORECASE,
+        ):
+            return True
+    if re.search(r'\bFile ["\']$', prefix) and re.match(
+        r'\.py["\'], line \d+, in [A-Za-z_$][A-Za-z0-9_$]*',
+        suffix,
+    ):
+        segments = [segment for segment in candidate.split("/") if segment]
+        if (
+            len(segments) >= 2
+            and all(
+                re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", segment)
+                and segment not in {".", ".."}
+                and not (
+                    len(segment) >= 20
+                    and _entropy(segment) >= 4.0
+                )
+                for segment in segments
+            )
+        ):
+            return True
+    if re.search(r"\bLinux-\d+(?:\.\d+)*\.$", prefix) and re.match(
+        r"\.\d+(?:-[A-Za-z0-9_.-]+)?",
+        suffix,
+    ):
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", candidate):
+            return True
     if "class path resource [" in prefix and re.match(r"\.xml\]", suffix):
         if re.fullmatch(
             r"(?:[A-Za-z_$][A-Za-z0-9_$]*/)*[A-Za-z_$][A-Za-z0-9_$]*",
@@ -246,6 +314,150 @@ def _is_safe_route_segment(segment: str) -> bool:
     is_hex = bool(re.fullmatch(r"[A-Fa-f0-9]+", segment))
     threshold = 3.2 if is_hex and len(segment) >= 32 else 4.0
     return _entropy(segment) < threshold
+
+
+def _high_entropy_segment(segment: str) -> bool:
+    candidate = segment
+    if "." in segment:
+        candidate = segment.rsplit(".", 1)[0]
+    if len(candidate) < 20:
+        return False
+    is_hex = bool(re.fullmatch(r"[A-Fa-f0-9]+", candidate))
+    threshold = 3.2 if is_hex and len(candidate) >= 32 else 4.0
+    return _entropy(candidate) >= threshold
+
+
+def _normalize_absolute_source_path(
+    raw_path: str,
+    path: str,
+) -> Tuple[str, List[Finding]]:
+    findings: List[Finding] = []
+    normalized = raw_path.replace("\\", "/")
+    if re.match(r"^[A-Za-z]:/", normalized):
+        normalized = normalized[2:]
+    segments = [segment for segment in normalized.split("/") if segment]
+    anchor_index = next(
+        (
+            index
+            for index, segment in enumerate(segments)
+            if segment.casefold() in SOURCE_PATH_ANCHORS
+        ),
+        -1,
+    )
+    keep_from = (
+        anchor_index
+        if anchor_index >= 0
+        else max(0, len(segments) - MAX_SOURCE_PATH_SEGMENTS)
+    )
+    findings.append(
+        Finding(path, "code_path_prefix", "removed", "source-path")
+    )
+    safe_segments: List[str] = []
+    for segment in segments[keep_from:]:
+        if segment in {".", ".."}:
+            safe_segments.append("[REDACTED:path_segment]")
+            findings.append(
+                Finding(path, "path_identifier", "removed", "source-path")
+            )
+            continue
+        if _high_entropy_segment(segment):
+            extension = ""
+            if "." in segment:
+                suffix = segment.rsplit(".", 1)[-1]
+                if re.fullmatch(r"[A-Za-z0-9]{1,8}", suffix):
+                    extension = f".{suffix}"
+            safe_segments.append(f"[REDACTED:path_segment]{extension}")
+            findings.append(
+                Finding(path, "path_identifier", "removed", "source-path")
+            )
+            continue
+        safe_segments.append(segment)
+    return "[REDACTED:code_path_prefix]/" + "/".join(safe_segments), findings
+
+
+def _normalize_path_candidate(
+    candidate: str,
+    path: str,
+) -> Tuple[str, List[Finding]]:
+    normalized = candidate.replace("\\", "/")
+    absolute = normalized.startswith("/") or bool(
+        re.match(r"^[A-Za-z]:/", normalized)
+    )
+    if re.match(r"^[A-Za-z]:/", normalized):
+        normalized = normalized[2:]
+    segments = [segment for segment in normalized.split("/") if segment]
+    anchor_index = next(
+        (
+            index
+            for index, segment in enumerate(segments)
+            if segment.casefold() in SOURCE_PATH_ANCHORS
+        ),
+        -1,
+    )
+    keep_from = (
+        anchor_index
+        if anchor_index >= 0
+        else max(0, len(segments) - MAX_SOURCE_PATH_SEGMENTS)
+    )
+    if absolute and segments and segments[0].casefold() in {"home", "users"}:
+        keep_from = max(keep_from, min(2, len(segments)))
+    findings = [
+        Finding(path, "code_path", "normalized", "source-path-context")
+    ]
+    if absolute or keep_from:
+        findings.append(
+            Finding(path, "code_path_prefix", "removed", "source-path-context")
+        )
+    safe_segments: List[str] = []
+    for segment in segments[keep_from:]:
+        if (
+            segment in {".", ".."}
+            or not re.fullmatch(r"[A-Za-z0-9_.@+=-]{1,128}", segment)
+            or _high_entropy_segment(segment)
+        ):
+            safe_segments.append("[REDACTED:path_segment]")
+            findings.append(
+                Finding(
+                    path,
+                    "path_identifier",
+                    "removed",
+                    "source-path-context",
+                )
+            )
+        else:
+            safe_segments.append(segment)
+    prefix = "[REDACTED:code_path_prefix]/" if absolute or keep_from else ""
+    return prefix + "/".join(safe_segments), findings
+
+
+def _normalize_absolute_source_paths(
+    text: str,
+    path: str,
+) -> Tuple[str, List[Finding], List[Tuple[int, int]]]:
+    findings: List[Finding] = []
+    protected_spans: List[Tuple[int, int]] = []
+    parts: List[str] = []
+    output_length = 0
+    cursor = 0
+    for match in ABSOLUTE_SOURCE_PATH_PATTERN.finditer(text):
+        prefix = text[cursor:match.start()]
+        parts.append(prefix)
+        output_length += len(prefix)
+        normalized, path_findings = _normalize_absolute_source_path(
+            match.group("path"),
+            path,
+        )
+        location = match.group("location") or ""
+        replacement = normalized + location
+        parts.append(replacement)
+        protected_spans.append(
+            (output_length, output_length + len(replacement))
+        )
+        output_length += len(replacement)
+        findings.extend(path_findings)
+        cursor = match.end()
+    parts.append(text[cursor:])
+    return "".join(parts), findings, protected_spans
 
 
 def _minimize_request_urls(text: str, path: str) -> Tuple[str, List[Finding]]:
@@ -337,11 +549,20 @@ def _remove_sql_statements(text: str, path: str) -> Tuple[str, List[Finding]]:
     return SQL_STATEMENT_PATTERN.sub(replace, text), findings
 
 
-def _redact_unclassified_entropy(text: str, path: str) -> Tuple[str, List[Finding]]:
+def _redact_unclassified_entropy(
+    text: str,
+    path: str,
+    protected_spans: Tuple[Tuple[int, int], ...] = (),
+) -> Tuple[str, List[Finding]]:
     findings: List[Finding] = []
 
     def replace(match: re.Match[str]) -> str:
         candidate = match.group(0)
+        if any(
+            match.start() >= start and match.end() <= end
+            for start, end in protected_spans
+        ):
+            return candidate
         redaction_start = text.rfind("[REDACTED:", 0, match.start())
         redaction_end = text.rfind("]", 0, match.start())
         if redaction_start > redaction_end:
@@ -355,6 +576,35 @@ def _redact_unclassified_entropy(text: str, path: str) -> Tuple[str, List[Findin
         threshold = 3.2 if is_hex and len(candidate) >= 32 else 4.0
         if _entropy(candidate) < threshold:
             return candidate
+        if "/" in candidate or "\\" in candidate:
+            normalized, path_findings = _normalize_path_candidate(
+                candidate,
+                path,
+            )
+            findings.extend(path_findings)
+            return normalized
+        commit_context = re.search(
+            r"\b(?:commit|revision|sha)\s*[`(\"']?\s*$",
+            text[max(0, match.start() - 80):match.start()],
+            flags=re.IGNORECASE,
+        )
+        if (
+            re.fullmatch(r"[A-Fa-f0-9]{40}", candidate)
+            or (
+                is_hex
+                and 20 <= len(candidate) <= 40
+                and commit_context
+            )
+        ):
+            findings.append(
+                Finding(
+                    path,
+                    "commit_identifier",
+                    "removed",
+                    "git-object-id",
+                )
+            )
+            return "[REDACTED:commit_identifier]"
         findings.append(Finding(path, "unclassified_high_entropy", "blocked", "entropy"))
         return "[REDACTED:unclassified_high_entropy]"
 
@@ -406,7 +656,16 @@ def redact_free_text(text: str, path: str = "message") -> Tuple[str, List[Findin
         return f"{key}=[REDACTED:{category}]"
 
     sanitized = SECRET_ASSIGNMENT_PATTERN.sub(redact_assignment, sanitized)
-    sanitized, entropy_findings = _redact_unclassified_entropy(sanitized, path)
+    sanitized, path_findings, protected_spans = _normalize_absolute_source_paths(
+        sanitized,
+        path,
+    )
+    findings.extend(path_findings)
+    sanitized, entropy_findings = _redact_unclassified_entropy(
+        sanitized,
+        path,
+        tuple(protected_spans),
+    )
     findings.extend(entropy_findings)
     return sanitized, findings
 

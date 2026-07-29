@@ -1,0 +1,294 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/swebench-codefix-benchmark-v1.schema.json",
+  "title": "SWE-bench code-fix benchmark record v1",
+  "description": "One agent-visible task, private label, or execution result record.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/task"
+    },
+    {
+      "$ref": "#/$defs/label"
+    },
+    {
+      "$ref": "#/$defs/result"
+    }
+  ],
+  "$defs": {
+    "case_ref": {
+      "type": "string",
+      "pattern": "^swebench_codefix_ref:[0-9a-f]{32}$"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,64}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "test_list": {
+      "type": "array",
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 10000
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "case_ref",
+        "source_type",
+        "repository",
+        "base_commit",
+        "problem_statement",
+        "problem_sha256",
+        "environment",
+        "preflight",
+        "evaluation_contract",
+        "answer_fields_present"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "swebench-codefix-task/v1"
+        },
+        "case_ref": {
+          "$ref": "#/$defs/case_ref"
+        },
+        "source_type": {
+          "const": "public_github_issue"
+        },
+        "repository": {
+          "$ref": "#/$defs/repository"
+        },
+        "base_commit": {
+          "$ref": "#/$defs/sha"
+        },
+        "problem_statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100000
+        },
+        "problem_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "environment_setup_commit"
+          ],
+          "properties": {
+            "version": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "environment_setup_commit": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/sha"
+                },
+                {
+                  "const": ""
+                }
+              ]
+            }
+          }
+        },
+        "preflight": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "redacted_categories"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "eligible",
+                "blocked"
+              ]
+            },
+            "redacted_categories": {
+              "type": "array",
+              "maxItems": 20,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              }
+            }
+          }
+        },
+        "evaluation_contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "private_label_required"
+          ],
+          "properties": {
+            "mode": {
+              "const": "swebench_f2p_p2p"
+            },
+            "private_label_required": {
+              "const": true
+            }
+          }
+        },
+        "answer_fields_present": {
+          "const": false
+        }
+      }
+    },
+    "label": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "case_ref",
+        "source_ref",
+        "dataset_name",
+        "dataset_revision",
+        "instance_id",
+        "repository",
+        "base_commit",
+        "created_at",
+        "version",
+        "environment_setup_commit",
+        "expected_execution",
+        "fail_to_pass",
+        "pass_to_pass",
+        "gold_patch_sha256",
+        "test_patch_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "swebench-codefix-label/v1"
+        },
+        "case_ref": {
+          "$ref": "#/$defs/case_ref"
+        },
+        "source_ref": {
+          "type": "string",
+          "pattern": "^source_ref:[0-9a-f]{32}$"
+        },
+        "dataset_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "dataset_revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "repository": {
+          "$ref": "#/$defs/repository"
+        },
+        "base_commit": {
+          "$ref": "#/$defs/sha"
+        },
+        "created_at": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "environment_setup_commit": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "const": ""
+            }
+          ]
+        },
+        "expected_execution": {
+          "enum": [
+            "eligible",
+            "blocked"
+          ]
+        },
+        "fail_to_pass": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/test_list"
+            },
+            {
+              "minItems": 1
+            }
+          ]
+        },
+        "pass_to_pass": {
+          "$ref": "#/$defs/test_list"
+        },
+        "gold_patch_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "test_patch_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "case_ref",
+        "status",
+        "fail_to_pass_passed",
+        "fail_to_pass_failed",
+        "pass_to_pass_passed",
+        "pass_to_pass_failed"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "swebench-codefix-result/v1"
+        },
+        "case_ref": {
+          "$ref": "#/$defs/case_ref"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "error",
+            "skipped"
+          ]
+        },
+        "fail_to_pass_passed": {
+          "$ref": "#/$defs/test_list"
+        },
+        "fail_to_pass_failed": {
+          "$ref": "#/$defs/test_list"
+        },
+        "pass_to_pass_passed": {
+          "$ref": "#/$defs/test_list"
+        },
+        "pass_to_pass_failed": {
+          "$ref": "#/$defs/test_list"
+        }
+      }
+    }
+  }
+}

@@ -14,6 +14,7 @@ from src.local_control_center import (
     _generation_failure_code,
     _is_resumable_empty_modification,
 )
+from src.copilot_issue_provider import CopilotIssueProviderError
 from tests.test_approved_issue_dispatcher import REPOSITORY, initialize_repo
 from tests.test_repository_issue_automation import generation
 
@@ -165,6 +166,17 @@ class FakeApprovalClient:
 
 
 class ControlCenterWorkflowTest(unittest.TestCase):
+    def test_terminal_request_uses_the_shared_eight_thousand_character_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, workflow, _ = self._configured_workflow(root)
+            with mock.patch("src.local_control_center.threading.Thread"):
+                accepted = workflow.create("a" * 8_000)
+
+            self.assertEqual("preparing", accepted["status"])
+            with self.assertRaisesRegex(ValueError, "8000"):
+                workflow.create("a" * 8_001)
+
     def test_generation_failure_message_distinguishes_validation_and_review(self):
         self.assertEqual(
             "issue_draft_validation_failed",
@@ -185,6 +197,80 @@ class ControlCenterWorkflowTest(unittest.TestCase):
             ),
         )
 
+    def test_issue_provider_failure_has_an_actionable_safe_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, workflow, _ = self._configured_workflow(root)
+            with mock.patch(
+                "src.local_control_center.threading.Thread"
+            ), mock.patch(
+                "src.local_control_center.ai_issue_generator.generate_issue",
+                side_effect=CopilotIssueProviderError("cli_returned_failure"),
+            ):
+                record = workflow.create("在计算器里限制只能计算100以内的数")
+                workflow._prepare(
+                    record["run_id"],
+                    "在计算器里限制只能计算100以内的数",
+                )
+
+            blocked = workflow.read(record["run_id"])
+            audit_path = (
+                root / "runs" / record["run_id"] / "failure-audit.json"
+            )
+            audit_text = audit_path.read_text(encoding="utf-8")
+            audit = json.loads(audit_text)
+
+        self.assertEqual("issue_provider_failed", blocked["failure"]["code"])
+        self.assertIn("Copilot CLI", blocked["failure"]["message"])
+        self.assertEqual("issue_generation", audit["stage"])
+        self.assertEqual("cli_returned_failure", audit["reason_category"])
+        self.assertFalse(audit["raw_input_recorded"])
+        self.assertNotIn("100以内", audit_text)
+
+    def test_prepare_rechecks_github_login_before_issue_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, workflow, _ = self._configured_workflow(root)
+            workflow.identity_inspector = lambda _cwd: {
+                "github": {
+                    "available": True,
+                    "authenticated": False,
+                    "login": None,
+                    "accounts": [],
+                },
+                "copilot": {
+                    "available": True,
+                    "version": "GitHub Copilot CLI synthetic",
+                    "authentication": "current_local_user",
+                },
+            }
+            with mock.patch("src.local_control_center.threading.Thread"):
+                record = workflow.create("在计算器里限制只能计算100以内的数")
+            workflow._prepare(
+                record["run_id"],
+                "在计算器里限制只能计算100以内的数",
+            )
+
+            blocked = workflow.read(record["run_id"])
+            audit_path = (
+                root / "runs" / record["run_id"] / "failure-audit.json"
+            )
+            audit_text = audit_path.read_text(encoding="utf-8")
+            audit = json.loads(audit_text)
+
+        self.assertEqual(
+            "github_authentication_required",
+            blocked["failure"]["code"],
+        )
+        self.assertIn("gh auth login", blocked["failure"]["message"])
+        self.assertEqual("identity_preflight", audit["stage"])
+        self.assertEqual(
+            "github_login_unavailable_or_changed",
+            audit["reason_category"],
+        )
+        self.assertFalse(audit["raw_input_recorded"])
+        self.assertNotIn("100以内", audit_text)
+
     def _configured_workflow(self, root):
         repo = initialize_repo(root)
         config_path = root / "config.json"
@@ -202,6 +288,7 @@ class ControlCenterWorkflowTest(unittest.TestCase):
                 root / "runs",
                 approval_client=approval,
                 issue_provider_factory=lambda _model: mock.Mock(),
+                identity_inspector=lambda _cwd: IDENTITY,
             ),
             approval,
         )

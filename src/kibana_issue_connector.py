@@ -42,12 +42,22 @@ DEFAULT_INITIAL_SCAN_HITS = 30
 MAX_INITIAL_SCAN_HITS = 100
 DEFAULT_SCAN_OVERLAP_SECONDS = 300
 MAX_SCAN_OVERLAP_SECONDS = 3600
+DEFAULT_MAX_CATCHUP_WINDOW_SECONDS = 0
+MAX_CATCHUP_WINDOW_SECONDS = 3600
+DEFAULT_SCAN_DELAY_SECONDS = 0
+MAX_SCAN_DELAY_SECONDS = 86_400
 SCROLL_KEEP_ALIVE = "2m"
-SCAN_CURSOR_SCHEMA_VERSION = "kibana-scan-cursor/v1"
-SCAN_QUERY_VERSION = "opensearch-error-scan/v2"
+SCAN_CURSOR_SCHEMA_VERSION = "kibana-scan-cursor/v2"
+LEGACY_SCAN_CURSOR_SCHEMA_VERSION = "kibana-scan-cursor/v1"
+SCAN_QUERY_VERSION = "opensearch-error-scan/v3"
+LEGACY_SCAN_QUERY_VERSION = "opensearch-error-scan/v2"
+HISTORY_CURSOR_SCHEMA_VERSION = "kibana-history-cursor/v1"
+HISTORY_QUERY_VERSION = "opensearch-error-history/v1"
 MAX_SCAN_CURSOR_BYTES = 16_384
 MAX_BLOCKED_ERROR_PREVIEWS = 10
 MAX_TIMEOUT_SECONDS = 120
+ERROR_QUERY = 'message:(ERROR OR FATAL OR Exception OR "Caused by")'
+ERROR_WINDOW_INTERVAL_SECONDS = 300
 MAX_BLOCKED_CONTEXTS = 3
 BLOCKED_CONTEXT_RADIUS = 160
 HIGH_ENTROPY_REDACTION = "[REDACTED:unclassified_high_entropy]"
@@ -69,6 +79,13 @@ class DashboardCredentials:
     username: str
     password: str = field(repr=False)
     tenant: str = ""
+
+
+@dataclass(frozen=True)
+class ErrorHitBatch:
+    hits: List[Dict[str, Any]]
+    completed_through: str
+    backlog_remaining: bool
 
 
 def parse_discover_url(url: str) -> DiscoverTarget:
@@ -228,6 +245,126 @@ class OpenSearchDashboardsClient:
             payload,
         )
 
+    def _find_error_window(
+        self,
+        index_pattern: str,
+        time_field: str,
+        *,
+        time_from: str,
+        time_to: str,
+        order: str,
+        interval_seconds: int = ERROR_WINDOW_INTERVAL_SECONDS,
+    ) -> Optional[Tuple[str, str]]:
+        if interval_seconds != ERROR_WINDOW_INTERVAL_SECONDS:
+            raise ValueError("only five-minute error windows are supported")
+        if order not in {"asc", "desc"}:
+            raise ValueError("error window order is invalid")
+        lower = _parse_utc_timestamp(time_from)
+        upper = _parse_utc_timestamp(time_to)
+        if upper <= lower:
+            raise ValueError("error window discovery range is invalid")
+        response = self._console_request(
+            "POST",
+            f"{index_pattern}/_search",
+            {
+                "size": 0,
+                "track_total_hits": False,
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {
+                                "range": {
+                                    time_field: {
+                                        "gte": time_from,
+                                        "lt": time_to,
+                                    }
+                                }
+                            },
+                            {
+                                "query_string": {
+                                    "query": ERROR_QUERY,
+                                    "analyze_wildcard": True,
+                                }
+                            },
+                        ]
+                    }
+                },
+                "aggs": {
+                    "error_windows": {
+                        "date_histogram": {
+                            "field": time_field,
+                            "fixed_interval": "5m",
+                            "min_doc_count": 1,
+                            "order": {"_key": order},
+                        }
+                    }
+                },
+            },
+        )
+        aggregations = response.get("aggregations")
+        if not isinstance(aggregations, dict):
+            raise ValueError("OpenSearch aggregation response is invalid")
+        error_windows = aggregations.get("error_windows")
+        if not isinstance(error_windows, dict):
+            raise ValueError("OpenSearch error-window aggregation is missing")
+        buckets = error_windows.get("buckets")
+        if not isinstance(buckets, list):
+            raise ValueError("OpenSearch error-window buckets are invalid")
+        for bucket in buckets:
+            if not isinstance(bucket, dict) or int(bucket.get("doc_count", 0)) <= 0:
+                continue
+            key = bucket.get("key")
+            if not isinstance(key, (int, float)):
+                raise ValueError("OpenSearch error-window key is invalid")
+            bucket_start = datetime.fromtimestamp(key / 1000, tz=timezone.utc)
+            bucket_end = min(
+                upper,
+                bucket_start + timedelta(seconds=interval_seconds),
+            )
+            selected_from = max(lower, bucket_start)
+            if bucket_end > selected_from:
+                return (
+                    _format_utc_timestamp(selected_from),
+                    _format_utc_timestamp(bucket_end),
+                )
+        return None
+
+    def find_next_error_window(
+        self,
+        index_pattern: str,
+        time_field: str,
+        *,
+        time_from: str,
+        time_to: str,
+        interval_seconds: int = ERROR_WINDOW_INTERVAL_SECONDS,
+    ) -> Optional[Tuple[str, str]]:
+        return self._find_error_window(
+            index_pattern,
+            time_field,
+            time_from=time_from,
+            time_to=time_to,
+            order="asc",
+            interval_seconds=interval_seconds,
+        )
+
+    def find_previous_error_window(
+        self,
+        index_pattern: str,
+        time_field: str,
+        *,
+        time_from: str,
+        time_to: str,
+        interval_seconds: int = ERROR_WINDOW_INTERVAL_SECONDS,
+    ) -> Optional[Tuple[str, str]]:
+        return self._find_error_window(
+            index_pattern,
+            time_field,
+            time_from=time_from,
+            time_to=time_to,
+            order="desc",
+            interval_seconds=interval_seconds,
+        )
+
     def fetch_error_hits(
         self,
         index_pattern: str,
@@ -237,7 +374,7 @@ class OpenSearchDashboardsClient:
         time_from: Optional[str] = None,
         time_to: Optional[str] = None,
         max_scan_hits: int = DEFAULT_MAX_SCAN_HITS,
-    ) -> List[Dict[str, Any]]:
+    ) -> ErrorHitBatch:
         if not 1 <= fetch_size <= MAX_FETCH_SIZE:
             raise ValueError(f"fetch size must be between 1 and {MAX_FETCH_SIZE}")
         if not 1 <= max_scan_hits <= MAX_SCAN_HITS:
@@ -263,20 +400,28 @@ class OpenSearchDashboardsClient:
                             "range": {
                                 time_field: {
                                     "gte": time_from or self.target.time_from,
-                                    "lte": time_to or self.target.time_to,
+                                    "lt": time_to or self.target.time_to,
                                 }
                             }
                         },
                         {
                             "query_string": {
-                                "query": 'message:(ERROR OR FATAL OR Exception OR "Caused by")',
+                                "query": ERROR_QUERY,
                                 "analyze_wildcard": True,
                             }
                         },
                     ]
                 }
             },
-            "sort": ["_doc"],
+            "sort": [
+                {
+                    time_field: {
+                        "order": "asc",
+                        "unmapped_type": "date",
+                    }
+                },
+                "_doc",
+            ],
         }
         response = self._console_request(
             "POST",
@@ -289,9 +434,27 @@ class OpenSearchDashboardsClient:
             while True:
                 page = self._hits(response)
                 if len(collected) + len(page) > max_scan_hits:
-                    raise ValueError(
-                        f"error backlog exceeds the per-run limit of {max_scan_hits}; "
-                        "scan cursor was not advanced"
+                    overflow = collected + page
+                    boundary = _parse_utc_timestamp(
+                        str(overflow[max_scan_hits]["_source"].get(time_field, ""))
+                    )
+                    safe_hits = [
+                        hit
+                        for hit in overflow[:max_scan_hits]
+                        if _parse_utc_timestamp(
+                            str(hit["_source"].get(time_field, ""))
+                        )
+                        < boundary
+                    ]
+                    if not safe_hits:
+                        raise ValueError(
+                            f"more than {max_scan_hits} errors share one timestamp; "
+                            "scan cursor was not advanced"
+                        )
+                    return ErrorHitBatch(
+                        hits=safe_hits,
+                        completed_through=_format_utc_timestamp(boundary),
+                        backlog_remaining=True,
                     )
                 collected.extend(page)
                 if len(page) < fetch_size:
@@ -319,7 +482,11 @@ class OpenSearchDashboardsClient:
                     )
                 except (OSError, ValueError):
                     pass
-        return collected
+        return ErrorHitBatch(
+            hits=collected,
+            completed_through=time_to or self.target.time_to,
+            backlog_remaining=False,
+        )
 
     def fetch_latest_error_hits(
         self,
@@ -361,7 +528,7 @@ class OpenSearchDashboardsClient:
                         },
                         {
                             "query_string": {
-                                "query": 'message:(ERROR OR FATAL OR Exception OR "Caused by")',
+                                "query": ERROR_QUERY,
                                 "analyze_wildcard": True,
                             }
                         },
@@ -385,12 +552,30 @@ class OpenSearchDashboardsClient:
         return self._hits(response)
 
 
-def _scan_source_sha256(target: DiscoverTarget) -> str:
+def _scan_source_sha256(
+    target: DiscoverTarget,
+    query_version: str = SCAN_QUERY_VERSION,
+) -> str:
     encoded = json.dumps(
         {
-            "query_version": SCAN_QUERY_VERSION,
+            "query_version": query_version,
             "base_url": target.base_url,
             "data_view_id": target.data_view_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _history_source_sha256(target: DiscoverTarget) -> str:
+    encoded = json.dumps(
+        {
+            "query_version": HISTORY_QUERY_VERSION,
+            "base_url": target.base_url,
+            "data_view_id": target.data_view_id,
+            "time_from": target.time_from,
+            "time_to": target.time_to,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -428,12 +613,25 @@ def _load_scan_cursor(
         raise ValueError("scan cursor file is unreadable") from exc
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != SCAN_CURSOR_SCHEMA_VERSION
-        or payload.get("source_sha256") != _scan_source_sha256(target)
+        or payload.get("schema_version")
+        not in {SCAN_CURSOR_SCHEMA_VERSION, LEGACY_SCAN_CURSOR_SCHEMA_VERSION}
+        or payload.get("source_sha256")
+        not in {
+            _scan_source_sha256(target),
+            _scan_source_sha256(target, LEGACY_SCAN_QUERY_VERSION),
+        }
     ):
         raise ValueError("scan cursor does not match the configured log source")
     completed = str(payload.get("completed_through", "")).strip()
-    _parse_utc_timestamp(completed)
+    completed_at = _parse_utc_timestamp(completed)
+    backlog_pending = payload.get("backlog_pending", False)
+    if not isinstance(backlog_pending, bool):
+        raise ValueError("scan cursor backlog state is invalid")
+    if backlog_pending:
+        target_through = str(payload.get("backlog_target_through", "")).strip()
+        target_at = _parse_utc_timestamp(target_through)
+        if target_at <= completed_at:
+            raise ValueError("scan cursor backlog boundary is invalid")
     return payload
 
 
@@ -441,16 +639,43 @@ def _scan_window(
     target: DiscoverTarget,
     cursor: Optional[Dict[str, Any]],
     overlap_seconds: int,
+    max_catchup_window_seconds: int = DEFAULT_MAX_CATCHUP_WINDOW_SECONDS,
+    scan_delay_seconds: int = DEFAULT_SCAN_DELAY_SECONDS,
     *,
     now: Optional[datetime] = None,
 ) -> Tuple[str, str, datetime]:
     if target.time_to != "now":
         raise ValueError("scan cursor requires a Discover window ending at now")
-    cutoff = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    cutoff = (now or datetime.now(timezone.utc)).astimezone(
+        timezone.utc
+    ) - timedelta(seconds=scan_delay_seconds)
     if cursor is None:
         time_from = target.time_from
+    elif cursor.get("backlog_pending", False):
+        completed = _parse_utc_timestamp(str(cursor["completed_through"]))
+        pending_cutoff = _parse_utc_timestamp(
+            str(cursor["backlog_target_through"])
+        )
+        cutoff = (
+            min(cutoff, pending_cutoff)
+            if scan_delay_seconds
+            else pending_cutoff
+        )
+        if max_catchup_window_seconds:
+            cutoff = min(
+                cutoff,
+                completed + timedelta(seconds=max_catchup_window_seconds),
+            )
+        cutoff = max(cutoff, completed)
+        time_from = _format_utc_timestamp(completed)
     else:
         completed = _parse_utc_timestamp(str(cursor["completed_through"]))
+        if max_catchup_window_seconds:
+            cutoff = min(
+                cutoff,
+                completed + timedelta(seconds=max_catchup_window_seconds),
+            )
+        cutoff = max(cutoff, completed)
         time_from = _format_utc_timestamp(
             completed - timedelta(seconds=overlap_seconds)
         )
@@ -462,13 +687,121 @@ def _save_scan_cursor(
     target: DiscoverTarget,
     completed_through: datetime,
     summary_path: Path,
+    *,
+    backlog_pending: bool = False,
+    backlog_target_through: Optional[datetime] = None,
 ) -> None:
+    if backlog_pending and (
+        backlog_target_through is None
+        or backlog_target_through <= completed_through
+    ):
+        raise ValueError("scan cursor backlog boundary is invalid")
     _atomic_write_json(
         path,
         {
             "schema_version": SCAN_CURSOR_SCHEMA_VERSION,
             "source_sha256": _scan_source_sha256(target),
             "completed_through": _format_utc_timestamp(completed_through),
+            "backlog_pending": backlog_pending,
+            "backlog_target_through": (
+                _format_utc_timestamp(backlog_target_through)
+                if backlog_target_through is not None
+                else ""
+            ),
+            "last_summary": str(summary_path),
+            "updated_at": _format_utc_timestamp(datetime.now(timezone.utc)),
+        },
+    )
+
+
+def _resolve_relative_time(value: str, reference: datetime) -> datetime:
+    normalized = value.strip()
+    if normalized == "now":
+        return reference.astimezone(timezone.utc)
+    match = re.fullmatch(r"now-(\d+)([mhdw])", normalized)
+    if not match:
+        return _parse_utc_timestamp(normalized)
+    count = int(match.group(1))
+    unit_seconds = {
+        "m": 60,
+        "h": 3600,
+        "d": 86_400,
+        "w": 604_800,
+    }
+    return reference.astimezone(timezone.utc) - timedelta(
+        seconds=count * unit_seconds[match.group(2)]
+    )
+
+
+def _load_history_cursor(
+    path: Path,
+    target: DiscoverTarget,
+) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+    if path.is_symlink() or path.stat().st_size > MAX_SCAN_CURSOR_BYTES:
+        raise ValueError("history cursor file is invalid")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("history cursor file is unreadable") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != HISTORY_CURSOR_SCHEMA_VERSION
+        or payload.get("source_sha256") != _history_source_sha256(target)
+    ):
+        raise ValueError("history cursor does not match the configured log source")
+    range_from = _parse_utc_timestamp(str(payload.get("range_from", "")))
+    next_before = _parse_utc_timestamp(str(payload.get("next_before", "")))
+    if next_before < range_from:
+        raise ValueError("history cursor boundary is invalid")
+    pending_from = str(payload.get("pending_from", "")).strip()
+    pending_to = str(payload.get("pending_to", "")).strip()
+    if bool(pending_from) != bool(pending_to):
+        raise ValueError("history cursor pending window is invalid")
+    if pending_from:
+        pending_start = _parse_utc_timestamp(pending_from)
+        pending_end = _parse_utc_timestamp(pending_to)
+        if not range_from <= next_before <= pending_start < pending_end:
+            raise ValueError("history cursor pending window is invalid")
+    return payload
+
+
+def _save_history_cursor(
+    path: Path,
+    target: DiscoverTarget,
+    *,
+    range_from: datetime,
+    next_before: datetime,
+    summary_path: Path,
+    pending_from: Optional[datetime] = None,
+    pending_to: Optional[datetime] = None,
+) -> None:
+    if next_before < range_from:
+        raise ValueError("history cursor boundary is invalid")
+    if (pending_from is None) != (pending_to is None):
+        raise ValueError("history cursor pending window is invalid")
+    if pending_from is not None and pending_to is not None and not (
+        range_from <= next_before <= pending_from < pending_to
+    ):
+        raise ValueError("history cursor pending window is invalid")
+    _atomic_write_json(
+        path,
+        {
+            "schema_version": HISTORY_CURSOR_SCHEMA_VERSION,
+            "source_sha256": _history_source_sha256(target),
+            "range_from": _format_utc_timestamp(range_from),
+            "next_before": _format_utc_timestamp(next_before),
+            "pending_from": (
+                _format_utc_timestamp(pending_from)
+                if pending_from is not None
+                else ""
+            ),
+            "pending_to": (
+                _format_utc_timestamp(pending_to)
+                if pending_to is not None
+                else ""
+            ),
             "last_summary": str(summary_path),
             "updated_at": _format_utc_timestamp(datetime.now(timezone.utc)),
         },
@@ -584,12 +917,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional local non-secret cursor advanced only after a complete scan.",
     )
     parser.add_argument(
+        "--history-state-file",
+        type=Path,
+        help=(
+            "Optional separate cursor for manually scanning older non-empty "
+            "five-minute windows without changing the forward scan cursor."
+        ),
+    )
+    parser.add_argument(
+        "--defer-cursor-commit",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--scan-overlap-seconds",
         type=int,
         default=DEFAULT_SCAN_OVERLAP_SECONDS,
         help=(
             "Overlap before the completed cursor to include delayed events; "
             f"maximum {MAX_SCAN_OVERLAP_SECONDS} seconds."
+        ),
+    )
+    parser.add_argument(
+        "--max-catchup-window-seconds",
+        type=int,
+        default=DEFAULT_MAX_CATCHUP_WINDOW_SECONDS,
+        help=(
+            "Maximum cursor time slice per run; "
+            f"maximum {MAX_CATCHUP_WINDOW_SECONDS} seconds, "
+            "zero scans through the current cutoff."
+        ),
+    )
+    parser.add_argument(
+        "--find-next-error-window",
+        action="store_true",
+        help=(
+            "Use a count-only five-minute histogram to skip empty cursor "
+            "ranges before fetching the next error documents."
+        ),
+    )
+    parser.add_argument(
+        "--scan-delay-seconds",
+        type=int,
+        default=DEFAULT_SCAN_DELAY_SECONDS,
+        help=(
+            "Keep the cursor behind current time to allow delayed ingestion; "
+            f"maximum {MAX_SCAN_DELAY_SECONDS} seconds."
         ),
     )
     parser.add_argument(
@@ -645,6 +1018,38 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if not 0 <= args.max_catchup_window_seconds <= MAX_CATCHUP_WINDOW_SECONDS:
+        print(
+            "error: --max-catchup-window-seconds must be between 0 and "
+            f"{MAX_CATCHUP_WINDOW_SECONDS}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.find_next_error_window and args.scan_state_file is None:
+        print(
+            "error: --find-next-error-window requires --scan-state-file",
+            file=sys.stderr,
+        )
+        return 2
+    if args.scan_state_file is not None and args.history_state_file is not None:
+        print(
+            "error: --scan-state-file and --history-state-file are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
+    if args.find_next_error_window and args.history_state_file is not None:
+        print(
+            "error: --find-next-error-window cannot be used with --history-state-file",
+            file=sys.stderr,
+        )
+        return 2
+    if not 0 <= args.scan_delay_seconds <= MAX_SCAN_DELAY_SECONDS:
+        print(
+            "error: --scan-delay-seconds must be between 0 and "
+            f"{MAX_SCAN_DELAY_SECONDS}",
+            file=sys.stderr,
+        )
+        return 2
     if args.generate and args.max_candidates > MAX_GENERATE_CANDIDATES:
         print(
             f"error: generation is limited to {MAX_GENERATE_CANDIDATES} candidates per run",
@@ -694,20 +1099,69 @@ def main(argv: Optional[List[str]] = None) -> int:
             else None
         )
         target = parse_discover_url(args.discover_url)
-        scan_cutoff = datetime.now(timezone.utc)
+        scan_reference = datetime.now(timezone.utc)
+        scan_cutoff = scan_reference
         initializing_cursor = False
-        if args.scan_state_file is not None:
+        cursor: Optional[Dict[str, Any]] = None
+        history_mode = args.history_state_file is not None
+        history_cursor: Optional[Dict[str, Any]] = None
+        history_range_from: Optional[datetime] = None
+        history_next_before: Optional[datetime] = None
+        history_pending_from: Optional[datetime] = None
+        history_pending_to: Optional[datetime] = None
+        if history_mode:
+            if target.time_to != "now":
+                raise ValueError("history scan requires a Discover window ending at now")
+            history_cursor = _load_history_cursor(args.history_state_file, target)
+            if history_cursor is None:
+                history_range_from = _resolve_relative_time(
+                    target.time_from,
+                    scan_reference,
+                )
+                history_next_before = scan_reference - timedelta(
+                    seconds=args.scan_delay_seconds
+                )
+                history_next_before = max(
+                    history_range_from,
+                    history_next_before,
+                )
+            else:
+                history_range_from = _parse_utc_timestamp(
+                    str(history_cursor["range_from"])
+                )
+                history_next_before = _parse_utc_timestamp(
+                    str(history_cursor["next_before"])
+                )
+                if history_cursor.get("pending_from"):
+                    history_pending_from = _parse_utc_timestamp(
+                        str(history_cursor["pending_from"])
+                    )
+                    history_pending_to = _parse_utc_timestamp(
+                        str(history_cursor["pending_to"])
+                    )
+            effective_time_from = _format_utc_timestamp(history_range_from)
+            effective_time_to = _format_utc_timestamp(history_next_before)
+            scan_cutoff = history_next_before
+        elif args.scan_state_file is not None:
             cursor = _load_scan_cursor(args.scan_state_file, target)
             initializing_cursor = cursor is None
             effective_time_from, effective_time_to, scan_cutoff = _scan_window(
                 target,
                 cursor,
                 args.scan_overlap_seconds,
+                args.max_catchup_window_seconds,
+                args.scan_delay_seconds,
                 now=scan_cutoff,
             )
         else:
             effective_time_from = target.time_from
             effective_time_to = target.time_to
+        planned_time_from = effective_time_from
+        planned_time_to = effective_time_to
+        if args.find_next_error_window and cursor is not None:
+            planned_time_from = _format_utc_timestamp(
+                _parse_utc_timestamp(str(cursor["completed_through"]))
+            )
         raw_key = os.environ.get(kibana_sanitizer.HMAC_KEY_ENV, "").encode("utf-8")
         if len(raw_key) < kibana_sanitizer.MIN_HMAC_KEY_BYTES:
             raise ValueError(
@@ -720,7 +1174,74 @@ def main(argv: Optional[List[str]] = None) -> int:
             timeout_seconds=args.timeout_seconds,
         )
         index_pattern, time_field = client.resolve_index_pattern()
-        if initializing_cursor:
+        backlog_remaining = False
+        completed_through = scan_cutoff
+        error_window_discovery_used = False
+        empty_error_range_skipped = False
+        cursor_already_at_safe_cutoff = False
+        history_exhausted = False
+        if history_mode:
+            error_window_discovery_used = True
+            if history_pending_from is not None and history_pending_to is not None:
+                discovered_window = (
+                    _format_utc_timestamp(history_pending_from),
+                    _format_utc_timestamp(history_pending_to),
+                )
+            elif history_next_before <= history_range_from:
+                discovered_window = None
+            else:
+                discovered_window = client.find_previous_error_window(
+                    index_pattern,
+                    time_field,
+                    time_from=_format_utc_timestamp(history_range_from),
+                    time_to=_format_utc_timestamp(history_next_before),
+                )
+            if discovered_window is None:
+                hits = []
+                batch = None
+                history_exhausted = True
+                empty_error_range_skipped = True
+                history_next_before = history_range_from
+                effective_time_from = _format_utc_timestamp(history_range_from)
+                effective_time_to = effective_time_from
+            else:
+                effective_time_from, effective_time_to = discovered_window
+                batch = client.fetch_error_hits(
+                    index_pattern,
+                    time_field,
+                    args.fetch_size,
+                    time_from=effective_time_from,
+                    time_to=effective_time_to,
+                    max_scan_hits=args.max_scan_hits,
+                )
+                if isinstance(batch, ErrorHitBatch):
+                    hits = batch.hits
+                    completed_through = _parse_utc_timestamp(
+                        batch.completed_through
+                    )
+                    backlog_remaining = batch.backlog_remaining
+                    history_next_before = min(
+                        history_next_before,
+                        _parse_utc_timestamp(effective_time_from),
+                    )
+                    if backlog_remaining:
+                        history_pending_from = completed_through
+                        history_pending_to = _parse_utc_timestamp(
+                            effective_time_to
+                        )
+                    else:
+                        history_pending_from = None
+                        history_pending_to = None
+                else:
+                    # Preserve compatibility with bounded injected adapters.
+                    hits = batch
+                    history_next_before = min(
+                        history_next_before,
+                        _parse_utc_timestamp(effective_time_from),
+                    )
+                    history_pending_from = None
+                    history_pending_to = None
+        elif initializing_cursor:
             hits = client.fetch_latest_error_hits(
                 index_pattern,
                 time_field,
@@ -729,14 +1250,59 @@ def main(argv: Optional[List[str]] = None) -> int:
                 time_to=effective_time_to,
             )
         else:
-            hits = client.fetch_error_hits(
-                index_pattern,
-                time_field,
-                args.fetch_size,
-                time_from=effective_time_from,
-                time_to=effective_time_to,
-                max_scan_hits=args.max_scan_hits,
-            )
+            if (
+                args.find_next_error_window
+                and _parse_utc_timestamp(planned_time_to)
+                <= _parse_utc_timestamp(planned_time_from)
+            ):
+                hits = []
+                batch = None
+                cursor_already_at_safe_cutoff = True
+            elif args.find_next_error_window:
+                error_window_discovery_used = True
+                discovered_window = client.find_next_error_window(
+                    index_pattern,
+                    time_field,
+                    time_from=planned_time_from,
+                    time_to=planned_time_to,
+                )
+                if discovered_window is None:
+                    hits = []
+                    batch = None
+                    empty_error_range_skipped = True
+                else:
+                    effective_time_from, effective_time_to = discovered_window
+                    scan_cutoff = _parse_utc_timestamp(effective_time_to)
+                    completed_through = scan_cutoff
+                    batch = client.fetch_error_hits(
+                        index_pattern,
+                        time_field,
+                        args.fetch_size,
+                        time_from=effective_time_from,
+                        time_to=effective_time_to,
+                        max_scan_hits=args.max_scan_hits,
+                    )
+            else:
+                batch = client.fetch_error_hits(
+                    index_pattern,
+                    time_field,
+                    args.fetch_size,
+                    time_from=effective_time_from,
+                    time_to=effective_time_to,
+                    max_scan_hits=args.max_scan_hits,
+                )
+            if isinstance(batch, ErrorHitBatch):
+                hits = batch.hits
+                completed_through = _parse_utc_timestamp(batch.completed_through)
+                backlog_remaining = batch.backlog_remaining
+                if backlog_remaining and args.scan_state_file is None:
+                    raise ValueError(
+                        "backlog batching requires --scan-state-file; "
+                        "no partial result was written"
+                    )
+            elif batch is not None:
+                # Preserve compatibility with bounded injected adapters.
+                hits = batch
         published_state = _load_published(args.state_file)
         seen = published_state.setdefault("published", {})
 
@@ -836,10 +1402,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         selection["rejected_candidate_limit"] = max(
             0, len(unpublished_incidents) - len(candidates)
         )
-        if args.scan_state_file is not None and selection["rejected_candidate_limit"]:
+        if (
+            args.scan_state_file is not None
+            or args.history_state_file is not None
+        ) and selection["rejected_candidate_limit"]:
             raise ValueError(
                 "incident backlog exceeds the candidate limit; "
-                "scan cursor was not advanced"
+                "log cursor was not advanced"
             )
 
         config = _gateway_config(args.prompt_api_key) if args.generate else None
@@ -861,18 +1430,63 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "max_scan_hits": args.max_scan_hits,
                 "initial_scan_hits": args.initial_scan_hits,
                 "scan_mode": (
-                    "initial_latest"
+                    "history_backfill_batch"
+                    if history_mode
+                    else "initial_latest"
                     if initializing_cursor
+                    else "incremental_backlog_batch"
+                    if backlog_remaining
                     else "incremental_cursor"
                     if args.scan_state_file is not None
                     else "bounded_window"
                 ),
                 "effective_time_from": effective_time_from,
                 "effective_time_to": effective_time_to,
+                "planned_time_from": planned_time_from,
+                "planned_time_to": planned_time_to,
+                "error_window_discovery_used": error_window_discovery_used,
+                "empty_error_range_skipped": empty_error_range_skipped,
+                "cursor_already_at_safe_cutoff": cursor_already_at_safe_cutoff,
                 "cursor_overlap_seconds": args.scan_overlap_seconds,
+                "catchup_window_seconds": args.max_catchup_window_seconds,
+                "scan_delay_seconds": args.scan_delay_seconds,
+                "cursor_time_field": time_field,
                 "cursor_enabled": args.scan_state_file is not None,
+                "cursor_commit_deferred": bool(
+                    args.scan_state_file is not None
+                    and args.defer_cursor_commit
+                ),
+                "history_cursor_enabled": history_mode,
+                "history_cursor_commit_deferred": bool(
+                    history_mode and args.defer_cursor_commit
+                ),
+                "history_range_from": (
+                    _format_utc_timestamp(history_range_from)
+                    if history_range_from is not None
+                    else ""
+                ),
+                "history_next_before": (
+                    _format_utc_timestamp(history_next_before)
+                    if history_next_before is not None
+                    else ""
+                ),
+                "history_pending_from": (
+                    _format_utc_timestamp(history_pending_from)
+                    if history_pending_from is not None
+                    else ""
+                ),
+                "history_pending_to": (
+                    _format_utc_timestamp(history_pending_to)
+                    if history_pending_to is not None
+                    else ""
+                ),
+                "history_exhausted": history_exhausted,
                 "timeout_seconds": args.timeout_seconds,
                 "returned_hits": len(hits),
+                "batch_completed_through": _format_utc_timestamp(
+                    completed_through
+                ),
+                "backlog_remaining": backlog_remaining,
                 "incident_candidate_limit": args.max_candidates,
             },
             "mode": (
@@ -1016,12 +1630,32 @@ def main(argv: Optional[List[str]] = None) -> int:
             summary["candidates"].append(item)
         summary_path = run_dir / "summary.json"
         _atomic_write_json(summary_path, summary)
-        if args.scan_state_file is not None:
+        if (
+            args.scan_state_file is not None
+            and not args.defer_cursor_commit
+        ):
             _save_scan_cursor(
                 args.scan_state_file,
                 target,
-                scan_cutoff,
+                completed_through,
                 summary_path,
+                backlog_pending=backlog_remaining,
+                backlog_target_through=(
+                    scan_cutoff if backlog_remaining else None
+                ),
+            )
+        if (
+            args.history_state_file is not None
+            and not args.defer_cursor_commit
+        ):
+            _save_history_cursor(
+                args.history_state_file,
+                target,
+                range_from=history_range_from,
+                next_before=history_next_before,
+                summary_path=summary_path,
+                pending_from=history_pending_from,
+                pending_to=history_pending_to,
             )
     except (FileExistsError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

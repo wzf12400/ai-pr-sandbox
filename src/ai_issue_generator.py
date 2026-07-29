@@ -26,6 +26,7 @@ MAX_INPUT_CHARS = 30_000
 MAX_SOURCE_TEXT_CHARS = 16_000
 MAX_TITLE_CHARS = 160
 MAX_LIST_ITEMS = 12
+MAX_EVIDENCE_ITEMS = 24
 SPECULATION_MARKERS = (
     "i assume",
     "i may misinterpret",
@@ -635,10 +636,14 @@ def _has_known_value(value: Any) -> bool:
 
 def _actionable_unsupported_claims(draft: Dict[str, Any], paths: List[str]) -> List[str]:
     classifications = {"$.request_type", "$.severity"}
+    meta_information_prefixes = (
+        "$.missing_information[",
+        "$.clarifying_questions[",
+    )
     values = dict(_path_values(draft))
     actionable: List[str] = []
     for path in paths:
-        if path in classifications:
+        if path in classifications or path.startswith(meta_information_prefixes):
             continue
         if path not in values or _has_known_value(values[path]):
             actionable.append(path)
@@ -708,9 +713,13 @@ def validate_draft(draft: Dict[str, Any], evidence: Dict[str, Any]) -> Tuple[Lis
 
     if not 1 <= len(draft["title"].strip()) <= MAX_TITLE_CHARS:
         errors.append(f"$.title must contain 1 to {MAX_TITLE_CHARS} characters")
-    for key in ("acceptance_criteria", "missing_information", "clarifying_questions", "evidence"):
+    for key in ("acceptance_criteria", "missing_information", "clarifying_questions"):
         if len(draft[key]) > MAX_LIST_ITEMS:
             errors.append(f"$.{key} must not contain more than {MAX_LIST_ITEMS} items")
+    if len(draft["evidence"]) > MAX_EVIDENCE_ITEMS:
+        errors.append(
+            f"$.evidence must not contain more than {MAX_EVIDENCE_ITEMS} items"
+        )
     if len(draft["reproduction"]["steps"]) > MAX_LIST_ITEMS:
         errors.append(f"$.reproduction.steps must not contain more than {MAX_LIST_ITEMS} items")
     for path, items in (
@@ -776,7 +785,10 @@ def validate_draft(draft: Dict[str, Any], evidence: Dict[str, Any]) -> Tuple[Lis
         errors.append("expected behavior requires a dedicated expected-behavior evidence field")
 
     target = draft["object"]
-    if not any(_known(target[key]) for key in ("service", "module", "code_object")):
+    if not any(
+        _known(target[key])
+        for key in ("repository", "service", "module", "code_object")
+    ):
         errors.append("AI output must identify at least one object field from evidence")
     request_type = draft["request_type"]
     has_observed_problem = _known(draft["error"]["message"]) or _known(
@@ -823,7 +835,9 @@ Preserve the source language. Extract explicitly named software objects such as 
 methods, modules, services, or endpoints, but never infer unnamed ones. Never invent a repository, service, interface, error,
 impact, reproduction step, owner, severity, or expected behavior. Use the exact string
 "unknown" when evidence is absent. Put important gaps in missing_information and ask
-short questions in clarifying_questions. Put a hypothesis explicitly stated by the source
+short questions in clarifying_questions. Describe gaps in user-facing terms without
+mentioning internal JSON paths, schema fields, prompt variables, or validation mechanics.
+Use no more than 24 evidence mappings. Put a hypothesis explicitly stated by the source
 only in problem.reported_hypothesis with attribution; otherwise use "unknown". Never put
 hypotheses in background, current_behavior, expected_behavior, or error fields. Keep problem.background
 concise and do not copy the full source body. If expected behavior
@@ -843,8 +857,11 @@ claim with the supplied evidence. Reject fabricated or sensitive content. Use
 needs_clarification when the draft is faithful but critical facts are unknown. Return only
 the requested strict JSON. The exact string "unknown" and empty arrays represent missing
 information, not unsupported claims; do not list them in unsupported_claim_paths.
-request_type and severity are classifications, not factual claims. You do not authorize
-publication or implementation."""
+request_type and severity are classifications, not factual claims. missing_information
+and clarifying_questions are meta-level descriptions of absent evidence, not positive
+factual claims. Do not mark them unsupported merely because the missing fact is absent;
+reject them only if they themselves assert a positive fact that the evidence does not
+support. You do not authorize publication or implementation."""
 
 
 def generate_issue(

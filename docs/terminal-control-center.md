@@ -57,27 +57,55 @@ The first `watch` asks for:
 - a dedicated read-only username;
 - a password entered without echo.
 
-After the non-secret source is configured, interactive `logs` and `--logs`
-reuse its Discover target and read-only username. They ask only for the
-process-only password. Explicit `--discover-url` or `--username` values may
-still override the local defaults.
+Run `log setup` (or `日志配置`) once in the interactive terminal to save the
+non-secret source and read-only username. On macOS, the command delegates the
+password prompt directly to the system `security` tool with `-w` as the final
+option, so the password is not placed in a command argument or application
+configuration. Later `logs`, `log more`, `watch`, and `--logs` runs reuse the
+source and username and automatically read the password from Keychain.
+Explicit `--discover-url` or `--username` values may still override the local
+defaults.
 
 The parsed base URL, data-view ID, bounded relative time range, read-only
 username, and interval are saved in the ignored owner-only local configuration.
 The same `logs` object stores `initial_scan_hits` (default `30`, maximum `100`)
 and `max_scan_hits` (default `1000`, maximum `5000`), so both persistent limits
 can be changed without changing the startup command.
-The password is held in process memory only. It may also be supplied as
-`OPENSEARCH_PASSWORD` by the employee's local process manager; it is never
-written by this application. HTTP 401 responses trigger up to three hidden
-password attempts within the current action; an empty retry returns to the
-interactive prompt. A local owner-only HMAC key is
+The password is held in process memory only while a scan is active. It may
+instead be supplied as `OPENSEARCH_PASSWORD` by the employee's local process
+manager. The application never writes it to JSON, Git, audit output, or a
+command argument. HTTP 401 responses trigger up to three hidden password
+attempts within the current action; an empty retry returns to the interactive
+prompt. Run `log setup` again to replace a stale Keychain item. A local
+owner-only HMAC key is
 created under `.issue-entry-state/` so event references remain stable without
 storing raw identifiers. A new cursor starts from the latest 30 errors rather
 than draining the historical two-hour backlog. Later polls overlap the previous
-completed window by five minutes, read 50-record pages from one fixed snapshot,
-and advance the cursor only after the whole bounded incremental scan succeeds.
-If new backlog exceeds the limit, the poll fails without advancing the cursor.
+completed window by five minutes and read 50-record pages in ascending event
+time. To avoid sorting the full backlog, each poll first performs a count-only
+five-minute histogram (`size: 0`) using the same error predicate. Empty time
+buckets return no documents and can be skipped; only the earliest bucket that
+contains an error is fetched and sanitized. The safe cutoff remains 15 minutes
+behind current time so normally delayed writes can settle before the cursor
+passes them. If the whole backlog contains no matching errors, the accepted
+empty summary advances the cursor only to that delayed cutoff. This is bounded
+late-arrival protection based on `@timestamp`, not an absolute ingestion-time
+guarantee. If the selected bucket exceeds `max_scan_hits`, the connector commits
+only events strictly before a complete timestamp boundary and resumes on the
+next poll. Each batch is grouped, persisted, and ingested into the inbox before
+its cursor boundary advances. A failed batch leaves that boundary unchanged.
+More than one full batch sharing exactly the same timestamp still fails closed
+because no lossless time boundary exists.
+
+If the initial latest-30 sample contains no safe candidate, the terminal now
+prints `log more / 继续扫描`. This manual history command uses a separate
+owner-only history cursor. It finds the latest non-empty five-minute bucket
+before its current boundary, reads and sanitizes that complete bucket, ingests
+the result into the inbox, and only then moves backward. Repeating `log more`
+continues toward the Discover range's lower bound. It never rewinds or changes
+the normal forward `@timestamp` cursor, and a failed inbox write leaves the
+history boundary unchanged.
+
 All sanitized incidents are retained in the inbox even when the interactive
 selector shows only the first 20. Raw responses and credentials are not written
 to disk. Blocked records do not enter AI. Repeated incident references or
