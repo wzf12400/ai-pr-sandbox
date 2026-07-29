@@ -1,3 +1,4 @@
+import errno
 import io
 import json
 import os
@@ -186,6 +187,15 @@ class TerminalControlCenterTest(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "requires a POSIX pseudo-terminal")
     def test_interactive_input_deletes_complete_chinese_characters(self):
         master, slave = pty.openpty()
+
+        def read_master():
+            try:
+                return os.read(master, 4096)
+            except OSError as exc:
+                if exc.errno == errno.EIO:
+                    return b""
+                raise
+
         repository = Path(__file__).resolve().parents[1]
         process = subprocess.Popen(
             [
@@ -209,7 +219,7 @@ class TerminalControlCenterTest(unittest.TestCase):
             while b"PROMPT> " not in output and time.monotonic() < deadline:
                 ready, _, _ = select.select([master], [], [], 0.1)
                 if ready:
-                    chunk = os.read(master, 4096)
+                    chunk = read_master()
                     if not chunk:
                         break
                     output.extend(chunk)
@@ -220,7 +230,7 @@ class TerminalControlCenterTest(unittest.TestCase):
             while process.poll() is None and time.monotonic() < deadline:
                 ready, _, _ = select.select([master], [], [], 0.1)
                 if ready:
-                    chunk = os.read(master, 4096)
+                    chunk = read_master()
                     if not chunk:
                         break
                     output.extend(chunk)
@@ -229,13 +239,10 @@ class TerminalControlCenterTest(unittest.TestCase):
                 ready, _, _ = select.select([master], [], [], 0)
                 if not ready:
                     break
-                try:
-                    chunk = os.read(master, 4096)
-                    if not chunk:
-                        break
-                    output.extend(chunk)
-                except OSError:
+                chunk = read_master()
+                if not chunk:
                     break
+                output.extend(chunk)
         finally:
             os.close(master)
             if process.poll() is None:
