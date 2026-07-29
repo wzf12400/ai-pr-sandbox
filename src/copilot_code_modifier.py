@@ -458,6 +458,25 @@ def evaluate_issue_approval(
 ) -> Dict[str, Any]:
     markers = FINGERPRINT_PATTERN.findall(issue.body)
     findings = find_sensitive_data({"title": issue.title, "body": issue.body})
+    review_needs_clarification = bool(
+        re.search(
+            r"(?im)^- (?:State:\s*needs_human_context|"
+            r"AI review verdict:\s*needs_clarification)\s*$",
+            issue.body,
+        )
+    )
+    acceptance_section = re.search(
+        r"(?ims)^## Acceptance Criteria\s*\n(?P<content>.*?)(?=^## |\Z)",
+        issue.body,
+    )
+    acceptance_unknown = bool(
+        acceptance_section
+        and re.fullmatch(
+            r"\s*(?:[-*]\s*)?(?:\[[ xX]\]\s*)?(?:none|unknown)[.!]?\s*",
+            acceptance_section.group("content"),
+            re.IGNORECASE,
+        )
+    )
     rules = {
         "repository_matches_policy": issue.repository.casefold()
         == policy.repository.casefold(),
@@ -469,6 +488,8 @@ def evaluate_issue_approval(
         "required_labels_present": set(policy.required_labels) <= set(issue.labels),
         "one_automation_fingerprint": len(markers) == 1,
         "no_sensitive_data_detected": not findings,
+        "review_does_not_need_clarification": not review_needs_clarification,
+        "acceptance_criteria_are_known": not acceptance_unknown,
         "draft_pr_only": policy.draft_pr_only and not policy.auto_merge,
     }
     return {
