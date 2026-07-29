@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import ssl
 import tempfile
 import unittest
 import urllib.parse
@@ -1158,6 +1159,29 @@ class KibanaIssueConnectorTest(unittest.TestCase):
             client.resolve_index_pattern()
 
         self.assertNotIn("synthetic transport detail", str(raised.exception))
+
+    def test_client_normalizes_ssl_read_timeout_without_remote_details(self):
+        target = DiscoverTarget(
+            base_url="https://logs.example.test/_dashboards",
+            data_view_id="data-view-1",
+            time_from="now-2h",
+            time_to="now",
+        )
+
+        def timeout_opener(request, timeout):
+            raise ssl.SSLError("The read operation timed out")
+
+        client = OpenSearchDashboardsClient(
+            target,
+            DashboardCredentials("reader", "password"),
+            timeout_seconds=60,
+            opener=timeout_opener,
+        )
+
+        with self.assertRaisesRegex(ValueError, "timed out after 60 seconds") as raised:
+            client.resolve_index_pattern()
+
+        self.assertNotIn("read operation", str(raised.exception).casefold())
 
     def test_rejects_out_of_range_timeout_before_credentials(self):
         with contextlib.redirect_stderr(io.StringIO()):

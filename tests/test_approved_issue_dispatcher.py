@@ -626,6 +626,35 @@ class ApprovedIssueDispatcherTest(unittest.TestCase):
         candidate_client.list_open_issues.assert_not_called()
         workflow.assert_not_called()
 
+    def test_explicit_closed_issue_reports_precise_failure_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = initialize_repo(Path(directory))
+            closed_issue = ApprovedIssue(
+                **{
+                    **approved_issue().__dict__,
+                    "state": "CLOSED",
+                }
+            )
+            workflow = mock.Mock()
+
+            report = dispatch_once(
+                repo,
+                repo / ".github" / "issue-code-policy.json",
+                mock.Mock(),
+                FakeIssueClient(closed_issue),
+                FakeStateInspector(),
+                FakeModifier(),
+                target_issue_url=ISSUE_URL,
+                workflow_runner=workflow,
+            )
+
+        self.assertEqual("blocked", report["status"])
+        self.assertEqual(
+            "approved_issue_not_open",
+            report["dispatch"]["failure_reason"],
+        )
+        workflow.assert_not_called()
+
     def test_explicit_target_must_be_canonical_for_policy_repository(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = initialize_repo(Path(directory))

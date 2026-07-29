@@ -249,6 +249,15 @@ def issue_fingerprint(generation: Mapping[str, Any], repository: str) -> str:
     interface = _mapping(draft.get("interface"))
     error = _mapping(draft.get("error"))
     problem = _mapping(draft.get("problem"))
+    revision = _mapping(generation.get("revision"))
+    revision_parent = _text(revision.get("parent_issue_url"))
+    revision_request_sha256 = _text(revision.get("request_sha256"))
+    if revision and (
+        revision.get("schema_version") != "issue-revision/v1"
+        or not ISSUE_URL_PATTERN.fullmatch(revision_parent)
+        or not SHA256_PATTERN.fullmatch(revision_request_sha256)
+    ):
+        raise ValueError("Issue revision metadata is invalid")
     material = {
         "version": FINGERPRINT_VERSION,
         "repository": repository.casefold(),
@@ -261,6 +270,8 @@ def issue_fingerprint(generation: Mapping[str, Any], repository: str) -> str:
         "exception_type": _normalized(error.get("exception_type")),
         "error_message": _normalized(error.get("message")),
         "current_behavior": _normalized(problem.get("current_behavior")),
+        "revision_parent": revision_parent.casefold(),
+        "revision_request_sha256": revision_request_sha256,
     }
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -285,6 +296,13 @@ def render_automated_issue_body(
         "- AI implementation permission: separate downstream policy required",
         1,
     )
+    revision = _mapping(generation.get("revision"))
+    if revision:
+        body += (
+            "\n\n## Revision lineage\n\n"
+            f"- Revision of: {revision['parent_issue_url']}\n"
+            "- This revision requires an independent human approval.\n"
+        )
     body += (
         "\n\n## Automated routing audit\n\n"
         f"- Resolution policy: `{RESOLUTION_POLICY_VERSION}`\n"
@@ -315,6 +333,7 @@ def match_existing_issues(
         "interface_path": _normalized(interface.get("path_or_topic")),
         "interface_method": _normalized(interface.get("method")),
     }
+    is_revision = bool(_mapping(generation.get("revision")))
     candidates = []
     for issue in issues[:MAX_ISSUES_SCANNED]:
         body = _text(issue.get("body"))
@@ -322,6 +341,8 @@ def match_existing_issues(
         exact = marker in body
         score = 100 if exact else 0
         reasons = ["exact deterministic fingerprint"] if exact else []
+        if not exact and is_revision:
+            continue
         if not exact:
             if title and _normalized(issue.get("title")) == title:
                 score += 35
@@ -355,16 +376,35 @@ def match_existing_issues(
             }
         )
     candidates.sort(key=lambda item: (-item["score"], item["number"]))
-    exact_candidates = [item for item in candidates if item["exact_fingerprint"]]
-    if len(exact_candidates) == 1:
+    open_candidates = [
+        item for item in candidates if item["state"].casefold() == "open"
+    ]
+    open_exact_candidates = [
+        item for item in open_candidates if item["exact_fingerprint"]
+    ]
+    closed_exact_candidates = [
+        item
+        for item in candidates
+        if item["exact_fingerprint"] and item["state"].casefold() == "closed"
+    ]
+    if len(open_exact_candidates) == 1:
         status = "existing_issue_candidate"
-        selected = exact_candidates[0]
-    elif len(exact_candidates) > 1 or len(candidates) > 1:
+        selected = open_exact_candidates[0]
+    elif len(open_exact_candidates) > 1:
         status = "ambiguous_existing_issues"
         selected = None
-    elif len(candidates) == 1:
+    elif len(closed_exact_candidates) == 1:
+        status = "closed_issue_candidate"
+        selected = closed_exact_candidates[0]
+    elif len(closed_exact_candidates) > 1:
+        status = "ambiguous_existing_issues"
+        selected = None
+    elif len(open_candidates) == 1:
         status = "existing_issue_candidate"
-        selected = candidates[0]
+        selected = open_candidates[0]
+    elif len(open_candidates) > 1:
+        status = "ambiguous_existing_issues"
+        selected = None
     else:
         status = "new_issue"
         selected = None
@@ -561,6 +601,17 @@ def automate_repository_issue(
         output["publication"].update(
             {
                 "status": "deduplicated",
+                "issue_url": selected["url"],
+                "issue_number": selected["number"],
+            }
+        )
+        return output
+    if issue_match["status"] == "closed_issue_candidate":
+        selected = issue_match["selected"]
+        output["approval"]["approved"] = True
+        output["publication"].update(
+            {
+                "status": "already_completed",
                 "issue_url": selected["url"],
                 "issue_number": selected["number"],
             }

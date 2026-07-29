@@ -200,6 +200,68 @@ class RepositoryIssueAutomationTest(unittest.TestCase):
         self.assertEqual([], client.create_calls)
         self.assertFalse(result["issue_match"]["raw_issue_bodies_persisted"])
 
+    def test_closed_exact_fingerprint_is_reported_as_completed_without_write(self):
+        generated = generation()
+        body, _ = render_automated_issue_body(generated, REPOSITORIES[0], policy())
+        existing = {
+            "number": 7,
+            "title": generated["draft"]["title"],
+            "body": body,
+            "url": f"https://github.com/{REPOSITORIES[0]}/issues/7",
+            "state": "CLOSED",
+        }
+        client = FakeIssueClient([existing])
+
+        result = automate_repository_issue(
+            generated,
+            {"safety": {"ai_allowed": True, "security_review_required": False}},
+            scope(),
+            FakeSearchAdapter(),
+            "github-tree-probe",
+            policy(),
+            client,
+            True,
+        )
+
+        self.assertTrue(result["approval"]["approved"])
+        self.assertEqual("closed_issue_candidate", result["issue_match"]["status"])
+        self.assertEqual("already_completed", result["publication"]["status"])
+        self.assertEqual(existing["url"], result["publication"]["issue_url"])
+        self.assertEqual([], client.create_calls)
+
+    def test_open_exact_fingerprint_wins_over_closed_duplicate(self):
+        generated = generation()
+        body, _ = render_automated_issue_body(generated, REPOSITORIES[0], policy())
+        closed = {
+            "number": 7,
+            "title": generated["draft"]["title"],
+            "body": body,
+            "url": f"https://github.com/{REPOSITORIES[0]}/issues/7",
+            "state": "CLOSED",
+        }
+        opened = {
+            **closed,
+            "number": 8,
+            "url": f"https://github.com/{REPOSITORIES[0]}/issues/8",
+            "state": "OPEN",
+        }
+        client = FakeIssueClient([closed, opened])
+
+        result = automate_repository_issue(
+            generated,
+            {"safety": {"ai_allowed": True, "security_review_required": False}},
+            scope(),
+            FakeSearchAdapter(),
+            "github-tree-probe",
+            policy(),
+            client,
+            False,
+        )
+
+        self.assertEqual("existing_issue_candidate", result["issue_match"]["status"])
+        self.assertEqual("deduplicated", result["publication"]["status"])
+        self.assertEqual(opened["url"], result["publication"]["issue_url"])
+
     def test_security_review_blocks_before_issue_search(self):
         client = FakeIssueClient()
         search = FakeSearchAdapter()
@@ -274,6 +336,69 @@ class RepositoryIssueAutomationTest(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertRegex(first, r"^[0-9a-f]{64}$")
+
+    def test_revision_fingerprint_is_versioned_from_parent_and_new_request(self):
+        generated = generation()
+        base = issue_fingerprint(generated, REPOSITORIES[0])
+        generated["revision"] = {
+            "schema_version": "issue-revision/v1",
+            "parent_issue_url": (
+                f"https://github.com/{REPOSITORIES[0]}/issues/7"
+            ),
+            "request_sha256": "d" * 64,
+        }
+
+        revised = issue_fingerprint(generated, REPOSITORIES[0])
+        body, _ = render_automated_issue_body(
+            generated,
+            REPOSITORIES[0],
+            policy(),
+        )
+
+        self.assertNotEqual(base, revised)
+        self.assertEqual(revised, issue_fingerprint(generated, REPOSITORIES[0]))
+        self.assertIn("## Revision lineage", body)
+        self.assertIn("/issues/7", body)
+
+    def test_revision_does_not_heuristically_reuse_the_parent_issue(self):
+        generated = generation()
+        parent_body, _ = render_automated_issue_body(
+            generated,
+            REPOSITORIES[0],
+            policy(),
+        )
+        generated["revision"] = {
+            "schema_version": "issue-revision/v1",
+            "parent_issue_url": (
+                f"https://github.com/{REPOSITORIES[0]}/issues/7"
+            ),
+            "request_sha256": "e" * 64,
+        }
+        parent = {
+            "number": 7,
+            "title": generated["draft"]["title"],
+            "body": parent_body,
+            "url": f"https://github.com/{REPOSITORIES[0]}/issues/7",
+            "state": "CLOSED",
+        }
+        client = FakeIssueClient([parent])
+
+        result = automate_repository_issue(
+            generated,
+            {"safety": {"ai_allowed": True, "security_review_required": False}},
+            scope(),
+            FakeSearchAdapter(),
+            "github-tree-probe",
+            policy(),
+            client,
+            False,
+        )
+
+        self.assertEqual("new_issue", result["issue_match"]["status"])
+        self.assertEqual(
+            "approved_not_published",
+            result["publication"]["status"],
+        )
 
     def test_policy_digest_and_scope_digest_are_both_bound(self):
         with tempfile.TemporaryDirectory() as directory:

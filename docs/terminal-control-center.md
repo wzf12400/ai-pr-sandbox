@@ -26,6 +26,21 @@ an artificial error message or description of current behavior. Bug,
 performance, and security reports must still contain an observed problem.
 Unknown facts remain unknown.
 
+An exact fingerprint may reuse only an OPEN Issue. If the exact match is
+closed, preparation stops before the approval prompt and reports that completed
+Issue. The terminal then offers `r` to create an independent revision task.
+The employee must describe a concrete unfinished item, new behavior, or new
+acceptance criterion; generic inputs such as “retry” or “重做” are rejected.
+The revision keeps the closed Issue as immutable lineage, uses a fingerprint
+bound to the parent Issue and sanitized revision request, and presents a new
+human approval before any Issue or code write. It never silently reopens the
+old Issue or reuses its claim, branch, or PR.
+
+Code execution uses a fresh per-run checkout at the current
+`origin/main`, so a branch retained in the configured source checkout cannot
+silently become the next run's base. The source checkout is not switched,
+reset, or cleaned by this preparation.
+
 When the configuration enables exactly one repository, that operator-approved
 scope is the repository decision. The agent does not require the request to
 contain an English class, method, or file name and does not run GitHub code
@@ -74,10 +89,13 @@ can be changed without changing the startup command.
 The password is held in process memory only while a scan is active. It may
 instead be supplied as `OPENSEARCH_PASSWORD` by the employee's local process
 manager. The application never writes it to JSON, Git, audit output, or a
-command argument. HTTP 401 responses trigger up to three hidden password
-attempts within the current action; an empty retry returns to the interactive
-prompt. Run `log setup` again to replace a stale Keychain item. A local
-owner-only HMAC key is
+command argument. Interactive reads use a 60-second per-request timeout and
+retry transient timeouts, connection failures, HTTP 429, or HTTP 502/503/504
+failures at most twice. Exhaustion reports a concise Chinese error and leaves
+both log cursors unchanged. HTTP 401 responses separately trigger up to three
+hidden password attempts within the current action; an empty retry returns to
+the interactive prompt. Run `log setup` again to replace a stale Keychain item.
+A local owner-only HMAC key is
 created under `.issue-entry-state/` so event references remain stable without
 storing raw identifiers. A new cursor starts from the latest 30 errors rather
 than draining the historical two-hour backlog. Later polls overlap the previous

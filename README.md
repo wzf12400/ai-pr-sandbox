@@ -62,7 +62,9 @@ container identifiers, and performs a final secret scan. Unclassified
 high-entropy values block downstream AI and Issue processing. Recognized
 traceback/source paths are normalized first: machine and user prefixes are
 removed, opaque path segments are redacted, and only the useful code suffix is
-retained.
+retained. Short business identifiers assigned to transaction, order, payment,
+purchase, receipt, or trade-number fields are redacted by semantic key even
+when their length or entropy would not trigger the generic detector.
 
 ## Run the phase-one flow
 
@@ -340,13 +342,32 @@ repository resolution, the terminal shows the exact Issue body and one combined
 approval. Approval publishes the Issue, applies repository-owned approval
 labels, claims the exact Issue snapshot, runs Copilot and policy tests, and
 creates a Draft PR. It never merges or deploys.
+Selected Kibana evidence is re-sanitized immediately before the Issue model,
+including incidents already stored in the local inbox. A non-JSON Copilot
+response is retried once with the same safe prompt; neither invalid response is
+persisted or included in the next request. A renewed scan that still finds
+unclassified data remains blocked.
+
+Only an OPEN exact-fingerprint Issue can be reused for code work. A closed
+exact match is reported as already completed before approval, rather than
+failing later in the dispatcher. The same terminal screen offers an `r`
+revision path that requires a concrete unfinished item, new behavior, or new
+acceptance criterion. A revision receives parent-bound fingerprint lineage and
+a completely new human approval; it does not reopen the closed Issue or reuse
+its claim, branch, or PR. Each approved code run creates an ignored, per-run
+checkout from the latest `origin/main`; the configured source checkout is never
+switched, reset, or cleaned, so a branch left by an earlier run does not become
+the next run's execution base.
 
 The persistent log path starts with `./bin/ai-agent watch --once` or
 `./bin/ai-agent watch`. It stores only parsed non-secret connection settings,
 sanitized artifacts, and deduplicated inbox state. In the interactive terminal,
 `log setup` stores the source and username locally and delegates one hidden
 password prompt to macOS Keychain; later scans load it automatically without
-putting it in JSON or a command argument. `log more` uses a separate backward
+putting it in JSON or a command argument. Interactive reads use a 60-second
+request timeout and make at most two short retries for transient timeouts,
+connection failures, rate limits, or gateway failures; exhaustion leaves both
+log cursors unchanged. `log more` uses a separate backward
 cursor to continue through older non-empty five-minute windows without changing
 the normal forward cursor. `./bin/ai-agent inbox` lists incidents and
 `./bin/ai-agent review INCIDENT_ID` displays the exact Issue preview. Action

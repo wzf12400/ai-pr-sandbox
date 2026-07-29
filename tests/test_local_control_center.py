@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -13,6 +14,7 @@ from src.local_control_center import (
     _compose_managed_evidence,
     _generation_failure_code,
     _is_resumable_empty_modification,
+    _prepare_execution_checkout,
 )
 from src.copilot_issue_provider import CopilotIssueProviderError
 from tests.test_approved_issue_dispatcher import REPOSITORY, initialize_repo
@@ -166,6 +168,71 @@ class FakeApprovalClient:
 
 
 class ControlCenterWorkflowTest(unittest.TestCase):
+    def test_execution_checkout_is_fresh_and_does_not_switch_source_branch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = initialize_repo(root)
+            remote = root / "remote.git"
+            subprocess.run(
+                ["git", "init", "--bare", str(remote)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "remote", "set-url", "origin", str(remote)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "push", "-u", "origin", "main"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "switch", "-c", "codex/previous-run"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            run_dir = root / "runs" / "20260729T120000Z-1234abcd"
+            run_dir.mkdir(parents=True)
+
+            with mock.patch(
+                "src.local_control_center._origin_repository",
+                return_value=REPOSITORY,
+            ):
+                checkout = _prepare_execution_checkout(
+                    source,
+                    run_dir,
+                    REPOSITORY,
+                    "main",
+                )
+
+            source_branch = subprocess.run(
+                ["git", "-C", str(source), "branch", "--show-current"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            checkout_branch = subprocess.run(
+                ["git", "-C", str(checkout), "branch", "--show-current"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            checkout_status = subprocess.run(
+                ["git", "-C", str(checkout), "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            audit = json.loads(
+                (run_dir / "execution-checkout.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("codex/previous-run", source_branch)
+        self.assertEqual("main", checkout_branch)
+        self.assertEqual("", checkout_status)
+        self.assertFalse(audit["source_checkout_mutated"])
+
     def test_terminal_request_uses_the_shared_eight_thousand_character_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -289,6 +356,9 @@ class ControlCenterWorkflowTest(unittest.TestCase):
                 approval_client=approval,
                 issue_provider_factory=lambda _model: mock.Mock(),
                 identity_inspector=lambda _cwd: IDENTITY,
+                execution_repo_preparer=(
+                    lambda source, _run_dir, _repository, _base_branch: source
+                ),
             ),
             approval,
         )
@@ -495,6 +565,38 @@ class ControlCenterWorkflowTest(unittest.TestCase):
         )
         self.assertNotIn("publish_github_issue", prepared["preview"]["actions"])
 
+    def test_prepare_stops_before_approval_for_completed_closed_issue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, workflow, _ = self._configured_workflow(root)
+            issue_url = f"https://github.com/{REPOSITORY}/issues/24"
+            with mock.patch(
+                "src.local_control_center.threading.Thread"
+            ), mock.patch(
+                "src.local_control_center.ai_issue_generator.generate_issue",
+                return_value=generation(),
+            ), mock.patch(
+                "src.local_control_center.automate_repository_issue",
+                return_value={
+                    "publication": {
+                        "status": "already_completed",
+                        "repository": REPOSITORY,
+                        "issue_url": issue_url,
+                        "issue_number": 24,
+                    }
+                },
+            ):
+                record = workflow.create("add multiplication and tests")
+                workflow._prepare(record["run_id"], "add multiplication and tests")
+
+            blocked = workflow.read(record["run_id"])
+
+        self.assertEqual("blocked", blocked["status"])
+        self.assertEqual("request_already_completed", blocked["failure"]["code"])
+        self.assertIn("已由关闭", blocked["failure"]["message"])
+        self.assertEqual(issue_url, blocked["result"]["issue_url"])
+        self.assertIsNone(blocked["preview"])
+
     def test_high_entropy_input_has_actionable_safe_failure_audit(self):
         opaque = "QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ=="
         with tempfile.TemporaryDirectory() as directory:
@@ -577,6 +679,76 @@ class ControlCenterWorkflowTest(unittest.TestCase):
 
         self.assertEqual("sanitized_evidence", record["input_type"])
         self.assertEqual(64, len(record["input_sha256"]))
+
+    def test_revision_requires_a_configured_parent_and_specific_delta(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, workflow, _ = self._configured_workflow(root)
+            issue_url = f"https://github.com/{REPOSITORY}/issues/24"
+
+            with self.assertRaisesRegex(ValueError, "未完成项"):
+                workflow.create_revision(issue_url, "重做")
+            with self.assertRaisesRegex(ValueError, "当前已配置仓库"):
+                workflow.create_revision(
+                    "https://github.com/example-org/other/issues/24",
+                    "增加负数输入的验收测试",
+                )
+            with mock.patch("src.local_control_center.threading.Thread"):
+                record = workflow.create_revision(
+                    issue_url,
+                    "增加负数输入的验收测试",
+                )
+
+        self.assertEqual("revision", record["input_type"])
+        self.assertEqual(64, len(record["input_sha256"]))
+
+    def test_revision_preparation_binds_parent_and_delta_to_new_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, workflow, _ = self._configured_workflow(root)
+            issue_url = f"https://github.com/{REPOSITORY}/issues/24"
+            description = "增加负数输入的验收测试，并修复对应行为"
+            with mock.patch(
+                "src.local_control_center.threading.Thread"
+            ):
+                record = workflow.create_revision(issue_url, description)
+            with mock.patch(
+                "src.local_control_center.ai_issue_generator.generate_issue",
+                return_value=generation(),
+            ), mock.patch(
+                "src.local_control_center.automate_repository_issue",
+                return_value={
+                    "publication": {
+                        "status": "approved_not_published",
+                        "repository": REPOSITORY,
+                    }
+                },
+            ):
+                workflow._prepare(
+                    record["run_id"],
+                    {
+                        "schema_version": "issue-revision/v1",
+                        "parent_issue_url": issue_url,
+                        "revision_description": description,
+                    },
+                    "revision",
+                )
+
+            prepared = workflow.read(record["run_id"])
+            generated = json.loads(
+                (
+                    workflow._run_dir(record["run_id"])
+                    / "generation.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("awaiting_approval", prepared["status"])
+        self.assertEqual(issue_url, prepared["preview"]["revision_of"])
+        self.assertEqual(issue_url, generated["revision"]["parent_issue_url"])
+        self.assertEqual(
+            hashlib.sha256(description.encode("utf-8")).hexdigest(),
+            generated["revision"]["request_sha256"],
+        )
 
     def test_approval_publishes_exact_issue_then_runs_claimed_draft_pr_flow(self):
         with tempfile.TemporaryDirectory() as directory:
