@@ -12,16 +12,25 @@ from src.log_incident_inbox import LogIncidentInbox
 TEST_KEY = b"local-test-hmac-key-that-is-at-least-32-bytes"
 
 
-def error_hit(document_id="error-1"):
+def error_hit(
+    document_id="error-1",
+    *,
+    trace="trace-demo",
+    timestamp="2026-07-27T00:00:00Z",
+    user_id="private-user-1",
+):
     return {
         "_index": "logs-synthetic",
         "_id": document_id,
         "_source": {
-            "@timestamp": "2026-07-27T00:00:00Z",
+            "@timestamp": timestamp,
             "stream": "stdout",
             "message": (
-                "[2026-07-27 08:00:00.000] [TID: trace-demo] ERROR [worker-1] "
-                "com.example.CalculatorService:42 - java.lang.IllegalStateException "
+                f"[2026-07-27 08:00:00.000] [TID: {trace}] ERROR [worker-1] "
+                "com.example.CalculatorService:42 - "
+                f"CommonParams(userId={user_id}) "
+                "request_path=/v1/calculator/multiply "
+                "java.lang.IllegalStateException "
                 "at com.example.CalculatorService.multiply(CalculatorService.java:42)"
             ),
             "kubernetes": {
@@ -33,11 +42,28 @@ def error_hit(document_id="error-1"):
     }
 
 
-def write_summary(root: Path, *, document_id="error-1") -> Path:
-    run = root / "poll"
+def write_summary(
+    root: Path,
+    *,
+    document_id="error-1",
+    run_name="poll",
+    trace="trace-demo",
+    timestamp="2026-07-27T00:00:00Z",
+    user_id="private-user-1",
+) -> Path:
+    run = root / run_name
     candidate_dir = run / "candidate-01"
     candidate_dir.mkdir(parents=True)
-    event = sanitize_hit(error_hit(document_id), TEST_KEY)
+    event = sanitize_hit(
+        error_hit(
+            document_id,
+            trace=trace,
+            timestamp=timestamp,
+            user_id=user_id,
+        ),
+        TEST_KEY,
+        include_aggregation_refs=True,
+    )
     incident = group_sanitized_events([event])[0]
     artifact = candidate_dir / "sanitized-incident.json"
     artifact.write_text(json.dumps(incident), encoding="utf-8")
@@ -81,13 +107,64 @@ class LogIncidentInboxTest(unittest.TestCase):
         self.assertEqual({"candidates": 1, "added": 0, "deduplicated": 1}, second)
         self.assertEqual(1, len(records))
         self.assertEqual("pending", records[0]["status"])
-        self.assertEqual(2, records[0]["occurrence_count"])
+        self.assertEqual(1, records[0]["occurrence_count"])
+        self.assertEqual(1, records[0]["total_event_count"])
+        self.assertEqual(1, records[0]["candidate_count"])
+        self.assertEqual(1, records[0]["affected_user_count_min"])
+        self.assertEqual(1, records[0]["affected_user_count_max"])
         self.assertRegex(
             records[0]["issue_fingerprint"],
             r"^issue_ref:[0-9a-f]{20}$",
         )
         self.assertEqual(0o600, mode)
         self.assertNotIn("raw-document-id", persisted)
+        self.assertNotIn("private-user-1", persisted)
+        self.assertNotIn("user_ref:", persisted)
+
+    def test_same_endpoint_and_error_accumulate_distinct_incident_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inbox = LogIncidentInbox(root / "state" / "inbox.json")
+            first = write_summary(
+                root,
+                run_name="poll-1",
+                document_id="error-1",
+                trace="trace-1",
+                timestamp="2026-07-27T00:00:00Z",
+                user_id="private-user-1",
+            )
+            second = write_summary(
+                root,
+                run_name="poll-2",
+                document_id="error-2",
+                trace="trace-2",
+                timestamp="2026-07-27T01:00:00Z",
+                user_id="private-user-2",
+            )
+
+            inbox.ingest_summary(first)
+            inbox.ingest_summary(second)
+            record = inbox.list()[0]
+
+        self.assertEqual(2, record["total_event_count"])
+        self.assertEqual(2, record["occurrence_count"])
+        self.assertEqual(2, record["candidate_count"])
+        self.assertEqual(1, record["latest_batch_event_count"])
+        self.assertEqual("2026-07-27T00:00:00Z", record["first_seen_at"])
+        self.assertEqual("2026-07-27T01:00:00Z", record["last_seen_at"])
+        self.assertEqual(
+            ["/v1/calculator/multiply"],
+            record["affected_endpoints"],
+        )
+        self.assertEqual(1, record["affected_user_count_min"])
+        self.assertEqual(2, record["affected_user_count_max"])
+        self.assertEqual(2, record["user_identifier_event_count"])
+        statistics = record["evidence"]["event"]["statistics"]
+        self.assertEqual(2, statistics["total_event_count"])
+        self.assertEqual(
+            ["illegalstateexception"],
+            statistics["aggregation_components"]["exceptions"],
+        )
 
     def test_context_is_sanitized_and_resets_a_blocked_plan(self):
         with tempfile.TemporaryDirectory() as directory:

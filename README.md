@@ -369,7 +369,14 @@ request timeout and make at most two short retries for transient timeouts,
 connection failures, rate limits, or gateway failures; exhaustion leaves both
 log cursors unchanged. `log more` uses a separate backward
 cursor to continue through older non-empty five-minute windows without changing
-the normal forward cursor. `./bin/ai-agent inbox` lists incidents and
+the normal forward cursor. Same-service events with the same normalized request
+path and exception type share one deterministic statistics record across
+scans. Exact incident references prevent overlap rescans from double-counting.
+The inbox and generated log Issue distinguish current-scan events from
+historical matching events and record first/last observation, affected
+endpoints, and privacy-safe affected-user bounds plus identifier coverage.
+Raw user identifiers and their HMAC references are not persisted.
+`./bin/ai-agent inbox` lists incidents and
 `./bin/ai-agent review INCIDENT_ID` displays the exact Issue preview. Action
 `a` approves Issue publication through Copilot, tests, and Draft PR; action `i`
 publishes only the Issue and cannot authorize code work. The watcher runs in

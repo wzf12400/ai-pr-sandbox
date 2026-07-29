@@ -30,10 +30,13 @@ supplied through `OPENSEARCH_PASSWORD` by a secret manager for automation.
 - Eligible sanitized events are grouped by deterministic local rules before
   the candidate limit or any AI call is applied. The model cannot decide which
   events belong to the same incident.
-- Separate incidents with different traces are compared using a conservative,
-  versioned Issue signature. Exact service, request path, exception, system,
-  and top-frame components suppress repeat Issue candidates without merging
-  their incident audit records. The model does not decide this signature.
+- Separate incidents with different traces are compared using a deterministic,
+  versioned Issue signature. When a request path and exception are both
+  available, exact service, normalized path, and exception define the
+  cross-scan statistics key; top-frame or dependency changes do not split that
+  endpoint/error count. Evidence without both fields retains the more
+  conservative multi-dimension signature. The model does not decide either
+  signature.
 - The default mode is a dry run. AI generation requires `--generate`.
 - GitHub publication requires `--generate --publish --confirm` and is limited
   to three candidates per run.
@@ -158,6 +161,14 @@ The artifact records the strategy, criteria, member HMAC references, pairwise
 time deltas, and matched signatures. `--max-candidates` limits incidents after
 all returned hits have been sanitized and grouped; it no longer truncates the
 event scan before grouping.
+
+For user-impact counting, a recognized `userId` inside the parsed client
+context is converted to an HMAC reference only while the scan is grouping
+events. The persisted incident contains only the distinct count and the number
+of events that supplied a user identifier; neither the raw identifier nor its
+HMAC reference is written. Counts from separate incident groups are represented
+as a safe lower/upper bound because exact cross-group user linkage is not
+retained.
 
 ## 2. Generate local Issue drafts
 

@@ -708,7 +708,12 @@ def redact_free_text(text: str, path: str = "message") -> Tuple[str, List[Findin
     return sanitized, findings
 
 
-def _parse_message(message: str, key: bytes) -> Tuple[Dict[str, Any], List[Finding]]:
+def _parse_message(
+    message: str,
+    key: bytes,
+    *,
+    include_aggregation_refs: bool,
+) -> Tuple[Dict[str, Any], List[Finding]]:
     findings: List[Finding] = []
     match = MESSAGE_PATTERN.match(message)
     if match:
@@ -727,6 +732,7 @@ def _parse_message(message: str, key: bytes) -> Tuple[Dict[str, Any], List[Findi
 
     common_params, common_span = _extract_parenthesized(body, "CommonParams(")
     client: Dict[str, str] = {}
+    aggregation: Dict[str, str] = {}
     if common_span:
         common_fields = _split_key_values(common_params)
         for field_name, field_value in common_fields.items():
@@ -749,6 +755,16 @@ def _parse_message(message: str, key: bytes) -> Tuple[Dict[str, Any], List[Findi
                         "identifier-field-name",
                     )
                 )
+                if (
+                    include_aggregation_refs
+                    and canonical == "userid"
+                    and field_value.casefold() not in {"", "null", "none", "unknown", "-"}
+                ):
+                    aggregation["user_ref"] = _hmac_ref(
+                        key,
+                        "user",
+                        field_value,
+                    )
             elif field_name in SAFE_COMMON_PARAM_FIELDS and field_value.lower() not in {"null", "none", ""}:
                 client[SAFE_COMMON_PARAM_FIELDS[field_name]] = field_value
         start, end = common_span
@@ -780,6 +796,7 @@ def _parse_message(message: str, key: bytes) -> Tuple[Dict[str, Any], List[Findi
         "duration_ms": int(duration_match.group("duration")) if duration_match else None,
         "client": client,
         "safe_summary": safe_summary,
+        "aggregation": aggregation,
     }
     return event, findings
 
@@ -807,7 +824,12 @@ def _find_known_secret_signatures(text: str) -> List[str]:
     return categories
 
 
-def sanitize_hit(payload: Dict[str, Any], hmac_key: bytes) -> Dict[str, Any]:
+def sanitize_hit(
+    payload: Dict[str, Any],
+    hmac_key: bytes,
+    *,
+    include_aggregation_refs: bool = False,
+) -> Dict[str, Any]:
     if len(hmac_key) < MIN_HMAC_KEY_BYTES:
         raise ValueError(f"HMAC key must contain at least {MIN_HMAC_KEY_BYTES} bytes")
 
@@ -815,7 +837,11 @@ def sanitize_hit(payload: Dict[str, Any], hmac_key: bytes) -> Dict[str, Any]:
     kubernetes = _mapping(source.get("kubernetes"))
     labels = _mapping(kubernetes.get("labels"))
     raw_message = _text(source.get("message"))
-    message_event, findings = _parse_message(raw_message, hmac_key)
+    message_event, findings = _parse_message(
+        raw_message,
+        hmac_key,
+        include_aggregation_refs=include_aggregation_refs,
+    )
 
     document_id = _text(payload.get("_id"))
     service = (
@@ -884,6 +910,8 @@ def sanitize_hit(payload: Dict[str, Any], hmac_key: bytes) -> Dict[str, Any]:
             "is_issue_candidate": is_error and not blocked,
         },
     }
+    if include_aggregation_refs and message_event["aggregation"]:
+        result["_aggregation"] = dict(message_event["aggregation"])
 
     serialized = json.dumps(result, ensure_ascii=False, sort_keys=True)
     residual_categories = _find_known_secret_signatures(serialized)

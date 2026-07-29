@@ -393,6 +393,85 @@ def _renew_kibana_evidence_safety(compact: Dict[str, Any]) -> Dict[str, Any]:
     return renewed
 
 
+def _log_observability(compact: Mapping[str, Any]) -> Dict[str, Any]:
+    source = _mapping(compact.get("source"))
+    if source.get("type") != "kibana":
+        return {}
+    event = _mapping(compact.get("event"))
+    statistics = _mapping(event.get("statistics"))
+    runtime = _mapping(compact.get("runtime"))
+
+    def count(name: str, fallback: int = 0) -> int:
+        value = statistics.get(name, fallback)
+        return (
+            value
+            if isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+            else fallback
+        )
+
+    def strings(value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        return [
+            item
+            for item in value
+            if isinstance(item, str) and item.strip()
+        ][:50]
+
+    user_min = statistics.get("affected_user_count_min")
+    user_max = statistics.get("affected_user_count_max")
+    if not isinstance(user_min, int) or isinstance(user_min, bool):
+        user_min = None
+    if not isinstance(user_max, int) or isinstance(user_max, bool):
+        user_max = None
+    event_count = event.get("event_count")
+    if (
+        not isinstance(event_count, int)
+        or isinstance(event_count, bool)
+        or event_count < 0
+    ):
+        event_count = 0
+    components = _mapping(statistics.get("aggregation_components"))
+    return {
+        "first_seen_at": _text(runtime.get("first_seen_at")),
+        "last_seen_at": _text(runtime.get("last_seen_at")),
+        "batch_event_count": count(
+            "batch_event_count",
+            count("total_event_count", event_count),
+        ),
+        "total_event_count": count(
+            "total_event_count",
+            count("batch_event_count", event_count),
+        ),
+        "candidate_count": count("candidate_count", 1),
+        "affected_endpoints": strings(
+            statistics.get("affected_endpoints")
+        ),
+        "affected_user_count_min": user_min,
+        "affected_user_count_max": user_max,
+        "user_identifier_event_count": count(
+            "user_identifier_event_count"
+        ),
+        "historical_count_complete": (
+            statistics.get("historical_count_complete")
+            if isinstance(statistics.get("historical_count_complete"), bool)
+            else True
+        ),
+        "aggregation_components": {
+            key: strings(components.get(key))
+            for key in (
+                "services",
+                "paths",
+                "exceptions",
+                "systems",
+                "top_frames",
+            )
+        },
+    }
+
+
 def compact_evidence(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Allow only known, minimized source shapes to cross the model boundary."""
     if payload.get("schema_version") == "sanitized-kibana-event/v1":
@@ -435,6 +514,7 @@ def compact_evidence(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         source = _mapping(payload.get("source"))
         incident = _mapping(payload.get("incident"))
+        statistics = _mapping(payload.get("statistics"))
         grouping = _mapping(payload.get("grouping"))
         allowed_strategies = {"trace_ref", "fallback_similarity", "single_event"}
         strategy = _text(grouping.get("strategy"))
@@ -515,6 +595,31 @@ def compact_evidence(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "level": "ERROR",
                 "trace_ref": _text(incident.get("trace_ref")),
                 "event_count": len(members),
+                "statistics": {
+                    "batch_event_count": statistics.get(
+                        "batch_event_count",
+                        len(members),
+                    ),
+                    "total_event_count": statistics.get(
+                        "batch_event_count",
+                        len(members),
+                    ),
+                    "candidate_count": 1,
+                    "affected_endpoints": statistics.get(
+                        "affected_endpoints",
+                        [],
+                    ),
+                    "affected_user_count_min": statistics.get(
+                        "affected_user_count"
+                    ),
+                    "affected_user_count_max": statistics.get(
+                        "affected_user_count"
+                    ),
+                    "user_identifier_event_count": statistics.get(
+                        "user_identifier_event_count",
+                        0,
+                    ),
+                },
                 "observations_included": len(observations),
                 "observations_truncated": len(members) > len(observations),
                 "grouping": {
@@ -981,6 +1086,7 @@ def generate_issue(
         "schema_version": RESULT_SCHEMA_VERSION,
         "state": state,
         "source": source,
+        "observability": _log_observability(compact),
         "input_sha256": digest,
         "draft": generated.content,
         "review": reviewed.content,
@@ -1019,6 +1125,74 @@ def _bullets(items: List[str]) -> str:
 
 def _numbered(items: List[str]) -> str:
     return "\n".join(f"{index}. {item}" for index, item in enumerate(items, 1)) if items else "1. unknown"
+
+
+def _render_observability(observability: Mapping[str, Any]) -> List[str]:
+    if not observability:
+        return []
+    total_event_count = observability.get("total_event_count")
+    batch_event_count = observability.get("batch_event_count")
+    user_min = observability.get("affected_user_count_min")
+    user_max = observability.get("affected_user_count_max")
+    coverage = observability.get("user_identifier_event_count")
+    historical_count_complete = observability.get(
+        "historical_count_complete"
+    )
+    if isinstance(user_min, int) and isinstance(user_max, int):
+        affected_users = (
+            str(user_min)
+            if user_min == user_max
+            else f"{user_min}-{user_max} (deduplicated range)"
+        )
+    else:
+        affected_users = "unknown"
+    endpoints = observability.get("affected_endpoints")
+    endpoint_text = (
+        ", ".join(str(item) for item in endpoints)
+        if isinstance(endpoints, list) and endpoints
+        else UNKNOWN
+    )
+    components = observability.get("aggregation_components")
+    components = components if isinstance(components, dict) else {}
+    component_labels = {
+        "services": "service",
+        "paths": "path",
+        "exceptions": "exception",
+        "systems": "system",
+        "top_frames": "top frame",
+    }
+    basis = []
+    for key, label in component_labels.items():
+        values = components.get(key)
+        if isinstance(values, list) and values:
+            basis.append(f"{label}={','.join(str(item) for item in values)}")
+    coverage_text = (
+        f"{coverage}/{total_event_count} log events"
+        if isinstance(coverage, int) and isinstance(total_event_count, int)
+        else UNKNOWN
+    )
+    metric = lambda value: (
+        str(value)
+        if isinstance(value, int) and not isinstance(value, bool)
+        else UNKNOWN
+    )
+    historical_total = metric(total_event_count)
+    if historical_count_complete is False and historical_total != UNKNOWN:
+        historical_total = f"at least {historical_total} (legacy history incomplete)"
+    return [
+        "## Error Occurrence Statistics",
+        "",
+        f"- First observed: {_display(observability.get('first_seen_at'))}",
+        f"- Last observed: {_display(observability.get('last_seen_at'))}",
+        f"- Current scan log events: {metric(batch_event_count)}",
+        f"- Historical matching log events: {historical_total}",
+        f"- Matching incident groups: {metric(observability.get('candidate_count'))}",
+        f"- Affected endpoints: {endpoint_text}",
+        f"- Affected users: {affected_users}",
+        f"- User identifier coverage: {coverage_text}",
+        f"- Aggregation basis: {'; '.join(basis) if basis else UNKNOWN}",
+        "",
+    ]
 
 
 def render_markdown(result: Dict[str, Any]) -> str:
@@ -1067,6 +1241,7 @@ def render_markdown(result: Dict[str, Any]) -> str:
         f"- Exception type: {_display(error['exception_type'])}",
         f"- Message: {_display(error['message'])}",
         "",
+        *_render_observability(result.get("observability", {})),
         "## Behavior",
         "",
         f"- Background: {_display(problem['background'])}",

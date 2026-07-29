@@ -1354,7 +1354,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             "issue_signature_duplicates": [],
         }
         for hit in hits:
-            sanitized = kibana_sanitizer.sanitize_hit(hit, raw_key)
+            sanitized = kibana_sanitizer.sanitize_hit(
+                hit,
+                raw_key,
+                include_aggregation_refs=True,
+            )
             selection["scanned_hits"] += 1
             level = str(sanitized.get("event", {}).get("level", "UNKNOWN"))
             status = str(sanitized.get("sanitization", {}).get("status", "unknown"))

@@ -143,6 +143,31 @@ class KibanaSanitizerTest(unittest.TestCase):
         self.assertEqual(sample, sanitized)
         self.assertEqual([], findings)
 
+    def test_user_reference_exists_only_for_in_process_aggregation(self) -> None:
+        payload = raw_hit()
+        raw_user = "private-user-for-counting"
+        payload["_source"]["message"] = payload["_source"]["message"].replace(
+            "CommonParams(",
+            f"CommonParams(userId={raw_user}, ",
+        )
+
+        persisted = sanitize_hit(payload, TEST_KEY)
+        aggregating = sanitize_hit(
+            payload,
+            TEST_KEY,
+            include_aggregation_refs=True,
+        )
+
+        self.assertNotIn("_aggregation", persisted)
+        self.assertRegex(
+            aggregating["_aggregation"]["user_ref"],
+            r"^user_ref:[0-9a-f]{16}$",
+        )
+        self.assertNotIn(
+            raw_user,
+            json.dumps(aggregating, ensure_ascii=False),
+        )
+
     def test_unknown_high_entropy_value_blocks_processing(self) -> None:
         payload = raw_hit()
         payload["_source"]["message"] += " unknownBlob=QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ=="
