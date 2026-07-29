@@ -640,6 +640,14 @@ def dispatch_once(
         return report
     if urls:
         report["status"] = "blocked"
+        if (
+            len(report["candidates"]) == 1
+            and report["candidates"][0]
+            .get("approval_rules", {})
+            .get("issue_is_open")
+            is False
+        ):
+            report["dispatch"]["failure_reason"] = "approved_issue_not_open"
     return report
 
 

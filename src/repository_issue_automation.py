@@ -355,16 +355,35 @@ def match_existing_issues(
             }
         )
     candidates.sort(key=lambda item: (-item["score"], item["number"]))
-    exact_candidates = [item for item in candidates if item["exact_fingerprint"]]
-    if len(exact_candidates) == 1:
+    open_candidates = [
+        item for item in candidates if item["state"].casefold() == "open"
+    ]
+    open_exact_candidates = [
+        item for item in open_candidates if item["exact_fingerprint"]
+    ]
+    closed_exact_candidates = [
+        item
+        for item in candidates
+        if item["exact_fingerprint"] and item["state"].casefold() == "closed"
+    ]
+    if len(open_exact_candidates) == 1:
         status = "existing_issue_candidate"
-        selected = exact_candidates[0]
-    elif len(exact_candidates) > 1 or len(candidates) > 1:
+        selected = open_exact_candidates[0]
+    elif len(open_exact_candidates) > 1:
         status = "ambiguous_existing_issues"
         selected = None
-    elif len(candidates) == 1:
+    elif len(closed_exact_candidates) == 1:
+        status = "closed_issue_candidate"
+        selected = closed_exact_candidates[0]
+    elif len(closed_exact_candidates) > 1:
+        status = "ambiguous_existing_issues"
+        selected = None
+    elif len(open_candidates) == 1:
         status = "existing_issue_candidate"
-        selected = candidates[0]
+        selected = open_candidates[0]
+    elif len(open_candidates) > 1:
+        status = "ambiguous_existing_issues"
+        selected = None
     else:
         status = "new_issue"
         selected = None
@@ -561,6 +580,17 @@ def automate_repository_issue(
         output["publication"].update(
             {
                 "status": "deduplicated",
+                "issue_url": selected["url"],
+                "issue_number": selected["number"],
+            }
+        )
+        return output
+    if issue_match["status"] == "closed_issue_candidate":
+        selected = issue_match["selected"]
+        output["approval"]["approved"] = True
+        output["publication"].update(
+            {
+                "status": "already_completed",
                 "issue_url": selected["url"],
                 "issue_number": selected["number"],
             }

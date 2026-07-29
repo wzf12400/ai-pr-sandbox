@@ -321,6 +321,8 @@ def _run_record(
     )
     if prepared.get("status") == "blocked":
         terminal.fail(str(prepared.get("failure", {}).get("message") or "流程已停止。"))
+        if prepared.get("result", {}).get("issue_url"):
+            terminal.field("Issue", str(prepared["result"]["issue_url"]))
         terminal.field("Audit", str(workflow._run_dir(prepared["run_id"])))
         return 2
     _render_preview(terminal, prepared)

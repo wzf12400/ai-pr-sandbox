@@ -495,6 +495,34 @@ class TerminalControlCenterTest(unittest.TestCase):
         self.assertIn("/issues/17", output.getvalue())
         self.assertIn("复用该 Issue", output.getvalue())
 
+    def test_completed_closed_issue_stops_before_approval_with_issue_url(self):
+        output = io.StringIO()
+        issue_url = "https://github.com/example/ai-pr-sandbox/issues/24"
+        workflow = FakeWorkflow(
+            {
+                "run_id": RUN_ID,
+                "status": "blocked",
+                "result": {"issue_url": issue_url, "draft_pr_url": None},
+                "failure": {
+                    "code": "request_already_completed",
+                    "message": "相同需求已由关闭的 GitHub Issue 处理完成。",
+                },
+            }
+        )
+
+        code = _run_record(
+            workflow,
+            {"run_id": RUN_ID},
+            Terminal(output, color=False),
+            lambda _prompt: self.fail("approval prompt must not be displayed"),
+            preview_only=False,
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual([], workflow.approvals)
+        self.assertIn("处理完成", output.getvalue())
+        self.assertIn(issue_url, output.getvalue())
+
     def test_retained_claim_resume_requires_a_fresh_terminal_approval(self):
         output = io.StringIO()
         workflow = FakeResumeWorkflow()

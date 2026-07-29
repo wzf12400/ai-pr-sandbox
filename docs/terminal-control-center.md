@@ -26,6 +26,14 @@ an artificial error message or description of current behavior. Bug,
 performance, and security reports must still contain an observed problem.
 Unknown facts remain unknown.
 
+An exact fingerprint may reuse only an OPEN Issue. If the exact match is
+closed, preparation stops before the approval prompt and reports that completed
+Issue; a later revision must describe new expected behavior or acceptance
+criteria. Code execution uses a fresh per-run checkout at the current
+`origin/main`, so a branch retained in the configured source checkout cannot
+silently become the next run's base. The source checkout is not switched,
+reset, or cleaned by this preparation.
+
 When the configuration enables exactly one repository, that operator-approved
 scope is the repository decision. The agent does not require the request to
 contain an English class, method, or file name and does not run GitHub code

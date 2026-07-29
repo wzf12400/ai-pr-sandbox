@@ -26,6 +26,7 @@ from src.copilot_code_modifier import (
     GitHubCLIIssueSnapshotClient,
     REPOSITORY_PATTERN,
     _cleanup_empty_work_branch,
+    _origin_repository,
     _run_process,
     load_issue_code_policy,
 )
@@ -101,8 +102,17 @@ SAFE_ERROR_MESSAGES = {
     "issue_draft_validation_failed": "Issue 草案结构或证据映射未通过本地校验。",
     "issue_review_rejected": "Issue 草案未通过独立安全复核。",
     "repository_not_resolved": "无法唯一定位目标仓库，请补充更明确的代码线索。",
+    "request_already_completed": (
+        "相同需求已由关闭的 GitHub Issue 处理完成。"
+        "如需继续修改，请描述新的预期行为或验收标准。"
+    ),
     "issue_publication_failed": "GitHub Issue 发布失败。",
     "approval_label_failed": "代码审批标签写入失败。",
+    "execution_checkout_failed": (
+        "无法从最新 origin/main 创建独立的干净执行目录；"
+        "没有运行 Copilot，也没有修改现有 checkout。"
+    ),
+    "approved_issue_not_open": "代码执行要求 GitHub Issue 保持 OPEN；该 Issue 已关闭。",
     "code_dispatch_failed": "代码修改流程被安全门禁阻止。",
     "modifier_localization_safety_blocked": (
         "Issue 的任务正文未通过本地代码定位安全检查。"
@@ -111,6 +121,8 @@ SAFE_ERROR_MESSAGES = {
     "resume_dispatch_failed": "保留 claim 的代码恢复流程被安全门禁阻止。",
     "unexpected_failure": "流程未完成；详细原因已限制在本地审计记录中。",
 }
+
+EXECUTION_CHECKOUT_DIRNAME = "execution-checkout"
 
 
 def _utc_now() -> str:
@@ -220,6 +232,94 @@ def _safe_process(args: Sequence[str], cwd: Path, timeout: float = 15.0) -> Dict
         "ok": completed.returncode == 0,
         "stdout": completed.stdout.strip()[:2_000],
     }
+
+
+def _prepare_execution_checkout(
+    source_repo: Path,
+    run_dir: Path,
+    repository: str,
+    base_branch: str,
+) -> Path:
+    """Create a fresh per-run clone without changing the configured checkout."""
+    target = run_dir / EXECUTION_CHECKOUT_DIRNAME
+    if (
+        target.exists()
+        or target.is_symlink()
+        or not source_repo.is_dir()
+        or source_repo.is_symlink()
+    ):
+        raise ValueError("execution checkout path is not available")
+    remote = _run_process(
+        ["git", "remote", "get-url", "origin"],
+        source_repo,
+        30,
+    )
+    if (
+        remote.returncode != 0
+        or not remote.stdout.strip()
+        or _origin_repository(source_repo).casefold() != repository.casefold()
+    ):
+        raise ValueError("execution checkout origin is unavailable")
+    clone = _run_process(
+        [
+            "git",
+            "clone",
+            "--no-hardlinks",
+            "--no-checkout",
+            "--",
+            str(source_repo),
+            str(target),
+        ],
+        run_dir,
+        120,
+    )
+    if clone.returncode != 0 or not target.is_dir() or target.is_symlink():
+        raise ValueError("execution checkout clone failed")
+    commands = (
+        ["git", "remote", "set-url", "origin", remote.stdout.strip()],
+        ["git", "fetch", "--prune", "origin", base_branch],
+        ["git", "checkout", "-B", base_branch, f"origin/{base_branch}"],
+    )
+    for command in commands:
+        result = _run_process(command, target, 120)
+        if result.returncode != 0:
+            raise ValueError("execution checkout initialization failed")
+    _atomic_write_json(
+        run_dir / "execution-checkout.json",
+        {
+            "schema_version": "isolated-execution-checkout/v1",
+            "repository": repository,
+            "base_branch": base_branch,
+            "path": str(target.resolve(strict=True)),
+            "source_checkout_mutated": False,
+        },
+    )
+    return target.resolve(strict=True)
+
+
+def _validated_execution_checkout(
+    run_dir: Path,
+    configured_repo: Path,
+    candidate: str,
+) -> Path:
+    """Accept the per-run checkout, with the configured path for old audits."""
+    candidate_path = Path(candidate)
+    if candidate_path.is_symlink():
+        raise ValueError("execution checkout cannot be a symbolic link")
+    try:
+        resolved = candidate_path.resolve(strict=True)
+        configured = configured_repo.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("execution checkout is unavailable") from exc
+    if resolved == configured:
+        return resolved
+    try:
+        isolated = (run_dir / EXECUTION_CHECKOUT_DIRNAME).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("isolated execution checkout is unavailable") from exc
+    if resolved != isolated:
+        raise ValueError("execution checkout does not match the run")
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -746,6 +846,7 @@ class ControlCenterWorkflow:
         approval_client: Optional[GitHubCLIApprovalClient] = None,
         issue_provider_factory: Optional[Any] = None,
         identity_inspector: Optional[Any] = None,
+        execution_repo_preparer: Optional[Any] = None,
     ):
         self.config_store = config_store
         self.runs_path = runs_path
@@ -755,6 +856,9 @@ class ControlCenterWorkflow:
             or (lambda model: CopilotCLIIssueProvider(model))
         )
         self.identity_inspector = identity_inspector or inspect_identity
+        self.execution_repo_preparer = (
+            execution_repo_preparer or _prepare_execution_checkout
+        )
         self._locks: Dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
 
@@ -1007,6 +1111,12 @@ class ControlCenterWorkflow:
                 _atomic_write_json(run_dir / "automation-preview.json", automation)
                 publication = automation.get("publication", {})
                 publication_status = publication.get("status")
+                if publication_status == "already_completed":
+                    record["result"] = {
+                        "issue_url": str(publication.get("issue_url", "")),
+                        "draft_pr_url": None,
+                    }
+                    raise RuntimeError("request_already_completed")
                 if publication_status not in {
                     "approved_not_published",
                     "deduplicated",
@@ -1279,6 +1389,24 @@ class ControlCenterWorkflow:
             repository_name = str(
                 dispatch.get("repository", {}).get("name", "")
             )
+            managed = next(
+                (
+                    item
+                    for item in config.enabled_repositories
+                    if item.repository.casefold() == repository_name.casefold()
+                ),
+                None,
+            )
+            if managed is None:
+                raise ValueError("原调度仓库已不在当前配置中。")
+            repo_path = _validated_execution_checkout(
+                run_dir,
+                Path(managed.local_path),
+                str(
+                    dispatch.get("repository", {}).get("path")
+                    or managed.local_path
+                ),
+            )
             empty_branch_already_removed = bool(
                 empty_modification
                 and modifier_report.get("modification", {}).get(
@@ -1312,18 +1440,6 @@ class ControlCenterWorkflow:
             ):
                 raise ValueError("原 Issue、claim 或代码分支状态不允许恢复。")
             if empty_modification:
-                managed = next(
-                    (
-                        item
-                        for item in config.enabled_repositories
-                        if item.repository.casefold()
-                        == repository_name.casefold()
-                    ),
-                    None,
-                )
-                if managed is None:
-                    raise ValueError("空代码分支状态已变化，不能自动恢复。")
-                repo_path = Path(managed.local_path)
                 branch_result = _run_process(
                     ["git", "branch", "--show-current"], repo_path, 30
                 )
@@ -1381,6 +1497,7 @@ class ControlCenterWorkflow:
                 "claim_commit": claim_commit,
                 "work_branch": work_branch,
                 "base_commit": base_commit,
+                "execution_checkout": str(repo_path),
                 "remove_empty_work_branch": remove_empty_work_branch,
                 "copilot_model": config.copilot_model,
                 "actions": [
@@ -1468,7 +1585,14 @@ class ControlCenterWorkflow:
                     for item in config.enabled_repositories
                     if item.repository.casefold() == repository.casefold()
                 )
-                repo_path = Path(managed.local_path)
+                repo_path = _validated_execution_checkout(
+                    self._run_dir(run_id),
+                    Path(managed.local_path),
+                    str(
+                        preview.get("execution_checkout")
+                        or managed.local_path
+                    ),
+                )
                 if preview.get("remove_empty_work_branch"):
                     policy = load_issue_code_policy(
                         repo_path / ".github" / "issue-code-policy.json"
@@ -1651,7 +1775,27 @@ class ControlCenterWorkflow:
                     for item in config.enabled_repositories
                     if item.repository.casefold() == repository.casefold()
                 )
-                repo_path = Path(managed.local_path)
+                configured_repo_path = Path(managed.local_path)
+                try:
+                    repo_path = self.execution_repo_preparer(
+                        configured_repo_path,
+                        run_dir,
+                        repository,
+                        managed.base_branch,
+                    )
+                except (OSError, ValueError) as exc:
+                    self._write_failure_audit(
+                        run_id,
+                        stage="execution_checkout",
+                        code="execution_checkout_failed",
+                        reason_category="isolated_checkout_unavailable",
+                    )
+                    raise RuntimeError("execution_checkout_failed") from exc
+                record["execution_checkout"] = {
+                    "path": str(repo_path),
+                    "isolated": repo_path != configured_repo_path,
+                    "source_checkout_mutated": False,
+                }
                 try:
                     self.approval_client.ensure_and_apply(
                         repo_path,
