@@ -7,7 +7,7 @@ import os
 import tempfile
 import unittest
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -15,11 +15,17 @@ from unittest import mock
 from src.kibana_issue_connector import (
     DashboardCredentials,
     DiscoverTarget,
+    ErrorHitBatch,
+    LEGACY_SCAN_CURSOR_SCHEMA_VERSION,
+    LEGACY_SCAN_QUERY_VERSION,
     OpenSearchDashboardsClient,
     _blocked_error_preview,
     _credentials,
+    _load_history_cursor,
     _load_scan_cursor,
+    _save_history_cursor,
     _save_scan_cursor,
+    _scan_source_sha256,
     _scan_window,
     main,
     parse_discover_url,
@@ -35,12 +41,15 @@ DISCOVER_URL = (
 HMAC_KEY = "0123456789abcdef0123456789abcdef"
 
 
-def error_hit():
+def error_hit(
+    timestamp="2099-01-01T00:00:00Z",
+    document_id="raw-document-id",
+):
     return {
         "_index": "logs-demo",
-        "_id": "raw-document-id",
+        "_id": document_id,
         "_source": {
-            "@timestamp": "2099-01-01T00:00:00Z",
+            "@timestamp": timestamp,
             "stream": "stdout",
             "message": (
                 "[2099-01-01 08:00:00.000] [TID: trace-demo] ERROR [worker-1] "
@@ -186,7 +195,8 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         )
 
         index_pattern, time_field = client.resolve_index_pattern()
-        hits = client.fetch_error_hits(index_pattern, time_field, 25)
+        batch = client.fetch_error_hits(index_pattern, time_field, 25)
+        hits = batch.hits
 
         self.assertEqual(index_pattern, "logs-*")
         self.assertEqual(len(hits), 1)
@@ -202,7 +212,19 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertNotIn("kubernetes.pod_name", payload["_source"])
         self.assertEqual(
             payload["query"]["bool"]["filter"][0]["range"]["@timestamp"],
-            {"gte": "now-2h", "lte": "now"},
+            {"gte": "now-2h", "lt": "now"},
+        )
+        self.assertEqual(
+            payload["sort"],
+            [
+                {
+                    "@timestamp": {
+                        "order": "asc",
+                        "unmapped_type": "date",
+                    }
+                },
+                "_doc",
+            ],
         )
 
     def test_client_scrolls_every_page_before_completing_scan(self):
@@ -219,14 +241,16 @@ class KibanaIssueConnectorTest(unittest.TestCase):
             opener=opener,
         )
 
-        hits = client.fetch_error_hits(
+        batch = client.fetch_error_hits(
             "logs-*",
             "@timestamp",
             2,
             max_scan_hits=10,
         )
+        hits = batch.hits
 
         self.assertEqual(len(hits), 3)
+        self.assertFalse(batch.backlog_remaining)
         proxy_calls = [
             urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
             for request, _timeout in opener.requests
@@ -236,6 +260,198 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertIn("scroll=2m", proxy_calls[0]["path"][0])
         self.assertEqual(proxy_calls[1]["path"], ["_search/scroll"])
         self.assertEqual(proxy_calls[-1]["method"], ["DELETE"])
+
+    def test_client_finds_earliest_nonempty_error_window_without_hits(self):
+        client = OpenSearchDashboardsClient(
+            DiscoverTarget(
+                base_url="https://logs.example.test/_dashboards",
+                data_view_id="data-view-1",
+                time_from="now-2h",
+                time_to="now",
+            ),
+            DashboardCredentials("reader", "password"),
+        )
+        bucket_start = datetime(
+            2026, 7, 27, 10, 0, tzinfo=timezone.utc
+        )
+        with mock.patch.object(
+            client,
+            "_console_request",
+            return_value={
+                "aggregations": {
+                    "error_windows": {
+                        "buckets": [
+                            {
+                                "key": int(bucket_start.timestamp() * 1000),
+                                "doc_count": 3,
+                            }
+                        ]
+                    }
+                }
+            },
+        ) as request:
+            window = client.find_next_error_window(
+                "logs-*",
+                "@timestamp",
+                time_from="2026-07-27T09:34:38.029Z",
+                time_to="2026-07-28T09:34:38.029Z",
+            )
+
+        self.assertEqual(
+            (
+                "2026-07-27T10:00:00.000Z",
+                "2026-07-27T10:05:00.000Z",
+            ),
+            window,
+        )
+        payload = request.call_args.args[2]
+        self.assertEqual(payload["size"], 0)
+        self.assertFalse(payload["track_total_hits"])
+        self.assertNotIn("sort", payload)
+        self.assertEqual(
+            payload["aggs"]["error_windows"]["date_histogram"][
+                "fixed_interval"
+            ],
+            "5m",
+        )
+
+    def test_client_finds_latest_nonempty_error_window_for_history_scan(self):
+        client = OpenSearchDashboardsClient(
+            DiscoverTarget(
+                base_url="https://logs.example.test/_dashboards",
+                data_view_id="data-view-1",
+                time_from="now-2h",
+                time_to="now",
+            ),
+            DashboardCredentials("reader", "password"),
+        )
+        with mock.patch.object(
+            client,
+            "_console_request",
+            return_value={
+                "aggregations": {
+                    "error_windows": {
+                        "buckets": [
+                            {
+                                "key": int(
+                                    datetime(
+                                        2026,
+                                        7,
+                                        27,
+                                        9,
+                                        5,
+                                        tzinfo=timezone.utc,
+                                    ).timestamp()
+                                    * 1000
+                                ),
+                                "doc_count": 2,
+                            }
+                        ]
+                    }
+                }
+            },
+        ) as request:
+            window = client.find_previous_error_window(
+                "logs-*",
+                "@timestamp",
+                time_from="2026-07-27T08:00:00.000Z",
+                time_to="2026-07-27T10:00:00.000Z",
+            )
+
+        self.assertEqual(
+            (
+                "2026-07-27T09:05:00.000Z",
+                "2026-07-27T09:10:00.000Z",
+            ),
+            window,
+        )
+        payload = request.call_args.args[2]
+        self.assertEqual(
+            {"_key": "desc"},
+            payload["aggs"]["error_windows"]["date_histogram"]["order"],
+        )
+
+    def test_history_cursor_keeps_forward_scan_state_separate(self):
+        target = parse_discover_url(DISCOVER_URL)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history_path = root / "history.json"
+            _save_history_cursor(
+                history_path,
+                target,
+                range_from=datetime(
+                    2026, 7, 27, 8, 0, tzinfo=timezone.utc
+                ),
+                next_before=datetime(
+                    2026, 7, 27, 8, 50, tzinfo=timezone.utc
+                ),
+                pending_from=datetime(
+                    2026, 7, 27, 8, 55, tzinfo=timezone.utc
+                ),
+                pending_to=datetime(
+                    2026, 7, 27, 9, 0, tzinfo=timezone.utc
+                ),
+                summary_path=root / "summary.json",
+            )
+            cursor = _load_history_cursor(history_path, target)
+
+        self.assertEqual(
+            "2026-07-27T08:50:00.000Z",
+            cursor["next_before"],
+        )
+        self.assertEqual(
+            "2026-07-27T08:55:00.000Z",
+            cursor["pending_from"],
+        )
+
+    def test_client_returns_a_complete_timestamp_bounded_backlog_batch(self):
+        opener = PagedOpener()
+        opener.scroll_pages = [
+            {
+                "_scroll_id": "scroll-1",
+                "hits": {
+                    "hits": [
+                        error_hit("2026-07-27T08:00:00Z", "first"),
+                        error_hit("2026-07-27T08:00:01Z", "second"),
+                    ]
+                },
+            },
+            {
+                "_scroll_id": "scroll-2",
+                "hits": {
+                    "hits": [
+                        error_hit("2026-07-27T08:00:02Z", "third"),
+                        error_hit("2026-07-27T08:00:03Z", "fourth"),
+                    ]
+                },
+            },
+        ]
+        client = OpenSearchDashboardsClient(
+            DiscoverTarget(
+                base_url="https://logs.example.test/_dashboards",
+                data_view_id="data-view-1",
+                time_from="now-2h",
+                time_to="now",
+            ),
+            DashboardCredentials("reader", "password"),
+            opener=opener,
+        )
+
+        batch = client.fetch_error_hits(
+            "logs-*",
+            "@timestamp",
+            2,
+            time_from="2026-07-27T08:00:00.000Z",
+            time_to="2026-07-27T08:05:00.000Z",
+            max_scan_hits=2,
+        )
+
+        self.assertTrue(batch.backlog_remaining)
+        self.assertEqual(2, len(batch.hits))
+        self.assertEqual(
+            "2026-07-27T08:00:02.000Z",
+            batch.completed_through,
+        )
 
     def test_client_initial_scan_reads_latest_hits_without_scroll(self):
         opener = FakeOpener()
@@ -319,6 +535,139 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertEqual(time_to, "2026-07-27T08:05:00.000Z")
         self.assertEqual(cutoff, datetime(2026, 7, 27, 8, 5, tzinfo=timezone.utc))
 
+    def test_scan_cursor_limits_remote_query_to_one_catchup_slice(self):
+        target = DiscoverTarget(
+            base_url="https://logs.example.test/_dashboards",
+            data_view_id="data-view-1",
+            time_from="now-2h",
+            time_to="now",
+        )
+        completed = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cursor_path = root / "cursor.json"
+            _save_scan_cursor(
+                cursor_path,
+                target,
+                completed,
+                root / "summary.json",
+            )
+            cursor = _load_scan_cursor(cursor_path, target)
+            time_from, time_to, cutoff = _scan_window(
+                target,
+                cursor,
+                300,
+                300,
+                now=datetime(2026, 7, 28, 8, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(time_from, "2026-07-27T07:55:00.000Z")
+        self.assertEqual(time_to, "2026-07-27T08:05:00.000Z")
+        self.assertEqual(cutoff, datetime(2026, 7, 27, 8, 5, tzinfo=timezone.utc))
+
+    def test_scan_cursor_stops_at_delayed_ingestion_safety_cutoff(self):
+        target = DiscoverTarget(
+            base_url="https://logs.example.test/_dashboards",
+            data_view_id="data-view-1",
+            time_from="now-2h",
+            time_to="now",
+        )
+        completed = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cursor_path = root / "cursor.json"
+            _save_scan_cursor(
+                cursor_path,
+                target,
+                completed,
+                root / "summary.json",
+            )
+            cursor = _load_scan_cursor(cursor_path, target)
+            time_from, time_to, cutoff = _scan_window(
+                target,
+                cursor,
+                300,
+                0,
+                900,
+                now=datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(time_from, "2026-07-27T07:55:00.000Z")
+        self.assertEqual(time_to, "2026-07-27T08:45:00.000Z")
+        self.assertEqual(cutoff, datetime(2026, 7, 27, 8, 45, tzinfo=timezone.utc))
+
+    def test_pending_backlog_cursor_resumes_without_overlap_to_fixed_cutoff(self):
+        target = DiscoverTarget(
+            base_url="https://logs.example.test/_dashboards",
+            data_view_id="data-view-1",
+            time_from="now-2h",
+            time_to="now",
+        )
+        completed = datetime(2026, 7, 27, 8, 2, tzinfo=timezone.utc)
+        target_cutoff = datetime(2026, 7, 27, 8, 10, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cursor_path = root / "cursor.json"
+            _save_scan_cursor(
+                cursor_path,
+                target,
+                completed,
+                root / "summary.json",
+                backlog_pending=True,
+                backlog_target_through=target_cutoff,
+            )
+            cursor = _load_scan_cursor(cursor_path, target)
+            time_from, time_to, cutoff = _scan_window(
+                target,
+                cursor,
+                300,
+                now=datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(time_from, "2026-07-27T08:02:00.000Z")
+        self.assertEqual(time_to, "2026-07-27T08:10:00.000Z")
+        self.assertEqual(cutoff, target_cutoff)
+
+    def test_legacy_cursor_is_accepted_and_migrated_on_next_save(self):
+        target = DiscoverTarget(
+            base_url="https://logs.example.test/_dashboards",
+            data_view_id="data-view-1",
+            time_from="now-2h",
+            time_to="now",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cursor_path = root / "cursor.json"
+            cursor_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": LEGACY_SCAN_CURSOR_SCHEMA_VERSION,
+                        "source_sha256": _scan_source_sha256(
+                            target,
+                            LEGACY_SCAN_QUERY_VERSION,
+                        ),
+                        "completed_through": "2026-07-27T08:00:00.000Z",
+                        "last_summary": str(root / "old-summary.json"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cursor = _load_scan_cursor(cursor_path, target)
+            _save_scan_cursor(
+                cursor_path,
+                target,
+                datetime(2026, 7, 27, 8, 5, tzinfo=timezone.utc),
+                root / "new-summary.json",
+            )
+            migrated = json.loads(cursor_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            "2026-07-27T08:00:00.000Z",
+            cursor["completed_through"],
+        )
+        self.assertEqual("kibana-scan-cursor/v2", migrated["schema_version"])
+
     def test_new_cursor_initializes_from_latest_thirty_hits(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -368,6 +717,206 @@ class KibanaIssueConnectorTest(unittest.TestCase):
         self.assertEqual(summary["query"]["initial_scan_hits"], 30)
         self.assertTrue(cursor_exists)
 
+    def test_history_scan_moves_only_the_separate_backward_cursor(self):
+        window_end = datetime.now(timezone.utc) - timedelta(minutes=20)
+        window_start = window_end - timedelta(minutes=5)
+        hit_at = window_start + timedelta(seconds=1)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history_path = root / "history.json"
+            output = root / "output"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LOG_SANITIZER_HMAC_KEY": HMAC_KEY,
+                    "OPENSEARCH_PASSWORD": "password",
+                },
+                clear=True,
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern",
+                return_value=("logs-*", "@timestamp"),
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.find_previous_error_window",
+                return_value=(
+                    window_start.isoformat().replace("+00:00", "Z"),
+                    window_end.isoformat().replace("+00:00", "Z"),
+                ),
+            ) as discover, mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits",
+                return_value=ErrorHitBatch(
+                    hits=[
+                        error_hit(
+                            hit_at.isoformat().replace("+00:00", "Z"),
+                            "history-hit",
+                        )
+                    ],
+                    completed_through=window_end.isoformat().replace(
+                        "+00:00",
+                        "Z",
+                    ),
+                    backlog_remaining=False,
+                ),
+            ), contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--discover-url",
+                        DISCOVER_URL,
+                        "--username",
+                        "reader",
+                        "--history-state-file",
+                        str(history_path),
+                        "--scan-delay-seconds",
+                        "900",
+                        "--output-dir",
+                        str(output),
+                        "--name",
+                        "history-scan",
+                    ]
+                )
+            summary = json.loads(
+                (output / "history-scan" / "summary.json").read_text()
+            )
+            cursor = json.loads(history_path.read_text())
+
+        self.assertEqual(0, code)
+        discover.assert_called_once()
+        self.assertEqual("history_backfill_batch", summary["query"]["scan_mode"])
+        self.assertEqual(
+            window_start.isoformat(timespec="milliseconds").replace(
+                "+00:00",
+                "Z",
+            ),
+            cursor["next_before"],
+        )
+        self.assertTrue(summary["query"]["history_cursor_enabled"])
+
+    def test_history_scan_finishes_pending_bucket_at_original_window_start(self):
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(minutes=30)
+        pending_from = window_start + timedelta(minutes=2)
+        window_end = window_start + timedelta(minutes=5)
+        target = parse_discover_url(DISCOVER_URL)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history_path = root / "history.json"
+            output = root / "output"
+            _save_history_cursor(
+                history_path,
+                target,
+                range_from=now - timedelta(hours=2),
+                next_before=window_start,
+                pending_from=pending_from,
+                pending_to=window_end,
+                summary_path=root / "previous.json",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LOG_SANITIZER_HMAC_KEY": HMAC_KEY,
+                    "OPENSEARCH_PASSWORD": "password",
+                },
+                clear=True,
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern",
+                return_value=("logs-*", "@timestamp"),
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.find_previous_error_window",
+            ) as discover, mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits",
+                return_value=ErrorHitBatch(
+                    hits=[],
+                    completed_through=window_end.isoformat().replace(
+                        "+00:00",
+                        "Z",
+                    ),
+                    backlog_remaining=False,
+                ),
+            ), contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--discover-url",
+                        DISCOVER_URL,
+                        "--username",
+                        "reader",
+                        "--history-state-file",
+                        str(history_path),
+                        "--output-dir",
+                        str(output),
+                        "--name",
+                        "history-pending",
+                    ]
+                )
+            cursor = json.loads(history_path.read_text())
+
+        self.assertEqual(0, code)
+        discover.assert_not_called()
+        self.assertEqual(
+            window_start.isoformat(timespec="milliseconds").replace(
+                "+00:00",
+                "Z",
+            ),
+            cursor["next_before"],
+        )
+        self.assertEqual("", cursor["pending_from"])
+
+    def test_error_window_discovery_skips_empty_backlog_to_current_cutoff(self):
+        target = parse_discover_url(DISCOVER_URL)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cursor_path = root / "cursor.json"
+            output = root / "output"
+            _save_scan_cursor(
+                cursor_path,
+                target,
+                datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc),
+                root / "previous-summary.json",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LOG_SANITIZER_HMAC_KEY": HMAC_KEY,
+                    "OPENSEARCH_PASSWORD": "password",
+                },
+                clear=True,
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern",
+                return_value=("logs-*", "@timestamp"),
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.find_next_error_window",
+                return_value=None,
+            ) as discover, mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits"
+            ) as fetch, contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--discover-url",
+                        DISCOVER_URL,
+                        "--username",
+                        "reader",
+                        "--find-next-error-window",
+                        "--scan-state-file",
+                        str(cursor_path),
+                        "--output-dir",
+                        str(output),
+                        "--name",
+                        "empty-backlog",
+                    ]
+                )
+            summary = json.loads(
+                (output / "empty-backlog" / "summary.json").read_text()
+            )
+            cursor = json.loads(cursor_path.read_text())
+
+        self.assertEqual(code, 0)
+        discover.assert_called_once()
+        fetch.assert_not_called()
+        self.assertTrue(summary["query"]["error_window_discovery_used"])
+        self.assertTrue(summary["query"]["empty_error_range_skipped"])
+        self.assertEqual(
+            cursor["completed_through"],
+            summary["query"]["effective_time_to"],
+        )
+
     def test_failed_scan_does_not_advance_existing_cursor(self):
         target = parse_discover_url(DISCOVER_URL)
         original_cutoff = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
@@ -415,6 +964,124 @@ class KibanaIssueConnectorTest(unittest.TestCase):
 
         self.assertEqual(code, 2)
         self.assertEqual(cursor["completed_through"], "2026-07-27T08:00:00.000Z")
+
+    def test_successful_backlog_batch_advances_only_to_safe_boundary(self):
+        target = parse_discover_url(DISCOVER_URL)
+        original_cutoff = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cursor_path = root / "cursor.json"
+            output = root / "output"
+            _save_scan_cursor(
+                cursor_path,
+                target,
+                original_cutoff,
+                root / "previous-summary.json",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LOG_SANITIZER_HMAC_KEY": HMAC_KEY,
+                    "OPENSEARCH_PASSWORD": "password",
+                },
+                clear=True,
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern",
+                return_value=("logs-*", "@timestamp"),
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits",
+                return_value=ErrorHitBatch(
+                    hits=[error_hit("2026-07-27T08:01:00Z")],
+                    completed_through="2026-07-27T08:02:00.000Z",
+                    backlog_remaining=True,
+                ),
+            ), contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--discover-url",
+                        DISCOVER_URL,
+                        "--username",
+                        "reader",
+                        "--scan-state-file",
+                        str(cursor_path),
+                        "--output-dir",
+                        str(output),
+                        "--name",
+                        "backlog-batch",
+                    ]
+                )
+            cursor = json.loads(cursor_path.read_text(encoding="utf-8"))
+            summary = json.loads(
+                (output / "backlog-batch" / "summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(cursor["completed_through"], "2026-07-27T08:02:00.000Z")
+        self.assertTrue(cursor["backlog_pending"])
+        self.assertTrue(summary["query"]["backlog_remaining"])
+        self.assertEqual(
+            "incremental_backlog_batch",
+            summary["query"]["scan_mode"],
+        )
+
+    def test_deferred_backlog_batch_leaves_cursor_for_inbox_acknowledgement(self):
+        target = parse_discover_url(DISCOVER_URL)
+        original_cutoff = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cursor_path = root / "cursor.json"
+            output = root / "output"
+            _save_scan_cursor(
+                cursor_path,
+                target,
+                original_cutoff,
+                root / "previous-summary.json",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LOG_SANITIZER_HMAC_KEY": HMAC_KEY,
+                    "OPENSEARCH_PASSWORD": "password",
+                },
+                clear=True,
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.resolve_index_pattern",
+                return_value=("logs-*", "@timestamp"),
+            ), mock.patch(
+                "src.kibana_issue_connector.OpenSearchDashboardsClient.fetch_error_hits",
+                return_value=ErrorHitBatch(
+                    hits=[error_hit("2026-07-27T08:01:00Z")],
+                    completed_through="2026-07-27T08:02:00.000Z",
+                    backlog_remaining=True,
+                ),
+            ), contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--discover-url",
+                        DISCOVER_URL,
+                        "--username",
+                        "reader",
+                        "--scan-state-file",
+                        str(cursor_path),
+                        "--defer-cursor-commit",
+                        "--output-dir",
+                        str(output),
+                        "--name",
+                        "deferred-backlog-batch",
+                    ]
+                )
+            cursor = json.loads(cursor_path.read_text(encoding="utf-8"))
+            summary = json.loads(
+                (output / "deferred-backlog-batch" / "summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(cursor["completed_through"], "2026-07-27T08:00:00.000Z")
+        self.assertTrue(summary["query"]["cursor_commit_deferred"])
 
     def test_candidate_overflow_does_not_advance_existing_cursor(self):
         target = parse_discover_url(DISCOVER_URL)

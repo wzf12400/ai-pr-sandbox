@@ -253,6 +253,30 @@ class AIIssueGeneratorTest(unittest.TestCase):
 
         self.assertEqual([], errors)
 
+    def test_validated_repository_is_sufficient_object_context(self):
+        draft = valid_draft()
+        draft["object"].update(
+            {
+                "product": "unknown",
+                "service": "unknown",
+                "module": "unknown",
+                "code_object": "unknown",
+            }
+        )
+        draft["evidence"] = [
+            item
+            for item in draft["evidence"]
+            if item["claim_path"]
+            not in {"$.object.module", "$.object.code_object"}
+        ]
+
+        errors, _ = validate_draft(
+            draft,
+            compact_evidence(self.public_issue),
+        )
+
+        self.assertEqual([], errors)
+
     def test_array_level_acceptance_evidence_is_expanded_to_leaf_paths(self):
         draft = valid_draft()
         draft["acceptance_criteria"] = [
@@ -424,6 +448,55 @@ class AIIssueGeneratorTest(unittest.TestCase):
         self.assertEqual("needs_human_context", result["state"])
         self.assertTrue(result["validation"]["valid"])
         self.assertTrue(any("unknown placeholders" in item for item in result["validation"]["warnings"]))
+
+    def test_reviewer_missing_information_is_not_a_factual_claim(self):
+        draft = valid_draft()
+        draft["missing_information"] = [
+            "The affected versions are not provided.",
+        ]
+        draft["clarifying_questions"] = [
+            "Which versions are affected?",
+        ]
+        review = passing_review()
+        review["unsupported_claim_paths"] = [
+            "$.missing_information[0]",
+            "$.clarifying_questions[0]",
+        ]
+
+        result = generate_issue(
+            self.public_issue,
+            FakeProvider(draft),
+            FakeProvider(review),
+        )
+
+        self.assertEqual("needs_human_context", result["state"])
+        self.assertTrue(result["validation"]["valid"])
+        self.assertFalse(
+            any(
+                "unsupported claims" in error
+                for error in result["validation"]["errors"]
+            )
+        )
+
+    def test_evidence_mapping_has_a_separate_twenty_four_item_budget(self):
+        draft = valid_draft()
+        original = list(draft["evidence"])
+        draft["evidence"] = (original * 24)[:13]
+
+        errors, _ = validate_draft(draft, compact_evidence(self.public_issue))
+
+        self.assertNotIn(
+            "$.evidence must not contain more than 24 items",
+            errors,
+        )
+
+        draft["evidence"] = (original * 25)[:25]
+        errors, _ = validate_draft(draft, compact_evidence(self.public_issue))
+
+        self.assertIn(
+            "$.evidence must not contain more than 24 items",
+            errors,
+        )
 
     def test_gateway_configuration_requires_https_and_key(self):
         with patch.dict(os.environ, {}, clear=True):

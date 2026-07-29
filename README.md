@@ -59,7 +59,10 @@ python3 -m src.kibana_sanitizer examples/kibana_raw.json \
 The sanitizer parses the Java log envelope, removes secret and identifier
 fields, converts event and trace identifiers to HMAC references, omits internal
 container identifiers, and performs a final secret scan. Unclassified
-high-entropy values block downstream AI and Issue processing.
+high-entropy values block downstream AI and Issue processing. Recognized
+traceback/source paths are normalized first: machine and user prefixes are
+removed, opaque path segments are redacted, and only the useful code suffix is
+retained.
 
 ## Run the phase-one flow
 
@@ -160,6 +163,42 @@ method, and remaining work. The machine-readable and Markdown summaries are
 under `reports/swebench-routing-heldout-20260724.*`. A company-neutral source
 fixture is available at
 [`examples/swebench-routing-source.example.jsonl`](examples/swebench-routing-source.example.jsonl).
+
+### Prepare SWE-bench code-fix tests
+
+The code-fix adaptation is a separate offline layer. It gives an agent only
+the target repository, pinned pre-fix commit, public problem statement, and
+bounded environment metadata. Original instance IDs, fail-to-pass and
+pass-to-pass tests, and gold/test patch digests remain in a physically separate
+private label file.
+
+```bash
+./bin/prepare-swebench-codefix swebench-verified.jsonl \
+  --dataset-revision '<pinned-dataset-commit>' \
+  --max-instances 5 \
+  --tasks-output .benchmark-output/codefix-tasks.jsonl \
+  --labels-output .benchmark-output/codefix-labels.jsonl \
+  --summary-output .benchmark-output/codefix-preparation.json
+
+./bin/import-swebench-harness-results \
+  .benchmark-output/codefix-labels.jsonl \
+  logs/run_evaluation/<run-id>/<model-name> \
+  --output .benchmark-output/codefix-results.jsonl
+
+./bin/evaluate-swebench-codefix \
+  .benchmark-output/codefix-labels.jsonl \
+  .benchmark-output/codefix-results.jsonl \
+  --output-json .benchmark-output/codefix-evaluation.json \
+  --output-md .benchmark-output/codefix-evaluation.md
+```
+
+The harness importer maps official per-instance `report.json` files back to
+opaque case references and fails closed on incomplete or conflicting private
+test coverage. The evaluator marks a case resolved only when every F2P test
+passes and every P2P test remains passing. Preparation, importing, and scoring
+do not download repositories, run Docker, call Copilot, create Issues, or
+publish PRs. See
+[`docs/swebench-codefix-benchmark.md`](docs/swebench-codefix-benchmark.md).
 
 ## Run the natural-language to GitHub Issue flow
 
@@ -304,8 +343,12 @@ creates a Draft PR. It never merges or deploys.
 
 The persistent log path starts with `./bin/ai-agent watch --once` or
 `./bin/ai-agent watch`. It stores only parsed non-secret connection settings,
-sanitized artifacts, and deduplicated inbox state; the read-only password stays
-in process memory. `./bin/ai-agent inbox` lists incidents and
+sanitized artifacts, and deduplicated inbox state. In the interactive terminal,
+`log setup` stores the source and username locally and delegates one hidden
+password prompt to macOS Keychain; later scans load it automatically without
+putting it in JSON or a command argument. `log more` uses a separate backward
+cursor to continue through older non-empty five-minute windows without changing
+the normal forward cursor. `./bin/ai-agent inbox` lists incidents and
 `./bin/ai-agent review INCIDENT_ID` displays the exact Issue preview. Action
 `a` approves Issue publication through Copilot, tests, and Draft PR; action `i`
 publishes only the Issue and cannot authorize code work. The watcher runs in

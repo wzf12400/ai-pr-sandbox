@@ -193,6 +193,140 @@ class KibanaSanitizerTest(unittest.TestCase):
                 self.assertEqual(sanitized, sample)
                 self.assertFalse(any(item.action == "blocked" for item in findings))
 
+    def test_linux_versions_are_allowed_narrowly(self) -> None:
+        sample = "Linux-4.4.0-148-generic-x86_64-with-Ubuntu-14.04-trusty"
+
+        sanitized, findings = redact_free_text(sample)
+
+        self.assertEqual(sample, sanitized)
+        self.assertFalse(any(item.action == "blocked" for item in findings))
+
+    def test_python_traceback_path_is_minimized_without_blocking(self) -> None:
+        sample = (
+            '  File "/usr/lib/python3/dist-packages/astropy/table/connect.py", '
+            "line 129, in __call__"
+        )
+
+        sanitized, findings = redact_free_text(sample)
+
+        self.assertIn("dist-packages/astropy/table/connect.py", sanitized)
+        self.assertNotIn("/usr/lib/python3", sanitized)
+        self.assertFalse(any(item.action == "blocked" for item in findings))
+        self.assertTrue(
+            any(item.category == "code_path_prefix" for item in findings)
+        )
+
+    def test_poetry_traceback_path_is_minimized_without_blocking(self) -> None:
+        opaque_environment = "dj-bug-demo-FlhD0jMY-py3"
+        sample = (
+            '  File "/home/user/.cache/pypoetry/virtualenvs/'
+            f"{opaque_environment}/lib/python3.10/site-packages/"
+            'django/core/handlers/exception.py", line 34, in inner'
+        )
+
+        sanitized, findings = redact_free_text(sample)
+
+        self.assertIn(
+            "site-packages/django/core/handlers/exception.py",
+            sanitized,
+        )
+        self.assertNotIn(opaque_environment, sanitized)
+        self.assertFalse(any(item.action == "blocked" for item in findings))
+
+    def test_relative_code_path_is_classified_without_blocking(self) -> None:
+        sample = "django/db/backends/sqlite3/operations failed to adapt the value"
+
+        sanitized, findings = redact_free_text(sample)
+
+        self.assertIn("django/db/backends/sqlite3/operations", sanitized)
+        self.assertFalse(any(item.action == "blocked" for item in findings))
+        self.assertTrue(any(item.category == "code_path" for item in findings))
+
+    def test_relative_code_path_redacts_only_opaque_segment(self) -> None:
+        opaque = "qnfSqro0DlA9xZ4pW8vN6tR2"
+        sample = f"topic/django-developers/{opaque}/thread"
+
+        sanitized, findings = redact_free_text(sample)
+
+        self.assertNotIn(opaque, sanitized)
+        self.assertIn("[REDACTED:path_segment]", sanitized)
+        self.assertFalse(any(item.action == "blocked" for item in findings))
+
+    def test_python_traceback_path_with_opaque_segment_is_redacted_not_blocked(self) -> None:
+        opaque = "QWxhZGRpbjpvcGVuIHNlc2FtZV9yYW5kb21WYWx1ZQ=="
+        sample = f'  File "/tmp/{opaque}/connect.py", line 129, in __call__'
+
+        sanitized, findings = redact_free_text(sample)
+
+        self.assertNotIn(opaque, sanitized)
+        self.assertIn("[REDACTED:path_segment]", sanitized)
+        self.assertTrue(
+            any(
+                item.category == "path_identifier"
+                and item.action == "removed"
+                for item in findings
+            )
+        )
+        self.assertFalse(any(item.action == "blocked" for item in findings))
+
+    def test_git_object_identifier_is_redacted_without_blocking(self) -> None:
+        commits = (
+            "5ceaf14686ce626404afb6a5fbd3d8286410bf13",
+            "6bb2b855498b5c68d7cca8cceb710365d58e604",
+        )
+        for commit in commits:
+            with self.subTest(commit=commit):
+                sanitized, findings = redact_free_text(
+                    f"Regression introduced in commit {commit}."
+                )
+
+                self.assertNotIn(commit, sanitized)
+                self.assertIn("[REDACTED:commit_identifier]", sanitized)
+                self.assertFalse(any(item.action == "blocked" for item in findings))
+
+    def test_notebook_frames_and_traceback_function_names_are_code_context(self) -> None:
+        samples = (
+            "<ipython-input-13-2486f2ccf928> in <module>",
+            (
+                '  File "/srv/app/tests/test_policy.py", line 481, '
+                "in test_checkpolicywarning_by_fields"
+            ),
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                sanitized, findings = redact_free_text(sample)
+
+                self.assertFalse(any(item.action == "blocked" for item in findings))
+                self.assertNotIn("[REDACTED:unclassified_high_entropy]", sanitized)
+
+    def test_long_identifiers_are_allowed_only_in_explicit_code_syntax(self) -> None:
+        samples = (
+            (
+                "return WSGIServer((self.host, self.port), "
+                "QuietWSGIRequestHandler, allow_reuse_address=False)"
+            ),
+            (
+                "ALTER TABLE `profile` ADD CONSTRAINT "
+                "`b_manage_profile_account_id_ec864dcc_fk` "
+                "FOREIGN KEY (`account_id`) REFERENCES `account` (`id`)"
+            ),
+            (
+                "design.py:323:8: W0201: Attribute "
+                "'actionLoop_Last_Split_Image_To_First_Image' "
+                "defined outside __init__"
+            ),
+            (
+                "compiler_nameop: Assertion "
+                "`!_PyUnicode_EqualToASCIIString(name, \"None\")' failed"
+            ),
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                sanitized, findings = redact_free_text(sample)
+
+                self.assertEqual(sample, sanitized)
+                self.assertFalse(any(item.action == "blocked" for item in findings))
+
     def test_existing_redaction_marker_is_not_redacted_again(self) -> None:
         marker = "[REDACTED:unclassified_high_entropy]"
 

@@ -8,6 +8,7 @@ from unittest import mock
 from src.copilot_code_modifier import ProcessOutput
 from src.copilot_issue_provider import (
     CopilotCLIIssueProvider,
+    CopilotIssueProviderError,
     _parse_json_object,
 )
 
@@ -80,13 +81,38 @@ class CopilotIssueProviderTest(unittest.TestCase):
             stderr="authentication failed",
         )
 
-        with self.assertRaisesRegex(ValueError, "generation failed"):
+        with self.assertRaises(CopilotIssueProviderError) as raised:
             CopilotCLIIssueProvider("gpt-5.6-sol").complete(
                 system_prompt="Review.",
                 user_payload={},
                 schema_name="review",
                 schema={"type": "object"},
             )
+        self.assertEqual("cli_returned_failure", raised.exception.reason_category)
+
+    @mock.patch("src.copilot_issue_provider.shutil.which", return_value="/usr/bin/copilot")
+    @mock.patch("src.copilot_issue_provider._run_process")
+    def test_invalid_output_uses_a_bounded_failure_category(
+        self, run_process, _which
+    ):
+        run_process.return_value = ProcessOutput(
+            returncode=0,
+            stdout="not one JSON object",
+            stderr="must not be persisted",
+        )
+
+        with self.assertRaises(CopilotIssueProviderError) as raised:
+            CopilotCLIIssueProvider("gpt-5.6-sol").complete(
+                system_prompt="Review.",
+                user_payload={},
+                schema_name="review",
+                schema={"type": "object"},
+            )
+
+        self.assertEqual(
+            "invalid_structured_response",
+            raised.exception.reason_category,
+        )
 
 
 if __name__ == "__main__":

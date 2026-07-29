@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import getpass
+import hashlib
 import io
 import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -34,18 +36,52 @@ from src.copilot_code_modifier import load_issue_code_policy
 from src.log_incident_inbox import LogIncidentInbox
 
 
+# Importing readline installs Unicode-aware interactive editing for input().
+# Without it, the macOS terminal line discipline can delete individual UTF-8
+# bytes from Chinese text and leave a malformed character rendered as a space.
+try:
+    import readline as _readline  # noqa: F401
+except ImportError:  # pragma: no cover - platform fallback
+    _readline = None
+
+
 DEFAULT_LOG_OUTPUT_PATH = Path(".issue-entry-output/log-intake")
 DEFAULT_LOG_KEY_PATH = Path(".issue-entry-state/log-sanitizer-key.json")
 DEFAULT_LOG_INBOX_PATH = Path(".issue-entry-state/log-inbox.json")
 DEFAULT_LOG_SCAN_STATE_PATH = Path(".issue-entry-state/log-scan-cursor.json")
+DEFAULT_LOG_HISTORY_STATE_PATH = Path(
+    ".issue-entry-state/log-history-cursor.json"
+)
+LOG_INGESTION_SETTLE_DELAY_SECONDS = 900
 MAX_DISPLAYED_LOG_CANDIDATES = 20
 MAX_LOG_AUTH_ATTEMPTS = 3
 TERMINAL_STATES = {"awaiting_approval", "completed", "blocked"}
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 INTERACTIVE_LOG_ALIASES = frozenset({"/logs", "logs", "log", "日志", "日志平台"})
+INTERACTIVE_LOG_MORE_ALIASES = frozenset(
+    {
+        "/logs-more",
+        "logs more",
+        "log more",
+        "继续扫描",
+        "继续日志",
+        "更多日志",
+    }
+)
+INTERACTIVE_LOG_SETUP_ALIASES = frozenset(
+    {
+        "/logs-setup",
+        "logs setup",
+        "log setup",
+        "日志配置",
+        "配置日志",
+    }
+)
 INTERACTIVE_INBOX_ALIASES = frozenset({"/inbox", "inbox", "收件箱", "异常收件箱"})
 INTERACTIVE_HELP_ALIASES = frozenset({"/help", "help", "帮助", "?"})
 INTERACTIVE_EXIT_ALIASES = frozenset({"/exit", "exit", "quit", "q", "退出", "结束"})
+LOG_KEYCHAIN_SERVICE = "github-ai-agent-opensearch"
+MAX_KEYCHAIN_PASSWORD_BYTES = 16_384
 
 
 class Terminal:
@@ -100,6 +136,10 @@ def _interactive_input(value: str) -> tuple[str, str]:
     normalized = text.casefold()
     if not text:
         return "empty", ""
+    if normalized in INTERACTIVE_LOG_MORE_ALIASES:
+        return "logs_more", ""
+    if normalized in INTERACTIVE_LOG_SETUP_ALIASES:
+        return "logs_setup", ""
     if normalized in INTERACTIVE_LOG_ALIASES:
         return "logs", ""
     if normalized in INTERACTIVE_INBOX_ALIASES:
@@ -124,6 +164,8 @@ def _show_interactive_menu(terminal: Terminal) -> None:
     terminal.section("功能入口")
     terminal.line("  直接输入需求          自然语言 → Issue → AI 修改 → Draft PR")
     terminal.line("  logs / 日志           从日志平台读取并选择异常")
+    terminal.line("  log more / 继续扫描   向更早的非空日志窗口续扫")
+    terminal.line("  log setup / 日志配置  保存日志源并配置系统钥匙串")
     terminal.line("  inbox / 收件箱        查看已脱敏的异常收件箱")
     terminal.line("  review INCIDENT_ID    审阅一个异常并选择处理范围")
     terminal.line("  help / 帮助           再次显示本菜单")
@@ -452,6 +494,128 @@ def _resolved_log_connection(
     )
 
 
+def _log_keychain_account(discover_url: str, username: str) -> str:
+    target = kibana_issue_connector.parse_discover_url(discover_url)
+    identity = (
+        f"{target.base_url}\0{target.data_view_id}\0{username.strip()}".encode(
+            "utf-8"
+        )
+    )
+    return hashlib.sha256(identity).hexdigest()
+
+
+def _load_keychain_log_password(discover_url: str, username: str) -> str:
+    if sys.platform != "darwin" or not discover_url or not username:
+        return ""
+    try:
+        account = _log_keychain_account(discover_url, username)
+    except ValueError:
+        return ""
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-w",
+                "-s",
+                LOG_KEYCHAIN_SERVICE,
+                "-a",
+                account,
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    secret = result.stdout.rstrip(b"\r\n")
+    if result.returncode != 0 or not secret or len(secret) > MAX_KEYCHAIN_PASSWORD_BYTES:
+        return ""
+    try:
+        return secret.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
+def _store_keychain_log_password(discover_url: str, username: str) -> None:
+    if sys.platform != "darwin":
+        raise ValueError("系统钥匙串自动登录目前只支持 macOS。")
+    account = _log_keychain_account(discover_url, username)
+    result = subprocess.run(
+        [
+            "/usr/bin/security",
+            "add-generic-password",
+            "-U",
+            "-a",
+            account,
+            "-s",
+            LOG_KEYCHAIN_SERVICE,
+            "-l",
+            "GitHub AI Agent OpenSearch read-only login",
+            "-w",
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError("日志密码未保存到系统钥匙串。")
+
+
+def _initial_log_password(discover_url: str, username: str) -> str:
+    return (
+        os.environ.get(kibana_issue_connector.PASSWORD_ENV, "")
+        or _load_keychain_log_password(discover_url, username)
+    )
+
+
+def _configure_log_access(
+    *,
+    store: LocalConfigStore,
+    config: ControlCenterConfig,
+    terminal: Terminal,
+    input_fn: Callable[[str], str],
+    discover_url: str,
+    username: str,
+    interval_seconds: Optional[int],
+    max_scan_hits: int,
+    initial_scan_hits: int,
+) -> ControlCenterConfig:
+    configured = config.log_source
+    resolved_url = discover_url or (
+        configured.discover_url if configured is not None else ""
+    )
+    resolved_username = username or (
+        configured.username if configured is not None else ""
+    )
+    if not resolved_url:
+        resolved_url = _prompt(
+            input_fn,
+            "粘贴 OpenSearch Dashboards Discover 完整 URL: ",
+        )
+    if not resolved_username:
+        resolved_username = _prompt(input_fn, "只读日志账号: ")
+    interval = (
+        interval_seconds
+        if interval_seconds is not None
+        else configured.interval_seconds
+        if configured is not None
+        else 300
+    )
+    updated = store.save_log_source(
+        config,
+        discover_url=resolved_url,
+        username=resolved_username,
+        interval_seconds=interval,
+        max_scan_hits=max_scan_hits,
+        initial_scan_hits=initial_scan_hits,
+    )
+    terminal.ok("日志地址和只读账号已保存到本地 ignored 配置。")
+    terminal.line("  系统钥匙串将提示一次密码；输入内容不会进入程序参数或配置文件。")
+    _store_keychain_log_password(resolved_url, resolved_username)
+    terminal.ok("日志密码已保存到系统钥匙串；后续扫描将自动读取。")
+    return updated
+
+
 def _fetch_log_candidate(
     *,
     root: Path,
@@ -462,6 +626,8 @@ def _fetch_log_candidate(
     output_path: Path,
     key_path: Path,
     scan_state_path: Path = DEFAULT_LOG_SCAN_STATE_PATH,
+    history_state_path: Path = DEFAULT_LOG_HISTORY_STATE_PATH,
+    history_scan: bool = False,
     max_scan_hits: int = kibana_issue_connector.DEFAULT_MAX_SCAN_HITS,
     initial_scan_hits: int = kibana_issue_connector.DEFAULT_INITIAL_SCAN_HITS,
     inbox: Optional[LogIncidentInbox] = None,
@@ -472,48 +638,96 @@ def _fetch_log_candidate(
         "粘贴 OpenSearch Dashboards Discover 完整 URL: ",
     )
     username = username or _prompt(input_fn, "只读日志账号: ")
-    summary_path, summary, _password = _poll_with_auth_retry(
-        root=root,
-        terminal=terminal,
-        password_fn=password_fn,
-        initial_password=os.environ.get(kibana_issue_connector.PASSWORD_ENV, ""),
-        discover_url=discover_url,
-        username=username,
-        output_path=output_path,
-        key_path=key_path,
-        scan_state_path=scan_state_path,
-        max_scan_hits=max_scan_hits,
-        initial_scan_hits=initial_scan_hits,
-    )
-    if inbox is not None:
-        inbox.ingest_summary(summary_path)
-    candidates = summary.get("candidates", [])
-    selection = summary.get("selection", {})
+    password = _initial_log_password(discover_url, username)
+    displayed_entries: list[tuple[Dict[str, Any], Path]] = []
+    total_scanned = 0
+    total_eligible = 0
+    total_candidates = 0
+    batch_number = 0
+    while True:
+        batch_number += 1
+        summary_path, summary, password = _poll_with_auth_retry(
+            root=root,
+            terminal=terminal,
+            password_fn=password_fn,
+            initial_password=password,
+            discover_url=discover_url,
+            username=username,
+            output_path=output_path,
+            key_path=key_path,
+            scan_state_path=scan_state_path,
+            history_state_path=history_state_path,
+            history_scan=history_scan,
+            max_scan_hits=max_scan_hits,
+            initial_scan_hits=initial_scan_hits,
+        )
+        if inbox is not None:
+            inbox.ingest_summary(summary_path)
+        if history_scan:
+            _commit_log_history_cursor(
+                discover_url=discover_url,
+                history_state_path=history_state_path,
+                summary_path=summary_path,
+                summary=summary,
+            )
+        else:
+            _commit_log_scan_cursor(
+                discover_url=discover_url,
+                scan_state_path=scan_state_path,
+                summary_path=summary_path,
+                summary=summary,
+            )
+        candidates = summary.get("candidates", [])
+        selection = summary.get("selection", {})
+        total_scanned += int(selection.get("scanned_hits", 0))
+        total_eligible += int(selection.get("eligible_events", 0))
+        total_candidates += len(candidates)
+        for item in candidates:
+            if len(displayed_entries) >= MAX_DISPLAYED_LOG_CANDIDATES:
+                break
+            displayed_entries.append((item, summary_path.parent))
+        if not summary.get("query", {}).get("backlog_remaining", False):
+            break
+        terminal.warn("本轮达到批次上限；下次将从当前游标继续。")
+        break
     terminal.ok(
-        f"扫描 {selection.get('scanned_hits', 0)} · "
-        f"有效 {selection.get('eligible_events', 0)} · "
-        f"异常 {len(candidates)}"
+        f"扫描 {total_scanned} · "
+        f"有效 {total_eligible} · "
+        f"异常 {total_candidates}"
     )
-    if not candidates:
-        raise ValueError("没有可进入 AI 流程的安全错误候选。")
+    if not displayed_entries:
+        query = summary.get("query", {})
+        if history_scan and query.get("history_exhausted", False):
+            raise ValueError("当前 Discover 时间范围内已没有更早的错误日志。")
+        if history_scan:
+            raise ValueError(
+                "这一批没有可进入 AI 流程的安全错误候选；"
+                "可再次输入 log more 继续向更早窗口扫描。"
+            )
+        raise ValueError(
+            "没有可进入 AI 流程的安全错误候选；"
+            "输入 log more 可继续向更早窗口扫描。"
+        )
     terminal.section("选择异常")
-    displayed = candidates[:MAX_DISPLAYED_LOG_CANDIDATES]
-    for index, item in enumerate(displayed, start=1):
+    for index, (item, _summary_parent) in enumerate(displayed_entries, start=1):
         services = ", ".join(item.get("services", [])) or "unknown"
         terminal.line(
             f"  {index}. {services} · {item.get('event_count', 0)} 条 · "
             f"{item.get('first_seen_at', '')}"
         )
-    if len(candidates) > len(displayed):
-        terminal.line(f"  … 其余 {len(candidates) - len(displayed)} 条已入收件箱")
-    selected = _prompt(input_fn, f"选择 1-{len(displayed)} [1]: ") or "1"
-    if not selected.isdigit() or not 1 <= int(selected) <= len(displayed):
+    if total_candidates > len(displayed_entries):
+        terminal.line(
+            f"  … 其余 {total_candidates - len(displayed_entries)} 条已入收件箱"
+        )
+    selected = _prompt(input_fn, f"选择 1-{len(displayed_entries)} [1]: ") or "1"
+    if not selected.isdigit() or not 1 <= int(selected) <= len(displayed_entries):
         raise ValueError("日志候选编号无效。")
-    artifact = Path(str(displayed[int(selected) - 1]["artifact"]))
+    selected_item, selected_summary_parent = displayed_entries[int(selected) - 1]
+    artifact = Path(str(selected_item["artifact"]))
     if not artifact.is_absolute():
         artifact = root / artifact
     resolved = artifact.resolve()
-    if not resolved.is_relative_to(summary_path.parent.resolve()):
+    if not resolved.is_relative_to(selected_summary_parent.resolve()):
         raise ValueError("日志候选证据路径无效。")
     return json.loads(resolved.read_text(encoding="utf-8"))
 
@@ -528,6 +742,8 @@ def _poll_log_candidates(
     output_path: Path,
     key_path: Path,
     scan_state_path: Path,
+    history_state_path: Path,
+    history_scan: bool,
     max_scan_hits: int,
     initial_scan_hits: int,
 ) -> tuple[Path, Dict[str, Any]]:
@@ -541,6 +757,11 @@ def _poll_log_candidates(
     scan_state_path = (
         scan_state_path if scan_state_path.is_absolute() else root / scan_state_path
     )
+    history_state_path = (
+        history_state_path
+        if history_state_path.is_absolute()
+        else root / history_state_path
+    )
     stdout = io.StringIO()
     stderr = io.StringIO()
     environment = {
@@ -552,28 +773,47 @@ def _poll_log_candidates(
         with _temporary_environment(environment), contextlib.redirect_stdout(
             stdout
         ), contextlib.redirect_stderr(stderr):
-            return kibana_issue_connector.main(
+            arguments = [
+                "--discover-url",
+                discover_url,
+                "--username",
+                username,
+                "--max-candidates",
+                str(max_scan_hits),
+                "--fetch-size",
+                "50",
+                "--max-scan-hits",
+                str(max_scan_hits),
+                "--initial-scan-hits",
+                str(initial_scan_hits),
+            ]
+            if history_scan:
+                arguments.extend(
+                    [
+                        "--history-state-file",
+                        str(history_state_path),
+                    ]
+                )
+            else:
+                arguments.extend(
+                    [
+                        "--scan-state-file",
+                        str(scan_state_path),
+                        "--find-next-error-window",
+                    ]
+                )
+            arguments.extend(
                 [
-                    "--discover-url",
-                    discover_url,
-                    "--username",
-                    username,
-                    "--max-candidates",
-                    str(max_scan_hits),
-                    "--fetch-size",
-                    "50",
-                    "--max-scan-hits",
-                    str(max_scan_hits),
-                    "--initial-scan-hits",
-                    str(initial_scan_hits),
-                    "--scan-state-file",
-                    str(scan_state_path),
+                    "--scan-delay-seconds",
+                    str(LOG_INGESTION_SETTLE_DELAY_SECONDS),
+                    "--defer-cursor-commit",
                     "--output-dir",
                     str(output_path),
                     "--name",
                     run_name,
                 ]
             )
+            return kibana_issue_connector.main(arguments)
 
     code = _run_with_spinner(terminal, "扫描中", run_connector)
     if code != 0:
@@ -582,6 +822,102 @@ def _poll_log_candidates(
     summary_path = output_path / run_name / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     return summary_path, summary
+
+
+def _commit_log_scan_cursor(
+    *,
+    discover_url: str,
+    scan_state_path: Path,
+    summary_path: Path,
+    summary: Dict[str, Any],
+) -> None:
+    query = summary.get("query", {})
+    deferred = query.get("cursor_commit_deferred", False)
+    if not isinstance(deferred, bool):
+        raise ValueError("日志扫描摘要的 cursor 状态无效。")
+    if not deferred:
+        return
+    target = kibana_issue_connector.parse_discover_url(discover_url)
+    source = summary.get("source", {})
+    if (
+        not isinstance(source, dict)
+        or source.get("base_url") != target.base_url
+        or source.get("data_view_id") != target.data_view_id
+        or source.get("time_from") != target.time_from
+        or source.get("time_to") != target.time_to
+    ):
+        raise ValueError("日志扫描摘要与配置的数据源不一致。")
+    completed_through = kibana_issue_connector._parse_utc_timestamp(
+        str(query.get("batch_completed_through", ""))
+    )
+    backlog_remaining = bool(query.get("backlog_remaining", False))
+    effective_time_to = kibana_issue_connector._parse_utc_timestamp(
+        str(query.get("effective_time_to", ""))
+    )
+    if not backlog_remaining and completed_through != effective_time_to:
+        raise ValueError("日志扫描摘要的完成边界无效。")
+    kibana_issue_connector._save_scan_cursor(
+        scan_state_path,
+        target,
+        completed_through,
+        summary_path,
+        backlog_pending=backlog_remaining,
+        backlog_target_through=(
+            effective_time_to if backlog_remaining else None
+        ),
+    )
+
+
+def _commit_log_history_cursor(
+    *,
+    discover_url: str,
+    history_state_path: Path,
+    summary_path: Path,
+    summary: Dict[str, Any],
+) -> None:
+    query = summary.get("query", {})
+    deferred = query.get("history_cursor_commit_deferred", False)
+    if not isinstance(deferred, bool):
+        raise ValueError("日志历史续扫摘要的 cursor 状态无效。")
+    if not deferred:
+        return
+    target = kibana_issue_connector.parse_discover_url(discover_url)
+    source = summary.get("source", {})
+    if (
+        not isinstance(source, dict)
+        or source.get("base_url") != target.base_url
+        or source.get("data_view_id") != target.data_view_id
+        or source.get("time_from") != target.time_from
+        or source.get("time_to") != target.time_to
+    ):
+        raise ValueError("日志历史续扫摘要与配置的数据源不一致。")
+    range_from = kibana_issue_connector._parse_utc_timestamp(
+        str(query.get("history_range_from", ""))
+    )
+    next_before = kibana_issue_connector._parse_utc_timestamp(
+        str(query.get("history_next_before", ""))
+    )
+    pending_from_value = str(query.get("history_pending_from", "")).strip()
+    pending_to_value = str(query.get("history_pending_to", "")).strip()
+    pending_from = (
+        kibana_issue_connector._parse_utc_timestamp(pending_from_value)
+        if pending_from_value
+        else None
+    )
+    pending_to = (
+        kibana_issue_connector._parse_utc_timestamp(pending_to_value)
+        if pending_to_value
+        else None
+    )
+    kibana_issue_connector._save_history_cursor(
+        history_state_path,
+        target,
+        range_from=range_from,
+        next_before=next_before,
+        summary_path=summary_path,
+        pending_from=pending_from,
+        pending_to=pending_to,
+    )
 
 
 def _poll_with_auth_retry(
@@ -597,6 +933,8 @@ def _poll_with_auth_retry(
     scan_state_path: Path,
     max_scan_hits: int,
     initial_scan_hits: int,
+    history_state_path: Path = DEFAULT_LOG_HISTORY_STATE_PATH,
+    history_scan: bool = False,
 ) -> tuple[Path, Dict[str, Any], str]:
     password = initial_password or password_fn("› 日志密码: ")
     if not password:
@@ -613,6 +951,8 @@ def _poll_with_auth_retry(
                 output_path=output_path,
                 key_path=key_path,
                 scan_state_path=scan_state_path,
+                history_state_path=history_state_path,
+                history_scan=history_scan,
                 max_scan_hits=max_scan_hits,
                 initial_scan_hits=initial_scan_hits,
             )
@@ -920,32 +1260,46 @@ def _watch_logs(
             initial_scan_hits=initial_scan_hits,
         )
         terminal.ok("日志地址、只读账号和轮询间隔已保存；密码未保存。")
-    password = os.environ.get(kibana_issue_connector.PASSWORD_ENV, "")
+    password = _initial_log_password(resolved_url, resolved_username)
     run_count = 0
     terminal.section("日志监听")
     terminal.field("Mode", "前台轮询")
     terminal.field("Interval", f"{interval}s")
     while max_runs == 0 or run_count < max_runs:
         run_count += 1
-        summary_path, summary, password = _poll_with_auth_retry(
-            root=root,
-            terminal=terminal,
-            password_fn=password_fn,
-            initial_password=password,
-            discover_url=resolved_url,
-            username=resolved_username,
-            output_path=output_path,
-            key_path=key_path,
-            scan_state_path=scan_state_path,
-            max_scan_hits=max_scan_hits,
-            initial_scan_hits=initial_scan_hits,
-        )
-        result = inbox.ingest_summary(summary_path)
-        selection = summary.get("selection", {})
-        terminal.line(
-            f"  第 {run_count} 次：扫描 {selection.get('scanned_hits', 0)}，"
-            f"新增 {result['added']}，去重 {result['deduplicated']}"
-        )
+        batch_number = 0
+        while True:
+            batch_number += 1
+            summary_path, summary, password = _poll_with_auth_retry(
+                root=root,
+                terminal=terminal,
+                password_fn=password_fn,
+                initial_password=password,
+                discover_url=resolved_url,
+                username=resolved_username,
+                output_path=output_path,
+                key_path=key_path,
+                scan_state_path=scan_state_path,
+                max_scan_hits=max_scan_hits,
+                initial_scan_hits=initial_scan_hits,
+            )
+            result = inbox.ingest_summary(summary_path)
+            _commit_log_scan_cursor(
+                discover_url=resolved_url,
+                scan_state_path=scan_state_path,
+                summary_path=summary_path,
+                summary=summary,
+            )
+            selection = summary.get("selection", {})
+            terminal.line(
+                f"  第 {run_count} 次 / 批次 {batch_number}："
+                f"扫描 {selection.get('scanned_hits', 0)}，"
+                f"新增 {result['added']}，去重 {result['deduplicated']}"
+            )
+            if not summary.get("query", {}).get("backlog_remaining", False):
+                break
+            terminal.warn("本轮达到批次上限；下次轮询将从当前游标继续。")
+            break
         if max_runs and run_count >= max_runs:
             break
         try:
@@ -966,6 +1320,7 @@ def _run_interactive_session(
     input_fn: Callable[[str], str],
     password_fn: Callable[[str], str],
     args: argparse.Namespace,
+    store: Optional[LocalConfigStore] = None,
 ) -> int:
     while True:
         try:
@@ -985,6 +1340,35 @@ def _run_interactive_session(
             if action == "help":
                 _show_interactive_menu(terminal)
                 continue
+            if action == "logs_setup":
+                if store is None:
+                    raise ValueError("当前会话不能保存日志配置。")
+                max_scan_hits = (
+                    args.max_scan_hits
+                    if args.max_scan_hits is not None
+                    else config.log_source.max_scan_hits
+                    if config.log_source is not None
+                    else kibana_issue_connector.DEFAULT_MAX_SCAN_HITS
+                )
+                initial_scan_hits = (
+                    args.initial_scan_hits
+                    if args.initial_scan_hits is not None
+                    else config.log_source.initial_scan_hits
+                    if config.log_source is not None
+                    else kibana_issue_connector.DEFAULT_INITIAL_SCAN_HITS
+                )
+                config = _configure_log_access(
+                    store=store,
+                    config=config,
+                    terminal=terminal,
+                    input_fn=input_fn,
+                    discover_url=args.discover_url,
+                    username=args.username,
+                    interval_seconds=args.interval_seconds,
+                    max_scan_hits=max_scan_hits,
+                    initial_scan_hits=initial_scan_hits,
+                )
+                continue
             if action == "inbox":
                 _show_inbox(terminal, inbox)
                 continue
@@ -998,7 +1382,7 @@ def _run_interactive_session(
                     preview_only=args.preview_only,
                 )
                 continue
-            if action == "logs":
+            if action in {"logs", "logs_more"}:
                 max_scan_hits = (
                     args.max_scan_hits
                     if args.max_scan_hits is not None
@@ -1027,6 +1411,12 @@ def _run_interactive_session(
                     output_path=args.log_output,
                     key_path=args.log_key,
                     scan_state_path=args.log_scan_state,
+                    history_state_path=getattr(
+                        args,
+                        "log_history_state",
+                        DEFAULT_LOG_HISTORY_STATE_PATH,
+                    ),
+                    history_scan=action == "logs_more",
                     max_scan_hits=max_scan_hits,
                     initial_scan_hits=initial_scan_hits,
                     inbox=inbox,
@@ -1084,6 +1474,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--log-scan-state",
         type=Path,
         default=DEFAULT_LOG_SCAN_STATE_PATH,
+    )
+    parser.add_argument(
+        "--log-history-state",
+        type=Path,
+        default=DEFAULT_LOG_HISTORY_STATE_PATH,
     )
     parser.add_argument(
         "--max-scan-hits",
@@ -1233,6 +1628,7 @@ def main(
         if not args.logs and not request:
             return _run_interactive_session(
                 root=root,
+                store=store,
                 config=config,
                 workflow=workflow,
                 inbox=inbox,
@@ -1270,6 +1666,7 @@ def main(
                 output_path=args.log_output,
                 key_path=args.log_key,
                 scan_state_path=args.log_scan_state,
+                history_state_path=args.log_history_state,
                 max_scan_hits=max_scan_hits,
                 initial_scan_hits=initial_scan_hits,
                 inbox=inbox,

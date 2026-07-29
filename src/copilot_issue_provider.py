@@ -20,6 +20,21 @@ MAX_RESPONSE_BYTES = 1_000_000
 MODEL_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,100}")
 
 
+class CopilotIssueProviderError(ValueError):
+    """Expose only a bounded failure category to the local workflow."""
+
+    def __init__(self, reason_category: str):
+        if reason_category not in {
+            "cli_not_installed",
+            "cli_invocation_failed",
+            "cli_returned_failure",
+            "invalid_structured_response",
+        }:
+            raise ValueError("unsupported Copilot Issue provider failure category")
+        super().__init__("Copilot Issue provider failed")
+        self.reason_category = reason_category
+
+
 def _structured_prompt(
     system_prompt: str,
     user_payload: Mapping[str, Any],
@@ -97,7 +112,7 @@ class CopilotCLIIssueProvider:
         schema: Dict[str, Any],
     ) -> Completion:
         if not shutil.which(self.executable):
-            raise ValueError("Copilot CLI is not installed")
+            raise CopilotIssueProviderError("cli_not_installed")
         prompt = _structured_prompt(system_prompt, user_payload, schema_name, schema)
         args = [
             self.executable,
@@ -123,16 +138,24 @@ class CopilotCLIIssueProvider:
             root = Path(directory)
             environment["COPILOT_HOME"] = str(root / "copilot-home")
             args.append(f"--log-dir={root / 'logs'}")
-            result = _run_process(
-                args,
-                root,
-                self.timeout_seconds,
-                input_text=prompt,
-                env=environment,
-            )
+            try:
+                result = _run_process(
+                    args,
+                    root,
+                    self.timeout_seconds,
+                    input_text=prompt,
+                    env=environment,
+                )
+            except ValueError as exc:
+                raise CopilotIssueProviderError("cli_invocation_failed") from exc
         if result.returncode != 0:
-            raise ValueError("Copilot structured Issue generation failed")
-        content = _parse_json_object(result.stdout)
+            raise CopilotIssueProviderError("cli_returned_failure")
+        try:
+            content = _parse_json_object(result.stdout)
+        except ValueError as exc:
+            raise CopilotIssueProviderError(
+                "invalid_structured_response"
+            ) from exc
         request_material = (
             f"{self.model}\n{schema_name}\n"
             f"{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}\n"

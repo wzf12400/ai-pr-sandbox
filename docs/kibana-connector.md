@@ -78,23 +78,49 @@ When a new `--scan-state-file` has no cursor, the connector initializes from
 the latest 30 errors (`--initial-scan-hits`, maximum 100) instead of attempting
 to drain the entire historical Discover window. This deliberately establishes
 a current starting point. Later runs start five minutes before the completed
-watermark to cover delayed ingestion and read 50-hit scroll pages from one
-fixed OpenSearch snapshot through a new cutoff. The default incremental ceiling
-is 1,000 hits and may be raised, explicitly, to 5,000 with
-`--max-scan-hits`. Reaching the ceiling does not silently truncate the result:
-the run fails and its cursor remains unchanged. The cursor stores only a
-source-bound UTC watermark and local summary path and advances only after
-sanitized artifacts are written. Scroll IDs and raw responses remain in
-process memory and the scroll context is closed at the end of the request.
+watermark to cover delayed ingestion and read 50-hit scroll pages in ascending
+event time through a fixed cutoff. The default batch ceiling is 1,000 hits and
+may be raised, explicitly, to 5,000 with `--max-scan-hits`. Larger windows are
+split only at a complete timestamp boundary. The cursor records both the safe
+batch boundary and the original fixed cutoff. The terminal watcher first sends
+a `size: 0`, count-only five-minute histogram across the cursor backlog. That
+request returns no log documents, does not sort hits, and identifies the first
+non-empty error window. The connector fetches documents only from that window;
+if every bucket is empty, the cursor may advance to the current cutoff after
+the empty sanitized summary is accepted. The terminal watcher defines that
+cutoff as 15 minutes behind wall-clock time, giving delayed ingestion a settle
+window; direct connector users can select this with `--scan-delay-seconds`.
+Summaries record both the delay and the cursor time field (`@timestamp`) so this
+bounded protection is not confused with a true ingestion-time cursor. Direct
+connector users can enable histogram discovery with
+`--find-next-error-window`; the older fixed time-slice fallback remains
+available through `--max-catchup-window-seconds`. A batch
+boundary advances only after its sanitized artifacts and summary are written.
+A failure leaves the last safe boundary unchanged. More than the configured
+limit at one exact timestamp fails closed because time-only pagination cannot
+split that group without a risk of omission. Scroll IDs and raw responses
+remain in process memory and the scroll context is closed at the end of each
+batch request.
+
+Manual history continuation uses `--history-state-file` instead of
+`--scan-state-file`. The two cursor types are mutually exclusive. A history
+cursor fixes the Discover range's lower bound, uses a descending count-only
+five-minute histogram to find the latest remaining non-empty bucket, and reads
+that bucket with the same complete-timestamp batching rule. It advances only
+after sanitized output is accepted and never changes the normal forward
+watermark. The terminal exposes this as `log more / 继续扫描`.
 
 Sanitization minimizes request URLs to a checked route plus query-key names;
 the host, fragment, and every query value are removed. Credential-like keys
 such as `appKey`, `sign`, and `signature` still mark the incident as requiring
 security review, so the connector cannot publish it. Client application and
-instance descriptors are removed using their explicit log syntax. Long Java
-identifiers bypass the entropy rule only in narrow exception, stack-frame, or
-XML class-path contexts. An unexplained high-entropy value anywhere else still
-blocks AI and GitHub processing.
+instance descriptors are removed using their explicit log syntax. Source-code
+paths are classified before generic entropy scanning. Absolute machine/user
+prefixes are removed, opaque path segments and Git object identifiers are
+redacted, and useful package/file suffixes remain. Long Java/Python identifiers
+are retained only in explicit exception, stack-frame, notebook, callable,
+schema, or linter syntax. An unexplained high-entropy value anywhere else
+still blocks AI and GitHub processing.
 
 MyBatis-style `### SQL:` statements are removed as a whole before entropy
 analysis. The surrounding mapper, exception, and database error evidence is

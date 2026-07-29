@@ -29,7 +29,10 @@ from src.copilot_code_modifier import (
     _run_process,
     load_issue_code_policy,
 )
-from src.copilot_issue_provider import CopilotCLIIssueProvider
+from src.copilot_issue_provider import (
+    CopilotCLIIssueProvider,
+    CopilotIssueProviderError,
+)
 from src.issue_draft import _atomic_write_json, _atomic_write_text
 from src.issue_entry import compose_evidence
 from src.kibana_issue_connector import (
@@ -56,7 +59,7 @@ RUN_SCHEMA_VERSION = "local-ai-agent-run/v1"
 DEFAULT_CONFIG_PATH = Path(".issue-entry-state/control-center.json")
 DEFAULT_RUNS_PATH = Path(".issue-entry-output/control-center")
 MAX_REQUEST_BYTES = 64_000
-MAX_DESCRIPTION_CHARS = 4_000
+MAX_DESCRIPTION_CHARS = 8_000
 LOGIN_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 RUN_ID_PATTERN = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
 MAX_RESUME_ATTEMPTS = 3
@@ -78,6 +81,22 @@ SAFE_ERROR_MESSAGES = {
     "generation_blocked": (
         "需求信息不足，或 Issue 草案未通过安全复核。"
         "请补充目标功能、预期行为和验收标准后重试。"
+    ),
+    "github_authentication_required": (
+        "GitHub CLI 登录已失效。请在本机重新运行 gh auth login 后重试；"
+        "本次没有创建 Issue 或修改代码。"
+    ),
+    "copilot_cli_unavailable": (
+        "未检测到可用的 GitHub Copilot CLI。请恢复本机 Copilot CLI 后重试；"
+        "本次没有创建 Issue 或修改代码。"
+    ),
+    "issue_provider_failed": (
+        "Issue 生成模型未能完成调用。请确认 GitHub Copilot CLI 当前可用后重试；"
+        "本次没有创建 Issue 或修改代码。"
+    ),
+    "issue_provider_invalid_response": (
+        "Issue 生成模型未返回合规的结构化结果。请重新输入需求重试；"
+        "本次没有创建 Issue 或修改代码。"
     ),
     "issue_draft_validation_failed": "Issue 草案结构或证据映射未通过本地校验。",
     "issue_review_rejected": "Issue 草案未通过独立安全复核。",
@@ -726,6 +745,7 @@ class ControlCenterWorkflow:
         *,
         approval_client: Optional[GitHubCLIApprovalClient] = None,
         issue_provider_factory: Optional[Any] = None,
+        identity_inspector: Optional[Any] = None,
     ):
         self.config_store = config_store
         self.runs_path = runs_path
@@ -734,6 +754,7 @@ class ControlCenterWorkflow:
             issue_provider_factory
             or (lambda model: CopilotCLIIssueProvider(model))
         )
+        self.identity_inspector = identity_inspector or inspect_identity
         self._locks: Dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
 
@@ -786,7 +807,9 @@ class ControlCenterWorkflow:
     def create(self, description: str) -> Dict[str, Any]:
         description = description.strip()
         if not description or len(description) > MAX_DESCRIPTION_CHARS:
-            raise ValueError("description must contain between 1 and 4000 characters")
+            raise ValueError(
+                f"description must contain between 1 and {MAX_DESCRIPTION_CHARS} characters"
+            )
         digest = hashlib.sha256(description.encode("utf-8")).hexdigest()
         return self._create_run(description, "natural_language", digest)
 
@@ -889,6 +912,34 @@ class ControlCenterWorkflow:
                 if config is None or config.sha256 != record["config_sha256"]:
                     raise RuntimeError("configuration_changed")
                 run_dir = self._run_dir(run_id)
+                identity = self.identity_inspector(
+                    Path(config.enabled_repositories[0].local_path)
+                )
+                github_identity = identity.get("github", {})
+                if (
+                    not isinstance(github_identity, dict)
+                    or github_identity.get("authenticated") is not True
+                    or github_identity.get("login") != config.github_login
+                ):
+                    self._write_failure_audit(
+                        run_id,
+                        stage="identity_preflight",
+                        code="github_authentication_required",
+                        reason_category="github_login_unavailable_or_changed",
+                    )
+                    raise RuntimeError("github_authentication_required")
+                copilot_identity = identity.get("copilot", {})
+                if (
+                    not isinstance(copilot_identity, dict)
+                    or copilot_identity.get("available") is not True
+                ):
+                    self._write_failure_audit(
+                        run_id,
+                        stage="identity_preflight",
+                        code="copilot_cli_unavailable",
+                        reason_category="copilot_cli_unavailable",
+                    )
+                    raise RuntimeError("copilot_cli_unavailable")
                 try:
                     if input_type == "natural_language":
                         evidence = _compose_managed_evidence(
@@ -1038,6 +1089,28 @@ class ControlCenterWorkflow:
                             "message": SAFE_ERROR_MESSAGES.get(
                                 code, SAFE_ERROR_MESSAGES["unexpected_failure"]
                             ),
+                        },
+                    }
+                )
+            except CopilotIssueProviderError as exc:
+                code = (
+                    "issue_provider_invalid_response"
+                    if exc.reason_category == "invalid_structured_response"
+                    else "issue_provider_failed"
+                )
+                self._write_failure_audit(
+                    run_id,
+                    stage="issue_generation",
+                    code=code,
+                    reason_category=exc.reason_category,
+                )
+                record.update(
+                    {
+                        "status": "blocked",
+                        "updated_at": _utc_now(),
+                        "failure": {
+                            "code": code,
+                            "message": SAFE_ERROR_MESSAGES[code],
                         },
                     }
                 )
