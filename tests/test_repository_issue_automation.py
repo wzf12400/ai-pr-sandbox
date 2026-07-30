@@ -119,6 +119,66 @@ class RepositoryIssueAutomationTest(unittest.TestCase):
             result["publication"]["status"],
         )
 
+    def test_single_repository_without_operator_binding_requires_code_evidence(self):
+        single_scope = RepositorySearchScope(
+            "synthetic-routing-probe",
+            (RepositoryEntry(REPOSITORIES[0], True, "main", ("probe",)),),
+            SearchLimits(12, 1, 5),
+        )
+        search = FakeSearchAdapter()
+
+        result = automate_repository_issue(
+            generation(),
+            {"safety": {"ai_allowed": True, "security_review_required": False}},
+            single_scope,
+            search,
+            "github-tree-probe",
+            policy(),
+            FakeIssueClient(),
+            False,
+        )
+
+        self.assertEqual("resolved", result["resolution"]["status"])
+        self.assertEqual("github", result["resolution"]["search_audit"]["provider"])
+        self.assertGreater(len(search.calls), 0)
+        self.assertTrue(
+            all(call[0] == REPOSITORIES[0] for call in search.calls)
+        )
+
+    def test_single_repository_without_matching_code_is_not_selected(self):
+        single_scope = RepositorySearchScope(
+            "synthetic-routing-probe",
+            (RepositoryEntry(REPOSITORIES[0], True, "main", ("probe",)),),
+            SearchLimits(12, 1, 5),
+        )
+
+        class EmptySearchAdapter:
+            def __init__(self):
+                self.calls = []
+
+            def search(self, repository, term, max_hits):
+                self.calls.append((repository, term, max_hits))
+                return SearchHits(frozenset())
+
+        search = EmptySearchAdapter()
+        client = FakeIssueClient()
+        result = automate_repository_issue(
+            generation(),
+            {"safety": {"ai_allowed": True, "security_review_required": False}},
+            single_scope,
+            search,
+            "github-tree-probe",
+            policy(),
+            client,
+            True,
+        )
+
+        self.assertEqual("unknown", result["resolution"]["status"])
+        self.assertIsNone(result["resolution"]["selected_repository"])
+        self.assertGreater(len(search.calls), 0)
+        self.assertEqual("blocked", result["publication"]["status"])
+        self.assertEqual([], client.create_calls)
+
     def test_preselected_repository_is_rejected_for_multi_repository_scope(self):
         with self.assertRaisesRegex(ValueError, "single enabled scope"):
             automate_repository_issue(

@@ -42,11 +42,14 @@ Code execution uses a fresh per-run checkout at the current
 silently become the next run's base. The source checkout is not switched,
 reset, or cleaned by this preparation.
 
-When the configuration enables exactly one repository, that operator-approved
-scope is the repository decision. The agent does not require the request to
-contain an English class, method, or file name and does not run GitHub code
-search merely to rediscover the only allowed repository. With multiple enabled
-repositories, the evidence-grounded resolver remains mandatory.
+For a natural-language request or an explicit revision, exactly one enabled
+repository remains an operator-approved repository decision. The agent does
+not require those direct requests to contain an English class, method, or file
+name merely to rediscover the only allowed repository. Sanitized log evidence
+never uses this shortcut, even with one enabled repository: it must resolve
+through evidence-grounded code search or stop before Issue publication.
+With multiple enabled repositories, the same evidence-grounded resolver
+remains mandatory for every input type.
 
 ## Log platform path
 

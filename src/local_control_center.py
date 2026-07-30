@@ -458,6 +458,19 @@ def _compose_managed_evidence(
     return evidence
 
 
+def _preselected_repository(
+    config: ControlCenterConfig,
+    input_type: str,
+) -> str:
+    """Bind explicit operator requests, but never route observed logs by convenience."""
+    if (
+        input_type in {"natural_language", "revision"}
+        and len(config.enabled_repositories) == 1
+    ):
+        return config.enabled_repositories[0].repository
+    return ""
+
+
 class LocalConfigStore:
     """Persist only non-secret local preferences and checked-out repository paths."""
 
@@ -1105,12 +1118,6 @@ class ControlCenterWorkflow:
                         if not isinstance(input_payload, dict):
                             raise ValueError("sanitized evidence must be one object")
                         evidence = ai_issue_generator.compact_evidence(input_payload)
-                        if len(config.enabled_repositories) == 1:
-                            evidence = dict(evidence)
-                            evidence["facts"] = dict(evidence.get("facts", {}))
-                            evidence["facts"]["repository"] = (
-                                config.enabled_repositories[0].repository
-                            )
                     elif input_type == "revision":
                         if (
                             not isinstance(input_payload, dict)
@@ -1190,10 +1197,9 @@ class ControlCenterWorkflow:
                     policy,
                     GitHubCLIIssueClient(30.0),
                     False,
-                    preselected_repository=(
-                        config.enabled_repositories[0].repository
-                        if len(config.enabled_repositories) == 1
-                        else ""
+                    preselected_repository=_preselected_repository(
+                        config,
+                        input_type,
                     ),
                 )
                 _atomic_write_json(run_dir / "automation-preview.json", automation)
@@ -1226,6 +1232,15 @@ class ControlCenterWorkflow:
                     if publication_status == "deduplicated"
                     else "create"
                 )
+                resolution = automation.get("resolution", {})
+                resolution = (
+                    resolution if isinstance(resolution, dict) else {}
+                )
+                search_audit = resolution.get("search_audit", {})
+                search_audit = (
+                    search_audit if isinstance(search_audit, dict) else {}
+                )
+                routing_provider = str(search_audit.get("provider", ""))
                 preview = {
                     "title": str(draft.get("title", "")),
                     "repository": repository,
@@ -1243,6 +1258,7 @@ class ControlCenterWorkflow:
                         else None
                     ),
                     "copilot_model": config.copilot_model,
+                    "routing_provider": routing_provider,
                     "required_labels": list(managed.required_labels),
                     "allowed_write_paths": list(managed.allowed_write_paths),
                     "actions": [
@@ -1830,10 +1846,9 @@ class ControlCenterWorkflow:
                     policy,
                     GitHubCLIIssueClient(30.0),
                     True,
-                    preselected_repository=(
-                        config.enabled_repositories[0].repository
-                        if len(config.enabled_repositories) == 1
-                        else ""
+                    preselected_repository=_preselected_repository(
+                        config,
+                        str(record.get("input_type", "")),
                     ),
                 )
                 _atomic_write_json(run_dir / "automation-publication.json", automation)

@@ -337,10 +337,12 @@ commands remain one-shot for automation.
 Natural-language input is recorded as an explicit requested change, so feature,
 refactor, and documentation requests do not need to invent an error or current
 behavior. Bug, performance, and security reports still require an observed
-problem. When exactly one repository is enabled, its operator-approved local
-configuration binds the target without requiring class names or a GitHub code
-search. Multiple enabled repositories still require evidence-grounded
-resolution. After sanitization, independent Issue generation/review, and
+problem. For natural-language requests and explicit revisions, exactly one
+enabled repository remains an operator-approved target without requiring class
+names or a GitHub code search. Sanitized log evidence never uses that shortcut:
+it must resolve through evidence-grounded code search even when only one
+repository is enabled. Multiple enabled repositories still require
+evidence-grounded resolution. After sanitization, independent Issue generation/review, and
 repository resolution, the terminal shows the exact Issue body and one combined
 approval. Approval publishes the Issue, applies repository-owned approval
 labels, claims the exact Issue snapshot, runs Copilot and policy tests, and
