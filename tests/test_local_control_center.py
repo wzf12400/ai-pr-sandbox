@@ -680,6 +680,105 @@ class ControlCenterWorkflowTest(unittest.TestCase):
         self.assertEqual("sanitized_evidence", record["input_type"])
         self.assertEqual(64, len(record["input_sha256"]))
 
+    def test_sanitized_log_never_uses_single_repository_operator_binding(self):
+        evidence = {
+            "schema_version": "ai-issue-evidence/v1",
+            "source": {
+                "type": "kibana",
+                "reference": "incident_ref:sanitized",
+                "url": "",
+            },
+            "safety": {"status": "sanitized", "ai_allowed": True},
+            "facts": {
+                "reported_description": (
+                    "UnrelatedService failed in an external package"
+                ),
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, workflow, _ = self._configured_workflow(root)
+            with mock.patch("src.local_control_center.threading.Thread"):
+                record = workflow.create_from_evidence(evidence)
+            with mock.patch(
+                "src.local_control_center.ai_issue_generator.generate_issue",
+                return_value=generation(),
+            ), mock.patch(
+                "src.local_control_center.automate_repository_issue",
+                return_value={
+                    "resolution": {
+                        "status": "unknown",
+                        "selected_repository": None,
+                        "search_audit": {"provider": "github"},
+                    },
+                    "publication": {"status": "blocked"},
+                },
+            ) as automation:
+                workflow._prepare(
+                    record["run_id"],
+                    evidence,
+                    "sanitized_evidence",
+                )
+
+            blocked = workflow.read(record["run_id"])
+            compact = json.loads(
+                (
+                    workflow._run_dir(record["run_id"])
+                    / "evidence.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("", automation.call_args.kwargs["preselected_repository"])
+        self.assertNotIn("repository", compact.get("facts", {}))
+        self.assertEqual("blocked", blocked["status"])
+        self.assertEqual("repository_not_resolved", blocked["failure"]["code"])
+
+    def test_natural_language_single_repository_binding_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, workflow, _ = self._configured_workflow(root)
+            with mock.patch(
+                "src.local_control_center.threading.Thread"
+            ), mock.patch(
+                "src.local_control_center.ai_issue_generator.generate_issue",
+                return_value=generation(),
+            ), mock.patch(
+                "src.local_control_center.automate_repository_issue",
+                return_value={
+                    "resolution": {
+                        "status": "resolved",
+                        "selected_repository": REPOSITORY,
+                        "search_audit": {"provider": "operator_scope"},
+                    },
+                    "publication": {
+                        "status": "approved_not_published",
+                        "repository": REPOSITORY,
+                    },
+                },
+            ) as automation, mock.patch(
+                "src.local_control_center.render_automated_issue_body",
+                return_value=(
+                    "# Synthetic reviewed Issue\n\nSafe body.",
+                    "a" * 64,
+                ),
+            ):
+                record = workflow.create("add multiplication and tests")
+                workflow._prepare(
+                    record["run_id"],
+                    "add multiplication and tests",
+                    "natural_language",
+                )
+                prepared = workflow.read(record["run_id"])
+
+        self.assertEqual(
+            REPOSITORY,
+            automation.call_args.kwargs["preselected_repository"],
+        )
+        self.assertEqual(
+            "operator_scope",
+            prepared["preview"]["routing_provider"],
+        )
+
     def test_revision_requires_a_configured_parent_and_specific_delta(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -799,6 +898,104 @@ class ControlCenterWorkflowTest(unittest.TestCase):
             dispatch.call_args.kwargs["target_issue_url"],
         )
         self.assertEqual("gpt-5.6-sol", dispatch.call_args.kwargs["model"])
+
+    def test_evidence_routed_log_can_complete_the_approved_draft_pr_flow(self):
+        evidence = {
+            "schema_version": "ai-issue-evidence/v1",
+            "source": {
+                "type": "kibana",
+                "reference": "incident_ref:matched",
+                "url": "",
+            },
+            "safety": {"status": "sanitized", "ai_allowed": True},
+            "facts": {
+                "qualified_class": (
+                    "com.example.routing.SyntheticRoutingController"
+                ),
+                "class_method": "routeIssue",
+                "error": "Synthetic routing failed",
+            },
+        }
+        issue_url = f"https://github.com/{REPOSITORY}/issues/17"
+        draft_pr_url = f"https://github.com/{REPOSITORY}/pull/18"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, workflow, approval = self._configured_workflow(root)
+            with mock.patch("src.local_control_center.threading.Thread"):
+                record = workflow.create_from_evidence(evidence)
+            with mock.patch(
+                "src.local_control_center.ai_issue_generator.generate_issue",
+                return_value=generation(),
+            ), mock.patch(
+                "src.local_control_center.automate_repository_issue",
+                return_value={
+                    "resolution": {
+                        "status": "resolved",
+                        "selected_repository": REPOSITORY,
+                        "search_audit": {"provider": "github"},
+                    },
+                    "publication": {
+                        "status": "approved_not_published",
+                        "repository": REPOSITORY,
+                    },
+                },
+            ) as preparation, mock.patch(
+                "src.local_control_center.render_automated_issue_body",
+                return_value=(
+                    "# Synthetic reviewed log Issue\n\nSafe body.",
+                    "a" * 64,
+                ),
+            ):
+                workflow._prepare(
+                    record["run_id"],
+                    evidence,
+                    "sanitized_evidence",
+                )
+                prepared = workflow.read(record["run_id"])
+            with mock.patch("src.local_control_center.threading.Thread"):
+                workflow.approve(
+                    prepared["run_id"],
+                    prepared["preview"]["approval_digest"],
+                )
+            with mock.patch(
+                "src.local_control_center.automate_repository_issue",
+                return_value={
+                    "resolution": {
+                        "status": "resolved",
+                        "selected_repository": REPOSITORY,
+                        "search_audit": {"provider": "github"},
+                    },
+                    "publication": {
+                        "status": "created",
+                        "repository": REPOSITORY,
+                        "issue_url": issue_url,
+                    },
+                },
+            ) as publication, mock.patch(
+                "src.local_control_center.dispatch_once",
+                return_value={
+                    "status": "draft_pr_created",
+                    "dispatch": {
+                        "modifier_report": {
+                            "publication": {
+                                "draft_pr_url": draft_pr_url,
+                            }
+                        }
+                    },
+                },
+            ) as dispatch:
+                workflow._execute(prepared["run_id"])
+
+            completed = workflow.read(prepared["run_id"])
+
+        self.assertEqual("", preparation.call_args.kwargs["preselected_repository"])
+        self.assertEqual("github", prepared["preview"]["routing_provider"])
+        self.assertEqual("", publication.call_args.kwargs["preselected_repository"])
+        self.assertEqual("completed", completed["status"])
+        self.assertEqual(issue_url, completed["result"]["issue_url"])
+        self.assertEqual(draft_pr_url, completed["result"]["draft_pr_url"])
+        self.assertEqual(1, len(approval.calls))
+        self.assertTrue(dispatch.call_args.kwargs["publish_pr"])
 
     def test_issue_only_approval_publishes_without_label_or_dispatch(self):
         with tempfile.TemporaryDirectory() as directory:

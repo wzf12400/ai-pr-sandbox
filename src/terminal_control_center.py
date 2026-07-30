@@ -367,6 +367,11 @@ def _render_preview(
     terminal.section("待批准计划")
     terminal.field("Issue", str(preview["title"]))
     terminal.field("Repository", str(preview["repository"]))
+    routing_provider = str(preview.get("routing_provider", ""))
+    if routing_provider == "operator_scope":
+        terminal.field("Route", "唯一仓库（人工配置）")
+    elif routing_provider:
+        terminal.field("Route", "代码证据解析")
     terminal.field("Model", str(preview["copilot_model"]))
     terminal.field("Labels", ", ".join(preview["required_labels"]))
     terminal.field("Write scope", ", ".join(preview["allowed_write_paths"]))
