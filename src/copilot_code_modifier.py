@@ -26,7 +26,7 @@ POLICY_SCHEMA_VERSION = "issue-code-policy/v1"
 REPORT_SCHEMA_VERSION = "issue-code-execution/v1"
 PROVIDER = "github-copilot-cli"
 FINGERPRINT_PATTERN = re.compile(
-    r"<!-- repository-issue-fingerprint/v1:(?P<digest>[0-9a-f]{64}) -->"
+    r"<!-- repository-issue-fingerprint/v(?:1|2):(?P<digest>[0-9a-f]{64}) -->"
 )
 AUDIT_SHA_LINE_PATTERN = re.compile(
     r"(?im)^- (?:Publication policy|Issue snapshot|Code policy) SHA-256:\s*"

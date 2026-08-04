@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Protocol, Sequence, Tuple
@@ -29,7 +30,19 @@ from src.repository_resolver import (
 
 AUTO_POLICY_SCHEMA_VERSION = "repository-auto-publish-policy/v1"
 AUTOMATION_SCHEMA_VERSION = "repository-issue-automation/v1"
-FINGERPRINT_VERSION = "repository-issue-fingerprint/v1"
+FINGERPRINT_VERSION = "repository-issue-fingerprint/v2"
+LEGACY_FINGERPRINT_VERSION = "repository-issue-fingerprint/v1"
+ROUTING_MODE_DEMO_SINGLE_REPOSITORY = "DEMO_SINGLE_REPOSITORY"
+ROUTING_MODE_PRODUCTION_EVIDENCE = "PRODUCTION_EVIDENCE_ROUTING"
+ROUTING_MODES = frozenset(
+    {
+        ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
+        ROUTING_MODE_PRODUCTION_EVIDENCE,
+    }
+)
+AUTOMATION_INPUT_TYPES = frozenset(
+    {"natural_language", "sanitized_evidence", "revision"}
+)
 POLICY_ID_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,80}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 ISSUE_URL_PATTERN = re.compile(r"https://github\.com/[^/]+/[^/]+/issues/(\d+)")
@@ -243,7 +256,136 @@ class GitHubCLIIssueClient:
         return issue_url
 
 
-def issue_fingerprint(generation: Mapping[str, Any], repository: str) -> str:
+_REQUIREMENT_SPLIT_PATTERN = re.compile(r"(?:[，,。；;]|并且|同时|以及)")
+_NUMBER_PATTERN = r"-?\d+(?:\.\d+)?"
+_NUMERIC_REQUIREMENT_PATTERNS = (
+    (
+        "maximum_inclusive",
+        re.compile(
+            rf"(?:不超过|不得超过|至多|最多(?:为|是)?|上限(?:为|是)?|"
+            rf"最大(?:值)?(?:为|是)?|小于(?:或)?等于|<=|≤)\s*({_NUMBER_PATTERN})"
+        ),
+    ),
+    (
+        "maximum_inclusive",
+        re.compile(rf"({_NUMBER_PATTERN})\s*(?:以内|之内|及以下|或以下)"),
+    ),
+    (
+        "maximum_exclusive",
+        re.compile(rf"(?:小于|低于|少于|<)\s*({_NUMBER_PATTERN})"),
+    ),
+    (
+        "minimum_inclusive",
+        re.compile(
+            rf"(?:不少于|不得少于|至少(?:为|是)?|下限(?:为|是)?|"
+            rf"最小(?:值)?(?:为|是)?|大于(?:或)?等于|>=|≥)\s*({_NUMBER_PATTERN})"
+        ),
+    ),
+    (
+        "minimum_inclusive",
+        re.compile(rf"({_NUMBER_PATTERN})\s*(?:以上|及以上|或以上)"),
+    ),
+    (
+        "minimum_exclusive",
+        re.compile(rf"(?:大于|高于|多于|>)\s*({_NUMBER_PATTERN})"),
+    ),
+)
+_MARKDOWN_EXPECTED_PATTERN = re.compile(r"(?im)^- Expected:\s*(.+?)\s*$")
+_MARKDOWN_ACCEPTANCE_SECTION_PATTERN = re.compile(
+    r"(?ims)^## Acceptance Criteria\s*(.*?)(?=^## |\Z)"
+)
+_MARKDOWN_CHECKBOX_PATTERN = re.compile(r"(?im)^-\s*\[[ xX]\]\s*(.+?)\s*$")
+
+
+def _requirement_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", _text(value)).casefold()
+    return " ".join(text.split())
+
+
+def _normalized_number(value: str) -> str:
+    try:
+        number = float(value)
+    except ValueError:
+        return value
+    return str(int(number)) if number.is_integer() else format(number, ".15g")
+
+
+def _requirement_signature_from_texts(
+    expected_behavior: Any,
+    acceptance_criteria: Any,
+) -> Dict[str, List[str]]:
+    texts = []
+    expected = _requirement_text(expected_behavior)
+    if expected and expected != "unknown":
+        texts.append(expected)
+    if isinstance(acceptance_criteria, list):
+        texts.extend(
+            text
+            for text in (_requirement_text(item) for item in acceptance_criteria)
+            if text and text != "unknown"
+        )
+    constraints = set()
+    qualifiers = set()
+    for text in texts:
+        clauses = [item.strip() for item in _REQUIREMENT_SPLIT_PATTERN.split(text)]
+        for clause in clauses:
+            if not clause:
+                continue
+            clause_constraints = set()
+            for kind, pattern in _NUMERIC_REQUIREMENT_PATTERNS:
+                clause_constraints.update(
+                    f"{kind}:{_normalized_number(match.group(1))}"
+                    for match in pattern.finditer(clause)
+                )
+            if clause_constraints:
+                constraints.update(clause_constraints)
+                continue
+            numbers = re.findall(_NUMBER_PATTERN, clause)
+            if numbers:
+                constraints.update(
+                    f"number:{_normalized_number(number)}" for number in numbers
+                )
+                continue
+            normalized = re.sub(r"[^\w\u3400-\u9fff]+", " ", clause)
+            normalized = " ".join(normalized.split())
+            if normalized:
+                qualifiers.add(normalized)
+    return {
+        "numeric_constraints": sorted(constraints),
+        "qualifiers": sorted(qualifiers),
+    }
+
+
+def _requirement_signature(generation: Mapping[str, Any]) -> Dict[str, List[str]]:
+    draft = _mapping(generation.get("draft"))
+    problem = _mapping(draft.get("problem"))
+    return _requirement_signature_from_texts(
+        problem.get("expected_behavior"),
+        draft.get("acceptance_criteria"),
+    )
+
+
+def _requirement_signature_from_issue_body(body: str) -> Dict[str, List[str]]:
+    expected_match = _MARKDOWN_EXPECTED_PATTERN.search(body)
+    acceptance_match = _MARKDOWN_ACCEPTANCE_SECTION_PATTERN.search(body)
+    criteria = (
+        _MARKDOWN_CHECKBOX_PATTERN.findall(acceptance_match.group(1))
+        if acceptance_match
+        else []
+    )
+    return _requirement_signature_from_texts(
+        expected_match.group(1) if expected_match else "",
+        criteria,
+    )
+
+
+def _issue_fingerprint(
+    generation: Mapping[str, Any],
+    repository: str,
+    *,
+    version: str,
+    include_requirements: bool,
+) -> str:
     draft = _mapping(generation.get("draft"))
     obj = _mapping(draft.get("object"))
     interface = _mapping(draft.get("interface"))
@@ -259,7 +401,7 @@ def issue_fingerprint(generation: Mapping[str, Any], repository: str) -> str:
     ):
         raise ValueError("Issue revision metadata is invalid")
     material = {
-        "version": FINGERPRINT_VERSION,
+        "version": version,
         "repository": repository.casefold(),
         "service": _normalized(obj.get("service")),
         "module": _normalized(obj.get("module")),
@@ -273,12 +415,34 @@ def issue_fingerprint(generation: Mapping[str, Any], repository: str) -> str:
         "revision_parent": revision_parent.casefold(),
         "revision_request_sha256": revision_request_sha256,
     }
+    if include_requirements:
+        material["requirement_signature"] = _requirement_signature(generation)
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _fingerprint_marker(fingerprint: str) -> str:
-    return f"<!-- {FINGERPRINT_VERSION}:{fingerprint} -->"
+def issue_fingerprint(generation: Mapping[str, Any], repository: str) -> str:
+    return _issue_fingerprint(
+        generation,
+        repository,
+        version=FINGERPRINT_VERSION,
+        include_requirements=True,
+    )
+
+
+def _legacy_issue_fingerprint(
+    generation: Mapping[str, Any], repository: str
+) -> str:
+    return _issue_fingerprint(
+        generation,
+        repository,
+        version=LEGACY_FINGERPRINT_VERSION,
+        include_requirements=False,
+    )
+
+
+def _fingerprint_marker(fingerprint: str, version: str = FINGERPRINT_VERSION) -> str:
+    return f"<!-- {version}:{fingerprint} -->"
 
 
 def render_automated_issue_body(
@@ -321,6 +485,11 @@ def match_existing_issues(
 ) -> Dict[str, Any]:
     fingerprint = issue_fingerprint(generation, repository)
     marker = _fingerprint_marker(fingerprint)
+    legacy_marker = _fingerprint_marker(
+        _legacy_issue_fingerprint(generation, repository),
+        LEGACY_FINGERPRINT_VERSION,
+    )
+    requirements = _requirement_signature(generation)
     draft = _mapping(generation.get("draft"))
     title = _normalized(draft.get("title"))
     obj = _mapping(draft.get("object"))
@@ -338,9 +507,18 @@ def match_existing_issues(
     for issue in issues[:MAX_ISSUES_SCANNED]:
         body = _text(issue.get("body"))
         normalized_body = body.casefold()
-        exact = marker in body
+        current_exact = marker in body
+        legacy_exact = (
+            legacy_marker in body
+            and _requirement_signature_from_issue_body(body) == requirements
+        )
+        exact = current_exact or legacy_exact
         score = 100 if exact else 0
-        reasons = ["exact deterministic fingerprint"] if exact else []
+        reasons = []
+        if current_exact:
+            reasons.append("exact deterministic fingerprint")
+        elif legacy_exact:
+            reasons.append("compatible legacy deterministic fingerprint")
         if not exact and is_revision:
             continue
         if not exact:
@@ -373,6 +551,11 @@ def match_existing_issues(
                 "score": score,
                 "reasons": reasons,
                 "exact_fingerprint": exact,
+                "fingerprint_version": (
+                    FINGERPRINT_VERSION
+                    if current_exact
+                    else LEGACY_FINGERPRINT_VERSION if legacy_exact else None
+                ),
             }
         )
     candidates.sort(key=lambda item: (-item["score"], item["number"]))
@@ -429,7 +612,13 @@ def automate_repository_issue(
     auto_publish: bool,
     *,
     preselected_repository: str = "",
+    routing_mode: str = ROUTING_MODE_PRODUCTION_EVIDENCE,
+    input_type: str = "natural_language",
 ) -> Dict[str, Any]:
+    if routing_mode not in ROUTING_MODES:
+        raise ValueError("repository routing mode is invalid")
+    if input_type not in AUTOMATION_INPUT_TYPES:
+        raise ValueError("automation input type is invalid")
     generation_policy = _mapping(generation.get("policy"))
     review = _mapping(generation.get("review"))
     validation = _mapping(generation.get("validation"))
@@ -461,6 +650,13 @@ def automate_repository_issue(
         ):
             raise ValueError(
                 "preselected repository requires the exact single enabled scope"
+            )
+        if (
+            routing_mode == ROUTING_MODE_PRODUCTION_EVIDENCE
+            and input_type == "sanitized_evidence"
+        ):
+            raise ValueError(
+                "production evidence routing forbids single-repository log binding"
             )
     if preselected_repository and all(pre_resolution_rules.values()):
         digest = _text(generation.get("input_sha256"))
@@ -555,6 +751,8 @@ def automate_repository_issue(
             "policy_sha256": policy.policy_sha256,
             "scope_id": policy.scope_id,
             "scope_sha256": policy.scope_sha256,
+            "routing_mode": routing_mode,
+            "input_type": input_type,
         },
         "resolution": resolution,
         "issue_match": {

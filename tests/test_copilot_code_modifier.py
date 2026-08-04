@@ -257,6 +257,18 @@ class CopilotCodeModifierTest(unittest.TestCase):
             result = evaluate_issue_approval(approved_issue(), policy)
             self.assertTrue(result["approved"])
 
+            v2_issue = approved_issue()
+            v2_issue = ApprovedIssue(
+                **{
+                    **v2_issue.__dict__,
+                    "body": v2_issue.body.replace(
+                        "repository-issue-fingerprint/v1",
+                        "repository-issue-fingerprint/v2",
+                    ),
+                }
+            )
+            self.assertTrue(evaluate_issue_approval(v2_issue, policy)["approved"])
+
             missing_label = ApprovedIssue(
                 **{**approved_issue().__dict__, "labels": ("bug",)}
             )
