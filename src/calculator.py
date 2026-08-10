@@ -2,7 +2,7 @@
 
 
 def _validate_operand(value: float) -> None:
-    if value > 50:
+    if abs(value) > 50:
         raise ValueError("calculator operands must not exceed 50")
 
 
