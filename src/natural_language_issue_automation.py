@@ -14,6 +14,7 @@ from src.issue_draft import _atomic_write_json, _atomic_write_text
 from src.issue_entry import _description, _gateway_config, compose_evidence
 from src.repository_issue_automation import (
     GitHubCLIIssueClient,
+    GitHubRESTIssueClient,
     automate_repository_issue,
     load_auto_publish_policy,
     render_automated_issue_body,
@@ -104,7 +105,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
         else:
             adapter = GitHubCLICodeSearchAdapter(args.timeout)
-        issue_client = GitHubCLIIssueClient(args.timeout)
+        issue_client = (
+            GitHubRESTIssueClient.from_environment(args.timeout)
+            if policy.provider == "github_rest_api"
+            else GitHubCLIIssueClient(args.timeout)
+        )
         automation = automate_repository_issue(
             generation,
             evidence,

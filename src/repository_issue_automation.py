@@ -9,6 +9,9 @@ import re
 import subprocess
 import tempfile
 import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Protocol, Sequence, Tuple
@@ -50,6 +53,8 @@ MAX_POLICY_BYTES = 64_000
 MAX_ISSUES_SCANNED = 100
 ALLOWED_GENERATION_STATES = {"ready_for_human_review", "needs_human_context"}
 ALLOWED_ADAPTERS = {"github-code-search", "github-tree-probe"}
+ALLOWED_PUBLICATION_PROVIDERS = {"github_cli", "github_rest_api"}
+GITHUB_API_VERSION = "2026-03-10"
 
 
 def _mapping(value: Any) -> Dict[str, Any]:
@@ -133,8 +138,9 @@ def load_auto_publish_policy(
     actual_scope_digest = hashlib.sha256(scope_raw).hexdigest()
     if scope_id != scope.scope_id or scope_digest != actual_scope_digest:
         raise ValueError("automatic publication policy is not bound to the reviewed scope")
-    if payload.get("provider") != "github_cli":
-        raise ValueError("automatic publication provider must be github_cli")
+    provider = _text(payload.get("provider"))
+    if provider not in ALLOWED_PUBLICATION_PROVIDERS:
+        raise ValueError("automatic publication provider is unsupported")
     if payload.get("max_issues_per_run") != 1:
         raise ValueError("automatic publication is limited to one Issue per invocation")
     raw_states = payload.get("allowed_generation_states")
@@ -154,7 +160,7 @@ def load_auto_publish_policy(
         policy_sha256=digest,
         scope_id=scope_id,
         scope_sha256=scope_digest,
-        provider="github_cli",
+        provider=provider,
         max_issues_per_run=1,
         allowed_generation_states=states,
         allowed_adapters=adapters,
@@ -168,6 +174,8 @@ class GitHubIssueClient(Protocol):
     def create_issue(self, repository: str, title: str, body: str) -> str:
         ...
 
+    def get_issue(self, repository: str, number: int) -> Dict[str, Any]:
+        ...
 
 class GitHubCLIIssueClient:
     def __init__(self, timeout_seconds: float = 30.0):
@@ -254,6 +262,241 @@ class GitHubCLIIssueClient:
         if not ISSUE_URL_PATTERN.fullmatch(issue_url):
             raise ValueError("GitHub Issue creation returned an invalid URL")
         return issue_url
+
+    def get_issue(self, repository: str, number: int) -> Dict[str, Any]:
+        if not REPOSITORY_PATTERN.fullmatch(repository) or number < 1:
+            raise ValueError("GitHub Issue reference is invalid")
+        try:
+            completed = subprocess.run(
+                [
+                    "gh",
+                    "issue",
+                    "view",
+                    str(number),
+                    "--repo",
+                    repository,
+                    "--json",
+                    "number,title,body,url,state",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("GitHub Issue refetch could not be completed") from exc
+        if completed.returncode != 0:
+            raise ValueError("GitHub Issue refetch failed closed")
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise ValueError("GitHub Issue refetch returned invalid JSON") from exc
+        return _validate_issue_snapshot(payload, repository, number, "url")
+
+
+class GitHubRESTIssueClient:
+    """Bounded GitHub REST adapter that never exposes token or response bodies."""
+
+    def __init__(
+        self,
+        token: str,
+        timeout_seconds: float = 30.0,
+        api_base_url: str = "https://api.github.com",
+    ) -> None:
+        if not token.strip() or any(character in token for character in "\r\n"):
+            raise ValueError("GitHub API token is missing or invalid")
+        if not 1 <= timeout_seconds <= 120:
+            raise ValueError("GitHub Issue timeout must be between 1 and 120 seconds")
+        if api_base_url.rstrip("/") != "https://api.github.com":
+            raise ValueError("GitHub API base URL is not allowed")
+        self._token = token.strip()
+        self._timeout_seconds = timeout_seconds
+        self._api_base_url = api_base_url.rstrip("/")
+
+    @classmethod
+    def from_environment(cls, timeout_seconds: float = 30.0) -> "GitHubRESTIssueClient":
+        token = os.environ.get("GITHUB_ISSUE_TOKEN", "")
+        return cls(token, timeout_seconds)
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None = None,
+    ) -> tuple[int, Any]:
+        encoded = (
+            None
+            if payload is None
+            else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        )
+        request = urllib.request.Request(
+            self._api_base_url + path,
+            data=encoded,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {self._token}",
+                "Content-Type": "application/json",
+                "X-GitHub-Api-Version": GITHUB_API_VERSION,
+                "User-Agent": "github-ai-agent-control-plane",
+            },
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout_seconds) as response:
+                status = response.status
+                raw = response.read()
+        except urllib.error.HTTPError as exception:
+            raise ValueError(
+                f"GitHub Issue API rejected the request with HTTP {exception.code}"
+            ) from exception
+        except (urllib.error.URLError, TimeoutError, OSError) as exception:
+            raise ValueError("GitHub Issue API request could not be completed") from exception
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else None
+        except (UnicodeDecodeError, json.JSONDecodeError) as exception:
+            raise ValueError("GitHub Issue API returned invalid JSON") from exception
+        return status, body
+
+    @staticmethod
+    def _repository_path(repository: str) -> str:
+        if not REPOSITORY_PATTERN.fullmatch(repository):
+            raise ValueError("GitHub Issue repository is invalid")
+        owner, name = repository.split("/", 1)
+        return "/repos/{}/{}".format(
+            urllib.parse.quote(owner, safe=""),
+            urllib.parse.quote(name, safe=""),
+        )
+
+    def list_issues(self, repository: str, limit: int) -> List[Dict[str, Any]]:
+        if not 1 <= limit <= MAX_ISSUES_SCANNED:
+            raise ValueError("GitHub Issue search arguments are invalid")
+        path = self._repository_path(repository)
+        query = urllib.parse.urlencode(
+            {"state": "all", "per_page": limit, "sort": "created", "direction": "desc"}
+        )
+        status, payload = self._request("GET", f"{path}/issues?{query}")
+        if status != 200 or not isinstance(payload, list):
+            raise ValueError("GitHub Issue API returned an invalid issue list")
+        issues: List[Dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict) or "pull_request" in item:
+                continue
+            number = item.get("number")
+            title = item.get("title")
+            body = item.get("body")
+            url = item.get("html_url")
+            state = item.get("state")
+            if (
+                isinstance(number, int)
+                and isinstance(title, str)
+                and (body is None or isinstance(body, str))
+                and isinstance(url, str)
+                and ISSUE_URL_PATTERN.fullmatch(url)
+                and state in {"open", "closed"}
+            ):
+                issues.append(
+                    {
+                        "number": number,
+                        "title": title,
+                        "body": body or "",
+                        "url": url,
+                        "state": state,
+                    }
+                )
+        return issues[:limit]
+
+    def create_issue(self, repository: str, title: str, body: str) -> str:
+        path = self._repository_path(repository)
+        safe_title = title.strip()
+        if not safe_title or len(safe_title) > 160 or not body.strip():
+            raise ValueError("GitHub Issue title or body is invalid")
+        if find_sensitive_data({"title": safe_title, "body": body}):
+            raise ValueError("GitHub Issue content failed sensitive-data validation")
+        status, payload = self._request(
+            "POST",
+            f"{path}/issues",
+            {"title": safe_title, "body": body},
+        )
+        if status != 201 or not isinstance(payload, dict):
+            raise ValueError("GitHub Issue API returned an invalid creation result")
+        issue_url = payload.get("html_url")
+        if not isinstance(issue_url, str) or not ISSUE_URL_PATTERN.fullmatch(issue_url):
+            raise ValueError("GitHub Issue API returned an invalid Issue URL")
+        return issue_url
+
+    def get_issue(self, repository: str, number: int) -> Dict[str, Any]:
+        if number < 1:
+            raise ValueError("GitHub Issue reference is invalid")
+        path = self._repository_path(repository)
+        status, payload = self._request("GET", f"{path}/issues/{number}")
+        if status != 200:
+            raise ValueError("GitHub Issue API returned an invalid refetch result")
+        return _validate_issue_snapshot(payload, repository, number, "html_url")
+
+    def add_labels(
+        self, repository: str, number: int, labels: Sequence[str]
+    ) -> Tuple[str, ...]:
+        if number < 1:
+            raise ValueError("GitHub Issue reference is invalid")
+        requested = tuple(_text(label) for label in labels)
+        if (
+            not requested
+            or len(requested) > 10
+            or len(set(requested)) != len(requested)
+            or any(not re.fullmatch(r"[A-Za-z0-9_.:/ -]{1,80}", label) for label in requested)
+        ):
+            raise ValueError("GitHub Issue labels are invalid")
+        path = self._repository_path(repository)
+        status, payload = self._request(
+            "POST",
+            f"{path}/issues/{number}/labels",
+            {"labels": list(requested)},
+        )
+        if status != 200 or not isinstance(payload, list):
+            raise ValueError("GitHub Issue API returned an invalid label result")
+        applied = tuple(
+            item.get("name")
+            for item in payload
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        )
+        if not set(requested) <= set(applied):
+            raise ValueError("GitHub Issue API did not apply every required label")
+        return requested
+
+
+def _validate_issue_snapshot(
+    payload: Any,
+    repository: str,
+    number: int,
+    url_field: str,
+) -> Dict[str, Any]:
+    if not isinstance(payload, dict) or "pull_request" in payload:
+        raise ValueError("GitHub Issue refetch returned an invalid Issue")
+    title = payload.get("title")
+    body = payload.get("body")
+    url = payload.get(url_field)
+    state = payload.get("state")
+    expected_url = f"https://github.com/{repository}/issues/{number}"
+    if (
+        payload.get("number") != number
+        or not isinstance(title, str)
+        or not title.strip()
+        or not isinstance(body, str)
+        or not body.strip()
+        or url != expected_url
+        or state not in {"open", "closed"}
+    ):
+        raise ValueError("GitHub Issue refetch returned an inconsistent snapshot")
+    if find_sensitive_data({"title": title, "body": body}):
+        raise ValueError("GitHub Issue snapshot failed sensitive-data validation")
+    return {
+        "number": number,
+        "title": title,
+        "body": body,
+        "url": url,
+        "state": state,
+        "repository_url": f"https://api.github.com/repos/{repository}",
+    }
 
 
 _REQUIREMENT_SPLIT_PATTERN = re.compile(r"(?:[，,。；;]|并且|同时|以及)")

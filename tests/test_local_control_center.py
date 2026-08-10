@@ -980,7 +980,10 @@ class ControlCenterWorkflowTest(unittest.TestCase):
         draft_pr_url = f"https://github.com/{REPOSITORY}/pull/18"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            _, workflow, approval = self._configured_workflow(root)
+            _, workflow, approval = self._configured_workflow(
+                root,
+                routing_mode=ROUTING_MODE_PRODUCTION_EVIDENCE,
+            )
             with mock.patch("src.local_control_center.threading.Thread"):
                 record = workflow.create_from_evidence(evidence)
             with mock.patch(

@@ -1,0 +1,14 @@
+{
+  "schema_version": "repository-auto-publish-policy/v1",
+  "policy_id": "local-ai-pr-sandbox-issue-publication-v1",
+  "scope_id": "local-ai-pr-sandbox",
+  "scope_sha256": "f012a9bc73b15066481d8aefa1b0e42d8d357fd0f6b72333c1aec35206fda24d",
+  "provider": "github_rest_api",
+  "max_issues_per_run": 1,
+  "allowed_generation_states": [
+    "ready_for_human_review"
+  ],
+  "allowed_adapters": [
+    "github-tree-probe"
+  ]
+}

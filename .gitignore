@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+target/
 .venv/
 .env
 .env.*
@@ -10,6 +11,7 @@ drafts/
 sanitized/
 .trial-data/
 .trial-repos/
+.worker-repos/
 .issue-entry-output/
 .kibana-issue-output/
 .issue-entry-state/

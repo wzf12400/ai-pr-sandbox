@@ -7,6 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.ai_issue_generator import (
+    COMPANY_ISSUE_RUNTIME_POLICY_ID,
+    COMPANY_ISSUE_RUNTIME_POLICY_SHA256,
+    LOG_INCIDENT_ISSUE_PROFILE,
+    NATURAL_LANGUAGE_ISSUE_PROFILE,
     DRAFT_SCHEMA_VERSION,
     Completion,
     GatewayConfig,
@@ -16,6 +20,8 @@ from src.ai_issue_generator import (
     render_markdown,
     validate_draft,
     _normalize_evidence_mappings,
+    _preserve_log_observed_behavior,
+    _actionable_log_draft,
 )
 
 
@@ -82,6 +88,7 @@ def valid_draft():
         "clarifying_questions": ["Is the behavior reproducible on the latest release?"],
         "confidence": 0.91,
         "evidence": [
+            {"claim_path": "$.title", "source_paths": ["$.facts.title"]},
             {"claim_path": "$.object.repository", "source_paths": ["$.facts.repository"]},
             {"claim_path": "$.object.module", "source_paths": ["$.facts.labels[0]"]},
             {"claim_path": "$.object.code_object", "source_paths": ["$.facts.title"]},
@@ -257,6 +264,7 @@ class AIIssueGeneratorTest(unittest.TestCase):
             },
         }
         draft = valid_draft()
+        draft["title"] = "在 calculator 模块新增乘法功能"
         draft["request_type"] = "Feature"
         draft["object"].update(
             {
@@ -290,6 +298,10 @@ class AIIssueGeneratorTest(unittest.TestCase):
         )
         draft["acceptance_criteria"] = ["calculator 支持两个数相乘。"]
         draft["evidence"] = [
+            {
+                "claim_path": "$.title",
+                "source_paths": ["$.facts.requested_change"],
+            },
             {
                 "claim_path": "$.object.module",
                 "source_paths": ["$.facts.requested_change"],
@@ -356,6 +368,82 @@ class AIIssueGeneratorTest(unittest.TestCase):
             errors,
         )
 
+    def test_source_metadata_is_not_retained_as_a_draft_claim_mapping(self):
+        draft = valid_draft()
+        draft["evidence"].append(
+            {
+                "claim_path": "$.source.type",
+                "source_paths": ["$.source.type"],
+            }
+        )
+
+        normalized = _normalize_evidence_mappings(
+            draft,
+            compact_evidence(self.public_issue),
+        )
+
+        self.assertNotIn(
+            "$.source.type",
+            [item["claim_path"] for item in normalized["evidence"]],
+        )
+
+    def test_unattended_log_requires_actionable_expected_outcome(self):
+        draft = valid_draft()
+
+        self.assertFalse(_actionable_log_draft(draft))
+
+        draft["problem"]["expected_behavior"] = (
+            "Operands with an absolute value above 50 raise ValueError."
+        )
+        draft["acceptance_criteria"] = [
+            "add(-51, 1) raises ValueError.",
+        ]
+
+        self.assertTrue(_actionable_log_draft(draft))
+
+    def test_log_summary_restores_dropped_observed_behavior(self):
+        draft = valid_draft()
+        draft["error"]["message"] = "unknown"
+        draft["problem"]["current_behavior"] = "unknown"
+        draft["evidence"] = [
+            item
+            for item in draft["evidence"]
+            if item["claim_path"]
+            not in {"$.error.message", "$.problem.current_behavior"}
+        ]
+        evidence = {
+            "schema_version": "ai-issue-evidence/v1",
+            "source": {
+                "type": "kibana",
+                "reference": "incident_ref:0123456789abcdef",
+                "url": "",
+            },
+            "safety": {"status": "sanitized", "ai_allowed": True},
+            "facts": {"reported_description": "calculator failure"},
+            "event": {
+                "level": "ERROR",
+                "summary": "add(-51, 1) returned -50",
+            },
+            "runtime": {
+                "first_seen_at": "2026-08-10T01:00:00Z",
+                "last_seen_at": "2026-08-10T01:05:00Z",
+            },
+        }
+
+        normalized = _preserve_log_observed_behavior(draft, evidence)
+
+        self.assertEqual(
+            "add(-51, 1) returned -50",
+            normalized["problem"]["current_behavior"],
+        )
+        self.assertIn(
+            {
+                "claim_path": "$.problem.current_behavior",
+                "source_paths": ["$.event.summary"],
+            },
+            normalized["evidence"],
+        )
+
     def test_feature_with_unknown_current_behavior_remains_reviewable(self):
         evidence = {
             "schema_version": "ai-issue-evidence/v1",
@@ -403,7 +491,12 @@ class AIIssueGeneratorTest(unittest.TestCase):
             "multiply(0, 8) returns 0.",
         ]
         draft["missing_information"] = ["Current behavior is unknown."]
+        draft["title"] = "Add multiply to calculator"
         draft["evidence"] = [
+            {
+                "claim_path": "$.title",
+                "source_paths": ["$.facts.requested_change"],
+            },
             {
                 "claim_path": "$.object.module",
                 "source_paths": ["$.facts.requested_change"],
@@ -432,6 +525,7 @@ class AIIssueGeneratorTest(unittest.TestCase):
         )
 
         self.assertEqual("needs_human_context", result["state"])
+        self.assertEqual(NATURAL_LANGUAGE_ISSUE_PROFILE, result["issue_profile"])
         self.assertTrue(result["validation"]["valid"])
         self.assertTrue(
             all(
@@ -462,8 +556,22 @@ class AIIssueGeneratorTest(unittest.TestCase):
         self.assertFalse(result["policy"]["publication_allowed"])
         self.assertFalse(result["policy"]["implementation_allowed"])
         self.assertTrue(result["policy"]["human_confirmation_required"])
+        self.assertEqual(
+            COMPANY_ISSUE_RUNTIME_POLICY_ID,
+            result["policy"]["runtime_skill"]["id"],
+        )
+        self.assertEqual(
+            COMPANY_ISSUE_RUNTIME_POLICY_SHA256,
+            result["policy"]["runtime_skill"]["sha256"],
+        )
         self.assertEqual(1, len(generator.calls))
         self.assertEqual(1, len(reviewer.calls))
+        for call in (generator.calls[0], reviewer.calls[0]):
+            prompt = call["system_prompt"]
+            self.assertIn(COMPANY_ISSUE_RUNTIME_POLICY_ID, prompt)
+            self.assertIn("Never invent a repository", prompt)
+            self.assertIn("fail closed", prompt)
+            self.assertIn("never authorizes Issue publication", prompt)
         self.assertIn("available_evidence_paths", generator.calls[0]["user_payload"])
         self.assertIn(
             "$.error.message",
@@ -474,6 +582,42 @@ class AIIssueGeneratorTest(unittest.TestCase):
         self.assertIn("## Object", render_markdown(result))
         self.assertIn("## Interface", render_markdown(result))
         self.assertIn("## Error", render_markdown(result))
+
+    def test_log_evidence_selects_log_incident_profile_prompt(self):
+        generator = FakeProvider(valid_draft())
+        reviewer = FakeProvider(passing_review())
+        evidence = {
+            "schema_version": "ai-issue-evidence/v1",
+            "source": {
+                "type": "kibana",
+                "reference": "incident_ref:0123456789abcdefabcd",
+                "url": "",
+            },
+            "safety": {"status": "sanitized", "ai_allowed": True},
+            "facts": {"reported_description": "payment service failed"},
+            "event": {
+                "level": "ERROR",
+                "summary": "NullPointerException",
+                "event_count": 5,
+                "statistics": {
+                    "batch_event_count": 5,
+                    "total_event_count": 18,
+                    "candidate_count": 2,
+                    "affected_endpoints": ["/api/orders"],
+                    "user_identifier_event_count": 12,
+                },
+            },
+            "runtime": {
+                "first_seen_at": "2026-08-04T01:00:00Z",
+                "last_seen_at": "2026-08-04T02:00:00Z",
+            },
+        }
+
+        result = generate_issue(evidence, generator, reviewer)
+
+        self.assertEqual(LOG_INCIDENT_ISSUE_PROFILE, result["issue_profile"])
+        self.assertIn("Issue profile: aggregated log incident", generator.calls[0]["system_prompt"])
+        self.assertEqual(18, result["observability"]["total_event_count"])
 
     def test_log_issue_renders_deterministic_occurrence_statistics(self):
         result = {

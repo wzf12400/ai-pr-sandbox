@@ -1,0 +1,21 @@
+{
+  "schema_version": "repository-search-scope/v1",
+  "scope_id": "local-ai-pr-sandbox",
+  "provider": "github",
+  "repositories": [
+    {
+      "repository": "wzf12400/ai-pr-sandbox",
+      "enabled": true,
+      "default_branch": "main",
+      "labels": [
+        "calculator",
+        "sandbox"
+      ]
+    }
+  ],
+  "limits": {
+    "max_queries": 8,
+    "max_candidate_repositories": 1,
+    "max_hits_per_query": 10
+  }
+}
