@@ -13,6 +13,7 @@ from src import ai_issue_generator
 from src.copilot_issue_provider import CopilotCLIIssueProvider
 from src.issue_draft import _atomic_write_json
 from src.local_control_center import (
+    ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
     ControlCenterConfig,
     ManagedRepository,
     _compose_managed_evidence,
@@ -91,6 +92,7 @@ def terminal_evidence(task: Mapping[str, Any]) -> Dict[str, Any]:
     config = ControlCenterConfig(
         github_login="benchmark-local",
         copilot_model="gpt-5.6-sol",
+        routing_mode=ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
         repositories=(managed,),
         log_source=None,
         sha256="0" * 64,

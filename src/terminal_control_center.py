@@ -26,6 +26,7 @@ from src.local_control_center import (
     DEFAULT_RUNS_PATH,
     MAX_LOG_INTERVAL_SECONDS,
     MIN_LOG_INTERVAL_SECONDS,
+    ROUTING_MODE_PRODUCTION_EVIDENCE,
     ControlCenterConfig,
     ControlCenterWorkflow,
     LocalConfigStore,
@@ -279,6 +280,7 @@ def _configure_one_repository(
         "schema_version": CONFIG_SCHEMA_VERSION,
         "github": {"login": login},
         "copilot": {"model": policy.default_model},
+        "routing": {"mode": ROUTING_MODE_PRODUCTION_EVIDENCE},
         "repositories": [
             {
                 "repository": policy.repository,
@@ -312,6 +314,7 @@ def _show_config(
     terminal.section("运行环境")
     terminal.field("GitHub", config.github_login)
     terminal.field("Copilot", config.copilot_model)
+    terminal.field("Routing mode", config.routing_mode)
     terminal.field(
         "CLI",
         str(identity.get("copilot", {}).get("version") or "未检测到"),
@@ -373,6 +376,10 @@ def _render_preview(
     elif routing_provider:
         terminal.field("Route", "代码证据解析")
     terminal.field("Model", str(preview["copilot_model"]))
+    if preview.get("routing_mode"):
+        terminal.field("Routing mode", str(preview["routing_mode"]))
+    if preview.get("routing_provider"):
+        terminal.field("Routing basis", str(preview["routing_provider"]))
     terminal.field("Labels", ", ".join(preview["required_labels"]))
     terminal.field("Write scope", ", ".join(preview["allowed_write_paths"]))
     if inbox_choices:

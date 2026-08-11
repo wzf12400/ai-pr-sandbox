@@ -8,6 +8,10 @@ import os
 import re
 import subprocess
 import tempfile
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Protocol, Sequence, Tuple
@@ -29,7 +33,19 @@ from src.repository_resolver import (
 
 AUTO_POLICY_SCHEMA_VERSION = "repository-auto-publish-policy/v1"
 AUTOMATION_SCHEMA_VERSION = "repository-issue-automation/v1"
-FINGERPRINT_VERSION = "repository-issue-fingerprint/v1"
+FINGERPRINT_VERSION = "repository-issue-fingerprint/v2"
+LEGACY_FINGERPRINT_VERSION = "repository-issue-fingerprint/v1"
+ROUTING_MODE_DEMO_SINGLE_REPOSITORY = "DEMO_SINGLE_REPOSITORY"
+ROUTING_MODE_PRODUCTION_EVIDENCE = "PRODUCTION_EVIDENCE_ROUTING"
+ROUTING_MODES = frozenset(
+    {
+        ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
+        ROUTING_MODE_PRODUCTION_EVIDENCE,
+    }
+)
+AUTOMATION_INPUT_TYPES = frozenset(
+    {"natural_language", "sanitized_evidence", "revision"}
+)
 POLICY_ID_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,80}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 ISSUE_URL_PATTERN = re.compile(r"https://github\.com/[^/]+/[^/]+/issues/(\d+)")
@@ -37,6 +53,8 @@ MAX_POLICY_BYTES = 64_000
 MAX_ISSUES_SCANNED = 100
 ALLOWED_GENERATION_STATES = {"ready_for_human_review", "needs_human_context"}
 ALLOWED_ADAPTERS = {"github-code-search", "github-tree-probe"}
+ALLOWED_PUBLICATION_PROVIDERS = {"github_cli", "github_rest_api"}
+GITHUB_API_VERSION = "2026-03-10"
 
 
 def _mapping(value: Any) -> Dict[str, Any]:
@@ -120,8 +138,9 @@ def load_auto_publish_policy(
     actual_scope_digest = hashlib.sha256(scope_raw).hexdigest()
     if scope_id != scope.scope_id or scope_digest != actual_scope_digest:
         raise ValueError("automatic publication policy is not bound to the reviewed scope")
-    if payload.get("provider") != "github_cli":
-        raise ValueError("automatic publication provider must be github_cli")
+    provider = _text(payload.get("provider"))
+    if provider not in ALLOWED_PUBLICATION_PROVIDERS:
+        raise ValueError("automatic publication provider is unsupported")
     if payload.get("max_issues_per_run") != 1:
         raise ValueError("automatic publication is limited to one Issue per invocation")
     raw_states = payload.get("allowed_generation_states")
@@ -141,7 +160,7 @@ def load_auto_publish_policy(
         policy_sha256=digest,
         scope_id=scope_id,
         scope_sha256=scope_digest,
-        provider="github_cli",
+        provider=provider,
         max_issues_per_run=1,
         allowed_generation_states=states,
         allowed_adapters=adapters,
@@ -155,6 +174,8 @@ class GitHubIssueClient(Protocol):
     def create_issue(self, repository: str, title: str, body: str) -> str:
         ...
 
+    def get_issue(self, repository: str, number: int) -> Dict[str, Any]:
+        ...
 
 class GitHubCLIIssueClient:
     def __init__(self, timeout_seconds: float = 30.0):
@@ -242,8 +263,372 @@ class GitHubCLIIssueClient:
             raise ValueError("GitHub Issue creation returned an invalid URL")
         return issue_url
 
+    def get_issue(self, repository: str, number: int) -> Dict[str, Any]:
+        if not REPOSITORY_PATTERN.fullmatch(repository) or number < 1:
+            raise ValueError("GitHub Issue reference is invalid")
+        try:
+            completed = subprocess.run(
+                [
+                    "gh",
+                    "issue",
+                    "view",
+                    str(number),
+                    "--repo",
+                    repository,
+                    "--json",
+                    "number,title,body,url,state",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("GitHub Issue refetch could not be completed") from exc
+        if completed.returncode != 0:
+            raise ValueError("GitHub Issue refetch failed closed")
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise ValueError("GitHub Issue refetch returned invalid JSON") from exc
+        return _validate_issue_snapshot(payload, repository, number, "url")
 
-def issue_fingerprint(generation: Mapping[str, Any], repository: str) -> str:
+
+class GitHubRESTIssueClient:
+    """Bounded GitHub REST adapter that never exposes token or response bodies."""
+
+    def __init__(
+        self,
+        token: str,
+        timeout_seconds: float = 30.0,
+        api_base_url: str = "https://api.github.com",
+    ) -> None:
+        if not token.strip() or any(character in token for character in "\r\n"):
+            raise ValueError("GitHub API token is missing or invalid")
+        if not 1 <= timeout_seconds <= 120:
+            raise ValueError("GitHub Issue timeout must be between 1 and 120 seconds")
+        if api_base_url.rstrip("/") != "https://api.github.com":
+            raise ValueError("GitHub API base URL is not allowed")
+        self._token = token.strip()
+        self._timeout_seconds = timeout_seconds
+        self._api_base_url = api_base_url.rstrip("/")
+
+    @classmethod
+    def from_environment(cls, timeout_seconds: float = 30.0) -> "GitHubRESTIssueClient":
+        token = os.environ.get("GITHUB_ISSUE_TOKEN", "")
+        return cls(token, timeout_seconds)
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None = None,
+    ) -> tuple[int, Any]:
+        encoded = (
+            None
+            if payload is None
+            else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        )
+        request = urllib.request.Request(
+            self._api_base_url + path,
+            data=encoded,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {self._token}",
+                "Content-Type": "application/json",
+                "X-GitHub-Api-Version": GITHUB_API_VERSION,
+                "User-Agent": "github-ai-agent-control-plane",
+            },
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout_seconds) as response:
+                status = response.status
+                raw = response.read()
+        except urllib.error.HTTPError as exception:
+            raise ValueError(
+                f"GitHub Issue API rejected the request with HTTP {exception.code}"
+            ) from exception
+        except (urllib.error.URLError, TimeoutError, OSError) as exception:
+            raise ValueError("GitHub Issue API request could not be completed") from exception
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else None
+        except (UnicodeDecodeError, json.JSONDecodeError) as exception:
+            raise ValueError("GitHub Issue API returned invalid JSON") from exception
+        return status, body
+
+    @staticmethod
+    def _repository_path(repository: str) -> str:
+        if not REPOSITORY_PATTERN.fullmatch(repository):
+            raise ValueError("GitHub Issue repository is invalid")
+        owner, name = repository.split("/", 1)
+        return "/repos/{}/{}".format(
+            urllib.parse.quote(owner, safe=""),
+            urllib.parse.quote(name, safe=""),
+        )
+
+    def list_issues(self, repository: str, limit: int) -> List[Dict[str, Any]]:
+        if not 1 <= limit <= MAX_ISSUES_SCANNED:
+            raise ValueError("GitHub Issue search arguments are invalid")
+        path = self._repository_path(repository)
+        query = urllib.parse.urlencode(
+            {"state": "all", "per_page": limit, "sort": "created", "direction": "desc"}
+        )
+        status, payload = self._request("GET", f"{path}/issues?{query}")
+        if status != 200 or not isinstance(payload, list):
+            raise ValueError("GitHub Issue API returned an invalid issue list")
+        issues: List[Dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict) or "pull_request" in item:
+                continue
+            number = item.get("number")
+            title = item.get("title")
+            body = item.get("body")
+            url = item.get("html_url")
+            state = item.get("state")
+            if (
+                isinstance(number, int)
+                and isinstance(title, str)
+                and (body is None or isinstance(body, str))
+                and isinstance(url, str)
+                and ISSUE_URL_PATTERN.fullmatch(url)
+                and state in {"open", "closed"}
+            ):
+                issues.append(
+                    {
+                        "number": number,
+                        "title": title,
+                        "body": body or "",
+                        "url": url,
+                        "state": state,
+                    }
+                )
+        return issues[:limit]
+
+    def create_issue(self, repository: str, title: str, body: str) -> str:
+        path = self._repository_path(repository)
+        safe_title = title.strip()
+        if not safe_title or len(safe_title) > 160 or not body.strip():
+            raise ValueError("GitHub Issue title or body is invalid")
+        if find_sensitive_data({"title": safe_title, "body": body}):
+            raise ValueError("GitHub Issue content failed sensitive-data validation")
+        status, payload = self._request(
+            "POST",
+            f"{path}/issues",
+            {"title": safe_title, "body": body},
+        )
+        if status != 201 or not isinstance(payload, dict):
+            raise ValueError("GitHub Issue API returned an invalid creation result")
+        issue_url = payload.get("html_url")
+        if not isinstance(issue_url, str) or not ISSUE_URL_PATTERN.fullmatch(issue_url):
+            raise ValueError("GitHub Issue API returned an invalid Issue URL")
+        return issue_url
+
+    def get_issue(self, repository: str, number: int) -> Dict[str, Any]:
+        if number < 1:
+            raise ValueError("GitHub Issue reference is invalid")
+        path = self._repository_path(repository)
+        status, payload = self._request("GET", f"{path}/issues/{number}")
+        if status != 200:
+            raise ValueError("GitHub Issue API returned an invalid refetch result")
+        return _validate_issue_snapshot(payload, repository, number, "html_url")
+
+    def add_labels(
+        self, repository: str, number: int, labels: Sequence[str]
+    ) -> Tuple[str, ...]:
+        if number < 1:
+            raise ValueError("GitHub Issue reference is invalid")
+        requested = tuple(_text(label) for label in labels)
+        if (
+            not requested
+            or len(requested) > 10
+            or len(set(requested)) != len(requested)
+            or any(not re.fullmatch(r"[A-Za-z0-9_.:/ -]{1,80}", label) for label in requested)
+        ):
+            raise ValueError("GitHub Issue labels are invalid")
+        path = self._repository_path(repository)
+        status, payload = self._request(
+            "POST",
+            f"{path}/issues/{number}/labels",
+            {"labels": list(requested)},
+        )
+        if status != 200 or not isinstance(payload, list):
+            raise ValueError("GitHub Issue API returned an invalid label result")
+        applied = tuple(
+            item.get("name")
+            for item in payload
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        )
+        if not set(requested) <= set(applied):
+            raise ValueError("GitHub Issue API did not apply every required label")
+        return requested
+
+
+def _validate_issue_snapshot(
+    payload: Any,
+    repository: str,
+    number: int,
+    url_field: str,
+) -> Dict[str, Any]:
+    if not isinstance(payload, dict) or "pull_request" in payload:
+        raise ValueError("GitHub Issue refetch returned an invalid Issue")
+    title = payload.get("title")
+    body = payload.get("body")
+    url = payload.get(url_field)
+    state = payload.get("state")
+    expected_url = f"https://github.com/{repository}/issues/{number}"
+    if (
+        payload.get("number") != number
+        or not isinstance(title, str)
+        or not title.strip()
+        or not isinstance(body, str)
+        or not body.strip()
+        or url != expected_url
+        or state not in {"open", "closed"}
+    ):
+        raise ValueError("GitHub Issue refetch returned an inconsistent snapshot")
+    if find_sensitive_data({"title": title, "body": body}):
+        raise ValueError("GitHub Issue snapshot failed sensitive-data validation")
+    return {
+        "number": number,
+        "title": title,
+        "body": body,
+        "url": url,
+        "state": state,
+        "repository_url": f"https://api.github.com/repos/{repository}",
+    }
+
+
+_REQUIREMENT_SPLIT_PATTERN = re.compile(r"(?:[，,。；;]|并且|同时|以及)")
+_NUMBER_PATTERN = r"-?\d+(?:\.\d+)?"
+_NUMERIC_REQUIREMENT_PATTERNS = (
+    (
+        "maximum_inclusive",
+        re.compile(
+            rf"(?:不超过|不得超过|至多|最多(?:为|是)?|上限(?:为|是)?|"
+            rf"最大(?:值)?(?:为|是)?|小于(?:或)?等于|<=|≤)\s*({_NUMBER_PATTERN})"
+        ),
+    ),
+    (
+        "maximum_inclusive",
+        re.compile(rf"({_NUMBER_PATTERN})\s*(?:以内|之内|及以下|或以下)"),
+    ),
+    (
+        "maximum_exclusive",
+        re.compile(rf"(?:小于|低于|少于|<)\s*({_NUMBER_PATTERN})"),
+    ),
+    (
+        "minimum_inclusive",
+        re.compile(
+            rf"(?:不少于|不得少于|至少(?:为|是)?|下限(?:为|是)?|"
+            rf"最小(?:值)?(?:为|是)?|大于(?:或)?等于|>=|≥)\s*({_NUMBER_PATTERN})"
+        ),
+    ),
+    (
+        "minimum_inclusive",
+        re.compile(rf"({_NUMBER_PATTERN})\s*(?:以上|及以上|或以上)"),
+    ),
+    (
+        "minimum_exclusive",
+        re.compile(rf"(?:大于|高于|多于|>)\s*({_NUMBER_PATTERN})"),
+    ),
+)
+_MARKDOWN_EXPECTED_PATTERN = re.compile(r"(?im)^- Expected:\s*(.+?)\s*$")
+_MARKDOWN_ACCEPTANCE_SECTION_PATTERN = re.compile(
+    r"(?ims)^## Acceptance Criteria\s*(.*?)(?=^## |\Z)"
+)
+_MARKDOWN_CHECKBOX_PATTERN = re.compile(r"(?im)^-\s*\[[ xX]\]\s*(.+?)\s*$")
+
+
+def _requirement_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", _text(value)).casefold()
+    return " ".join(text.split())
+
+
+def _normalized_number(value: str) -> str:
+    try:
+        number = float(value)
+    except ValueError:
+        return value
+    return str(int(number)) if number.is_integer() else format(number, ".15g")
+
+
+def _requirement_signature_from_texts(
+    expected_behavior: Any,
+    acceptance_criteria: Any,
+) -> Dict[str, List[str]]:
+    texts = []
+    expected = _requirement_text(expected_behavior)
+    if expected and expected != "unknown":
+        texts.append(expected)
+    if isinstance(acceptance_criteria, list):
+        texts.extend(
+            text
+            for text in (_requirement_text(item) for item in acceptance_criteria)
+            if text and text != "unknown"
+        )
+    constraints = set()
+    qualifiers = set()
+    for text in texts:
+        clauses = [item.strip() for item in _REQUIREMENT_SPLIT_PATTERN.split(text)]
+        for clause in clauses:
+            if not clause:
+                continue
+            clause_constraints = set()
+            for kind, pattern in _NUMERIC_REQUIREMENT_PATTERNS:
+                clause_constraints.update(
+                    f"{kind}:{_normalized_number(match.group(1))}"
+                    for match in pattern.finditer(clause)
+                )
+            if clause_constraints:
+                constraints.update(clause_constraints)
+                continue
+            numbers = re.findall(_NUMBER_PATTERN, clause)
+            if numbers:
+                constraints.update(
+                    f"number:{_normalized_number(number)}" for number in numbers
+                )
+                continue
+            normalized = re.sub(r"[^\w\u3400-\u9fff]+", " ", clause)
+            normalized = " ".join(normalized.split())
+            if normalized:
+                qualifiers.add(normalized)
+    return {
+        "numeric_constraints": sorted(constraints),
+        "qualifiers": sorted(qualifiers),
+    }
+
+
+def _requirement_signature(generation: Mapping[str, Any]) -> Dict[str, List[str]]:
+    draft = _mapping(generation.get("draft"))
+    problem = _mapping(draft.get("problem"))
+    return _requirement_signature_from_texts(
+        problem.get("expected_behavior"),
+        draft.get("acceptance_criteria"),
+    )
+
+
+def _requirement_signature_from_issue_body(body: str) -> Dict[str, List[str]]:
+    expected_match = _MARKDOWN_EXPECTED_PATTERN.search(body)
+    acceptance_match = _MARKDOWN_ACCEPTANCE_SECTION_PATTERN.search(body)
+    criteria = (
+        _MARKDOWN_CHECKBOX_PATTERN.findall(acceptance_match.group(1))
+        if acceptance_match
+        else []
+    )
+    return _requirement_signature_from_texts(
+        expected_match.group(1) if expected_match else "",
+        criteria,
+    )
+
+
+def _issue_fingerprint(
+    generation: Mapping[str, Any],
+    repository: str,
+    *,
+    version: str,
+    include_requirements: bool,
+) -> str:
     draft = _mapping(generation.get("draft"))
     obj = _mapping(draft.get("object"))
     interface = _mapping(draft.get("interface"))
@@ -259,7 +644,7 @@ def issue_fingerprint(generation: Mapping[str, Any], repository: str) -> str:
     ):
         raise ValueError("Issue revision metadata is invalid")
     material = {
-        "version": FINGERPRINT_VERSION,
+        "version": version,
         "repository": repository.casefold(),
         "service": _normalized(obj.get("service")),
         "module": _normalized(obj.get("module")),
@@ -273,12 +658,34 @@ def issue_fingerprint(generation: Mapping[str, Any], repository: str) -> str:
         "revision_parent": revision_parent.casefold(),
         "revision_request_sha256": revision_request_sha256,
     }
+    if include_requirements:
+        material["requirement_signature"] = _requirement_signature(generation)
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _fingerprint_marker(fingerprint: str) -> str:
-    return f"<!-- {FINGERPRINT_VERSION}:{fingerprint} -->"
+def issue_fingerprint(generation: Mapping[str, Any], repository: str) -> str:
+    return _issue_fingerprint(
+        generation,
+        repository,
+        version=FINGERPRINT_VERSION,
+        include_requirements=True,
+    )
+
+
+def _legacy_issue_fingerprint(
+    generation: Mapping[str, Any], repository: str
+) -> str:
+    return _issue_fingerprint(
+        generation,
+        repository,
+        version=LEGACY_FINGERPRINT_VERSION,
+        include_requirements=False,
+    )
+
+
+def _fingerprint_marker(fingerprint: str, version: str = FINGERPRINT_VERSION) -> str:
+    return f"<!-- {version}:{fingerprint} -->"
 
 
 def render_automated_issue_body(
@@ -321,6 +728,11 @@ def match_existing_issues(
 ) -> Dict[str, Any]:
     fingerprint = issue_fingerprint(generation, repository)
     marker = _fingerprint_marker(fingerprint)
+    legacy_marker = _fingerprint_marker(
+        _legacy_issue_fingerprint(generation, repository),
+        LEGACY_FINGERPRINT_VERSION,
+    )
+    requirements = _requirement_signature(generation)
     draft = _mapping(generation.get("draft"))
     title = _normalized(draft.get("title"))
     obj = _mapping(draft.get("object"))
@@ -338,9 +750,18 @@ def match_existing_issues(
     for issue in issues[:MAX_ISSUES_SCANNED]:
         body = _text(issue.get("body"))
         normalized_body = body.casefold()
-        exact = marker in body
+        current_exact = marker in body
+        legacy_exact = (
+            legacy_marker in body
+            and _requirement_signature_from_issue_body(body) == requirements
+        )
+        exact = current_exact or legacy_exact
         score = 100 if exact else 0
-        reasons = ["exact deterministic fingerprint"] if exact else []
+        reasons = []
+        if current_exact:
+            reasons.append("exact deterministic fingerprint")
+        elif legacy_exact:
+            reasons.append("compatible legacy deterministic fingerprint")
         if not exact and is_revision:
             continue
         if not exact:
@@ -373,6 +794,11 @@ def match_existing_issues(
                 "score": score,
                 "reasons": reasons,
                 "exact_fingerprint": exact,
+                "fingerprint_version": (
+                    FINGERPRINT_VERSION
+                    if current_exact
+                    else LEGACY_FINGERPRINT_VERSION if legacy_exact else None
+                ),
             }
         )
     candidates.sort(key=lambda item: (-item["score"], item["number"]))
@@ -429,7 +855,13 @@ def automate_repository_issue(
     auto_publish: bool,
     *,
     preselected_repository: str = "",
+    routing_mode: str = ROUTING_MODE_PRODUCTION_EVIDENCE,
+    input_type: str = "natural_language",
 ) -> Dict[str, Any]:
+    if routing_mode not in ROUTING_MODES:
+        raise ValueError("repository routing mode is invalid")
+    if input_type not in AUTOMATION_INPUT_TYPES:
+        raise ValueError("automation input type is invalid")
     generation_policy = _mapping(generation.get("policy"))
     review = _mapping(generation.get("review"))
     validation = _mapping(generation.get("validation"))
@@ -461,6 +893,13 @@ def automate_repository_issue(
         ):
             raise ValueError(
                 "preselected repository requires the exact single enabled scope"
+            )
+        if (
+            routing_mode == ROUTING_MODE_PRODUCTION_EVIDENCE
+            and input_type == "sanitized_evidence"
+        ):
+            raise ValueError(
+                "production evidence routing forbids single-repository log binding"
             )
     if preselected_repository and all(pre_resolution_rules.values()):
         digest = _text(generation.get("input_sha256"))
@@ -555,6 +994,8 @@ def automate_repository_issue(
             "policy_sha256": policy.policy_sha256,
             "scope_id": policy.scope_id,
             "scope_sha256": policy.scope_sha256,
+            "routing_mode": routing_mode,
+            "input_type": input_type,
         },
         "resolution": resolution,
         "issue_match": {

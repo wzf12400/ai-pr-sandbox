@@ -9,11 +9,14 @@ from unittest import mock
 
 from src.local_control_center import (
     CONFIG_SCHEMA_VERSION,
+    ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
+    ROUTING_MODE_PRODUCTION_EVIDENCE,
     ControlCenterWorkflow,
     LocalConfigStore,
     _compose_managed_evidence,
     _generation_failure_code,
     _is_resumable_empty_modification,
+    _preselected_repository,
     _prepare_execution_checkout,
 )
 from src.copilot_issue_provider import CopilotIssueProviderError
@@ -21,11 +24,16 @@ from tests.test_approved_issue_dispatcher import REPOSITORY, initialize_repo
 from tests.test_repository_issue_automation import generation
 
 
-def config_payload(repo: Path, model: str = "gpt-5.6-sol"):
+def config_payload(
+    repo: Path,
+    model: str = "gpt-5.6-sol",
+    routing_mode: str = ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
+):
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
         "github": {"login": "example-user"},
         "copilot": {"model": model},
+        "routing": {"mode": routing_mode},
         "repositories": [
             {
                 "repository": REPOSITORY,
@@ -74,6 +82,7 @@ class LocalConfigStoreTest(unittest.TestCase):
                 "schema_version",
                 "github",
                 "copilot",
+                "routing",
                 "repositories",
                 "logs",
             },
@@ -81,6 +90,42 @@ class LocalConfigStoreTest(unittest.TestCase):
         )
         self.assertNotIn("token", json.dumps(persisted).lower())
         self.assertNotIn("api_key", json.dumps(persisted).lower())
+
+    def test_missing_routing_mode_defaults_to_production_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = initialize_repo(root)
+            payload = config_payload(repo)
+            payload.pop("routing")
+
+            config = LocalConfigStore(root / "config.json").parse(payload)
+
+        self.assertEqual(ROUTING_MODE_PRODUCTION_EVIDENCE, config.routing_mode)
+
+    def test_routing_modes_make_single_repository_log_binding_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = initialize_repo(root)
+            store = LocalConfigStore(root / "config.json")
+            demo = store.parse(
+                config_payload(repo, routing_mode=ROUTING_MODE_DEMO_SINGLE_REPOSITORY)
+            )
+            production = store.parse(
+                config_payload(repo, routing_mode=ROUTING_MODE_PRODUCTION_EVIDENCE)
+            )
+
+        self.assertEqual(
+            REPOSITORY,
+            _preselected_repository(demo, "sanitized_evidence"),
+        )
+        self.assertEqual(
+            "",
+            _preselected_repository(production, "sanitized_evidence"),
+        )
+        self.assertEqual(
+            REPOSITORY,
+            _preselected_repository(production, "natural_language"),
+        )
 
     def test_empty_model_uses_tracked_repository_default(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -338,7 +383,11 @@ class ControlCenterWorkflowTest(unittest.TestCase):
         self.assertFalse(audit["raw_input_recorded"])
         self.assertNotIn("100以内", audit_text)
 
-    def _configured_workflow(self, root):
+    def _configured_workflow(
+        self,
+        root,
+        routing_mode=ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
+    ):
         repo = initialize_repo(root)
         config_path = root / "config.json"
         with mock.patch(
@@ -346,7 +395,7 @@ class ControlCenterWorkflowTest(unittest.TestCase):
             return_value=IDENTITY,
         ):
             store = LocalConfigStore(config_path)
-            store.save(config_payload(repo))
+            store.save(config_payload(repo, routing_mode=routing_mode))
         approval = FakeApprovalClient()
         return (
             repo,
@@ -680,7 +729,7 @@ class ControlCenterWorkflowTest(unittest.TestCase):
         self.assertEqual("sanitized_evidence", record["input_type"])
         self.assertEqual(64, len(record["input_sha256"]))
 
-    def test_sanitized_log_never_uses_single_repository_operator_binding(self):
+    def test_production_log_never_uses_single_repository_demo_binding(self):
         evidence = {
             "schema_version": "ai-issue-evidence/v1",
             "source": {
@@ -697,7 +746,10 @@ class ControlCenterWorkflowTest(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            _, workflow, _ = self._configured_workflow(root)
+            _, workflow, _ = self._configured_workflow(
+                root,
+                routing_mode=ROUTING_MODE_PRODUCTION_EVIDENCE,
+            )
             with mock.patch("src.local_control_center.threading.Thread"):
                 record = workflow.create_from_evidence(evidence)
             with mock.patch(
@@ -729,6 +781,14 @@ class ControlCenterWorkflowTest(unittest.TestCase):
             )
 
         self.assertEqual("", automation.call_args.kwargs["preselected_repository"])
+        self.assertEqual(
+            ROUTING_MODE_PRODUCTION_EVIDENCE,
+            automation.call_args.kwargs["routing_mode"],
+        )
+        self.assertEqual(
+            "sanitized_evidence",
+            automation.call_args.kwargs["input_type"],
+        )
         self.assertNotIn("repository", compact.get("facts", {}))
         self.assertEqual("blocked", blocked["status"])
         self.assertEqual("repository_not_resolved", blocked["failure"]["code"])
@@ -920,7 +980,10 @@ class ControlCenterWorkflowTest(unittest.TestCase):
         draft_pr_url = f"https://github.com/{REPOSITORY}/pull/18"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            _, workflow, approval = self._configured_workflow(root)
+            _, workflow, approval = self._configured_workflow(
+                root,
+                routing_mode=ROUTING_MODE_PRODUCTION_EVIDENCE,
+            )
             with mock.patch("src.local_control_center.threading.Thread"):
                 record = workflow.create_from_evidence(evidence)
             with mock.patch(

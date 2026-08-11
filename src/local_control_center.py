@@ -48,6 +48,9 @@ from src.natural_language_issue_automation import (
     GitHubCLIIssueClient,
 )
 from src.repository_issue_automation import (
+    ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
+    ROUTING_MODE_PRODUCTION_EVIDENCE,
+    ROUTING_MODES,
     automate_repository_issue,
     load_auto_publish_policy,
     render_automated_issue_body,
@@ -401,6 +404,7 @@ class LogSourceConfig:
 class ControlCenterConfig:
     github_login: str
     copilot_model: str
+    routing_mode: str
     repositories: Tuple[ManagedRepository, ...]
     log_source: Optional[LogSourceConfig]
     sha256: str
@@ -414,6 +418,7 @@ class ControlCenterConfig:
             "schema_version": CONFIG_SCHEMA_VERSION,
             "github": {"login": self.github_login},
             "copilot": {"model": self.copilot_model},
+            "routing": {"mode": self.routing_mode},
             "repositories": [item.public_dict() for item in self.repositories],
             "logs": self.log_source.public_dict() if self.log_source else None,
             "sha256": self.sha256,
@@ -462,10 +467,14 @@ def _preselected_repository(
     config: ControlCenterConfig,
     input_type: str,
 ) -> str:
-    """Bind explicit operator requests, but never route observed logs by convenience."""
+    """Apply an explicit routing mode without presenting scope as code evidence."""
+    if len(config.enabled_repositories) != 1:
+        return ""
+    if input_type in {"natural_language", "revision"}:
+        return config.enabled_repositories[0].repository
     if (
-        input_type in {"natural_language", "revision"}
-        and len(config.enabled_repositories) == 1
+        input_type == "sanitized_evidence"
+        and config.routing_mode == ROUTING_MODE_DEMO_SINGLE_REPOSITORY
     ):
         return config.enabled_repositories[0].repository
     return ""
@@ -576,10 +585,19 @@ class LocalConfigStore:
     def parse(self, payload: Mapping[str, Any]) -> ControlCenterConfig:
         github = payload.get("github")
         copilot = payload.get("copilot")
+        routing = payload.get("routing")
         raw_repositories = payload.get("repositories")
         log_source = self._log_source(payload.get("logs"))
         if not isinstance(github, dict) or not isinstance(copilot, dict):
             raise ValueError("GitHub and Copilot configuration are required")
+        if routing is None:
+            routing_mode = ROUTING_MODE_PRODUCTION_EVIDENCE
+        elif not isinstance(routing, dict) or set(routing) != {"mode"}:
+            raise ValueError("repository routing configuration is invalid")
+        else:
+            routing_mode = str(routing.get("mode", "")).strip()
+        if routing_mode not in ROUTING_MODES:
+            raise ValueError("repository routing mode is invalid")
         login = str(github.get("login", "")).strip()
         model = str(copilot.get("model", "")).strip()
         if not LOGIN_PATTERN.fullmatch(login):
@@ -616,6 +634,7 @@ class LocalConfigStore:
             "schema_version": CONFIG_SCHEMA_VERSION,
             "github": {"login": login},
             "copilot": {"model": model},
+            "routing": {"mode": routing_mode},
             "repositories": [
                 {
                     "repository": item.repository,
@@ -629,6 +648,7 @@ class LocalConfigStore:
         return ControlCenterConfig(
             github_login=login,
             copilot_model=model,
+            routing_mode=routing_mode,
             repositories=repositories,
             log_source=log_source,
             sha256=_sha256(normalized),
@@ -678,6 +698,7 @@ class LocalConfigStore:
             "schema_version": CONFIG_SCHEMA_VERSION,
             "github": {"login": config.github_login},
             "copilot": {"model": config.copilot_model},
+            "routing": {"mode": config.routing_mode},
             "repositories": [
                 {
                     "repository": item.repository,
@@ -705,6 +726,7 @@ class LocalConfigStore:
             "schema_version": CONFIG_SCHEMA_VERSION,
             "github": {"login": config.github_login},
             "copilot": {"model": config.copilot_model},
+            "routing": {"mode": config.routing_mode},
             "repositories": [
                 {
                     "repository": item.repository,
@@ -726,6 +748,7 @@ class LocalConfigStore:
             "schema_version": CONFIG_SCHEMA_VERSION,
             "github": {"login": updated.github_login},
             "copilot": {"model": updated.copilot_model},
+            "routing": {"mode": updated.routing_mode},
             "repositories": [
                 {
                     "repository": item.repository,
@@ -1201,6 +1224,8 @@ class ControlCenterWorkflow:
                         config,
                         input_type,
                     ),
+                    routing_mode=config.routing_mode,
+                    input_type=input_type,
                 )
                 _atomic_write_json(run_dir / "automation-preview.json", automation)
                 publication = automation.get("publication", {})
@@ -1258,6 +1283,7 @@ class ControlCenterWorkflow:
                         else None
                     ),
                     "copilot_model": config.copilot_model,
+                    "routing_mode": config.routing_mode,
                     "routing_provider": routing_provider,
                     "required_labels": list(managed.required_labels),
                     "allowed_write_paths": list(managed.allowed_write_paths),
@@ -1850,6 +1876,8 @@ class ControlCenterWorkflow:
                         config,
                         str(record.get("input_type", "")),
                     ),
+                    routing_mode=config.routing_mode,
+                    input_type=str(record.get("input_type", "")),
                 )
                 _atomic_write_json(run_dir / "automation-publication.json", automation)
                 publication = automation.get("publication", {})

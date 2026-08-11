@@ -5,7 +5,12 @@ import unittest
 from pathlib import Path
 
 from src.repository_issue_automation import (
+    FINGERPRINT_VERSION,
+    LEGACY_FINGERPRINT_VERSION,
+    ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
+    ROUTING_MODE_PRODUCTION_EVIDENCE,
     RepositoryAutoPublishPolicy,
+    _legacy_issue_fingerprint,
     automate_repository_issue,
     issue_fingerprint,
     load_auto_publish_policy,
@@ -54,6 +59,27 @@ def generation():
     result["draft"]["request_type"] = "Bug"
     result["draft"]["severity"] = "Unknown"
     return result
+
+
+def requirement_generation(expected, criteria):
+    result = generation()
+    result["draft"]["title"] = "Limit calculator range"
+    result["draft"]["problem"]["expected_behavior"] = expected
+    result["draft"]["acceptance_criteria"] = list(criteria)
+    return result
+
+
+def legacy_issue_body(generated, repository):
+    body, fingerprint = render_automated_issue_body(
+        generated,
+        repository,
+        policy(),
+    )
+    legacy = _legacy_issue_fingerprint(generated, repository)
+    return body.replace(
+        f"<!-- {FINGERPRINT_VERSION}:{fingerprint} -->",
+        f"<!-- {LEGACY_FINGERPRINT_VERSION}:{legacy} -->",
+    )
 
 
 class FakeSearchAdapter:
@@ -106,6 +132,8 @@ class RepositoryIssueAutomationTest(unittest.TestCase):
             client,
             False,
             preselected_repository=REPOSITORIES[0],
+            routing_mode=ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
+            input_type="sanitized_evidence",
         )
 
         self.assertEqual("resolved", result["resolution"]["status"])
@@ -118,6 +146,57 @@ class RepositoryIssueAutomationTest(unittest.TestCase):
             "approved_not_published",
             result["publication"]["status"],
         )
+        self.assertEqual(
+            ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
+            result["policy"]["routing_mode"],
+        )
+
+    def test_production_log_rejects_single_repository_convenience_binding(self):
+        single_scope = RepositorySearchScope(
+            "synthetic-routing-probe",
+            (RepositoryEntry(REPOSITORIES[0], True, "main", ("probe",)),),
+            SearchLimits(12, 1, 5),
+        )
+
+        with self.assertRaisesRegex(ValueError, "forbids single-repository"):
+            automate_repository_issue(
+                generation(),
+                {"safety": {"ai_allowed": True, "security_review_required": False}},
+                single_scope,
+                FakeSearchAdapter(),
+                "github-tree-probe",
+                policy(),
+                FakeIssueClient(),
+                False,
+                preselected_repository=REPOSITORIES[0],
+                routing_mode=ROUTING_MODE_PRODUCTION_EVIDENCE,
+                input_type="sanitized_evidence",
+            )
+
+    def test_production_log_uses_code_evidence_in_single_repository_scope(self):
+        single_scope = RepositorySearchScope(
+            "synthetic-routing-probe",
+            (RepositoryEntry(REPOSITORIES[0], True, "main", ("probe",)),),
+            SearchLimits(12, 1, 5),
+        )
+        search = FakeSearchAdapter()
+
+        result = automate_repository_issue(
+            generation(),
+            {"safety": {"ai_allowed": True, "security_review_required": False}},
+            single_scope,
+            search,
+            "github-tree-probe",
+            policy(),
+            FakeIssueClient(),
+            False,
+            routing_mode=ROUTING_MODE_PRODUCTION_EVIDENCE,
+            input_type="sanitized_evidence",
+        )
+
+        self.assertEqual("resolved", result["resolution"]["status"])
+        self.assertEqual("github", result["resolution"]["search_audit"]["provider"])
+        self.assertGreater(len(search.calls), 0)
 
     def test_single_repository_without_operator_binding_requires_code_evidence(self):
         single_scope = RepositorySearchScope(
@@ -229,7 +308,7 @@ class RepositoryIssueAutomationTest(unittest.TestCase):
         self.assertEqual("created", result["publication"]["status"])
         self.assertEqual(REPOSITORIES[0], result["publication"]["repository"])
         self.assertEqual(1, len(client.create_calls))
-        self.assertIn("repository-issue-fingerprint/v1", client.create_calls[0][2])
+        self.assertIn("repository-issue-fingerprint/v2", client.create_calls[0][2])
         self.assertNotIn("src/SyntheticRoutingController.java", json.dumps(result))
 
     def test_exact_fingerprint_is_deduplicated_without_write(self):
@@ -396,6 +475,152 @@ class RepositoryIssueAutomationTest(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertRegex(first, r"^[0-9a-f]{64}$")
+
+    def test_synonymous_numeric_requirements_share_the_same_fingerprint(self):
+        first = requirement_generation(
+            "将计算器的计算范围限制在50以内",
+            ["计算范围限制在50以内。"],
+        )
+        second = requirement_generation(
+            "计算器输入值不得超过 50",
+            ["输入数字最大值为50。"],
+        )
+
+        self.assertEqual(
+            issue_fingerprint(first, REPOSITORIES[0]),
+            issue_fingerprint(second, REPOSITORIES[0]),
+        )
+
+    def test_different_numeric_limits_have_different_fingerprints(self):
+        fifty = requirement_generation(
+            "将计算器的计算范围限制在50以内",
+            ["计算范围限制在50以内。"],
+        )
+        forty = requirement_generation(
+            "将计算器的计算范围限制在40以内",
+            ["计算范围限制在40以内。"],
+        )
+
+        self.assertNotEqual(
+            issue_fingerprint(fifty, REPOSITORIES[0]),
+            issue_fingerprint(forty, REPOSITORIES[0]),
+        )
+
+    def test_new_non_numeric_acceptance_criterion_changes_fingerprint(self):
+        base = requirement_generation(
+            "将计算器的计算范围限制在50以内",
+            ["计算范围限制在50以内。"],
+        )
+        expanded = requirement_generation(
+            "将计算器的计算范围限制在50以内",
+            [
+                "计算范围限制在50以内。",
+                "超过范围时返回明确错误。",
+            ],
+        )
+
+        self.assertNotEqual(
+            issue_fingerprint(base, REPOSITORIES[0]),
+            issue_fingerprint(expanded, REPOSITORIES[0]),
+        )
+
+    def test_compatible_legacy_fingerprint_reuses_same_numeric_requirement(self):
+        original = requirement_generation(
+            "将计算器的计算范围限制在50以内",
+            ["计算范围限制在50以内。"],
+        )
+        synonymous = requirement_generation(
+            "计算器输入值不得超过 50",
+            ["输入数字最大值为50。"],
+        )
+        existing = {
+            "number": 29,
+            "title": original["draft"]["title"],
+            "body": legacy_issue_body(original, REPOSITORIES[0]),
+            "url": f"https://github.com/{REPOSITORIES[0]}/issues/29",
+            "state": "CLOSED",
+        }
+
+        result = automate_repository_issue(
+            synonymous,
+            {"safety": {"ai_allowed": True, "security_review_required": False}},
+            scope(),
+            FakeSearchAdapter(),
+            "github-tree-probe",
+            policy(),
+            FakeIssueClient([existing]),
+            False,
+        )
+
+        self.assertEqual("already_completed", result["publication"]["status"])
+        self.assertEqual(
+            LEGACY_FINGERPRINT_VERSION,
+            result["issue_match"]["selected"]["fingerprint_version"],
+        )
+
+    def test_legacy_fingerprint_does_not_swallow_conflicting_numeric_limit(self):
+        fifty = requirement_generation(
+            "将计算器的计算范围限制在50以内",
+            ["计算范围限制在50以内。"],
+        )
+        forty = requirement_generation(
+            "将计算器的计算范围限制在40以内",
+            ["计算范围限制在40以内。"],
+        )
+        existing = {
+            "number": 29,
+            "title": fifty["draft"]["title"],
+            "body": legacy_issue_body(fifty, REPOSITORIES[0]),
+            "url": f"https://github.com/{REPOSITORIES[0]}/issues/29",
+            "state": "CLOSED",
+        }
+
+        result = automate_repository_issue(
+            forty,
+            {"safety": {"ai_allowed": True, "security_review_required": False}},
+            scope(),
+            FakeSearchAdapter(),
+            "github-tree-probe",
+            policy(),
+            FakeIssueClient([existing]),
+            False,
+        )
+
+        self.assertEqual("new_issue", result["issue_match"]["status"])
+        self.assertEqual("approved_not_published", result["publication"]["status"])
+
+    def test_legacy_fingerprint_does_not_swallow_new_acceptance_criterion(self):
+        original = requirement_generation(
+            "将计算器的计算范围限制在50以内",
+            ["计算范围限制在50以内。"],
+        )
+        expanded = requirement_generation(
+            "将计算器的计算范围限制在50以内",
+            [
+                "计算范围限制在50以内。",
+                "超过范围时返回明确错误。",
+            ],
+        )
+        existing = {
+            "number": 29,
+            "title": original["draft"]["title"],
+            "body": legacy_issue_body(original, REPOSITORIES[0]),
+            "url": f"https://github.com/{REPOSITORIES[0]}/issues/29",
+            "state": "CLOSED",
+        }
+
+        result = automate_repository_issue(
+            expanded,
+            {"safety": {"ai_allowed": True, "security_review_required": False}},
+            scope(),
+            FakeSearchAdapter(),
+            "github-tree-probe",
+            policy(),
+            FakeIssueClient([existing]),
+            False,
+        )
+
+        self.assertEqual("new_issue", result["issue_match"]["status"])
 
     def test_revision_fingerprint_is_versioned_from_parent_and_new_request(self):
         generated = generation()

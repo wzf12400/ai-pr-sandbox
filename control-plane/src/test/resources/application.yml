@@ -1,0 +1,27 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:control_plane;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+  data:
+    redis:
+      repositories:
+        enabled: false
+
+app:
+  policy-id: test-policy
+  worker:
+    redis-enabled: false
+    queue-key: github-ai-agent:test-jobs
+  repository-catalog:
+    - repository: demo-company/payment-service
+      keywords: ["支付", "订单", "payment", "order"]
+    - repository: demo-company/customer-portal
+      keywords: ["用户", "登录", "user", "login"]

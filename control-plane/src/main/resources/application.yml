@@ -1,0 +1,31 @@
+spring:
+  application:
+    name: github-ai-agent-control-plane
+  datasource:
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/github_ai_agent?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+  data:
+    redis:
+      url: ${REDIS_URL:redis://127.0.0.1:6379/0}
+      repositories:
+        enabled: false
+
+server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
+  port: ${SERVER_PORT:8080}
+
+app:
+  policy-id: ${AUTOMATION_POLICY_ID:local-development-policy}
+  worker:
+    redis-enabled: ${WORKER_REDIS_ENABLED:true}
+    queue-key: ${WORKER_QUEUE_KEY:github-ai-agent:jobs}
+  repository-catalog:
+    - repository: wzf12400/ai-pr-sandbox
+      keywords: ["测试仓库", "计算器", "加法", "减法", "乘法", "除法", "calculator", "divide", "sandbox"]
