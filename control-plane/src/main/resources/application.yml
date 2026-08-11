@@ -25,7 +25,15 @@ app:
   policy-id: ${AUTOMATION_POLICY_ID:local-development-policy}
   worker:
     redis-enabled: ${WORKER_REDIS_ENABLED:true}
-    queue-key: ${WORKER_QUEUE_KEY:github-ai-agent:jobs}
+    queue-key: ${WORKER_QUEUE_KEY:github-ai-agent:jobs:v2}
+    outbox-batch-size: ${WORKER_OUTBOX_BATCH_SIZE:100}
+    outbox-publish-delay: ${WORKER_OUTBOX_PUBLISH_DELAY:2s}
+    reconciliation-enabled: ${WORKER_RECONCILIATION_ENABLED:false}
+    reconciliation-batch-size: ${WORKER_RECONCILIATION_BATCH_SIZE:100}
+    reconciliation-delay: ${WORKER_RECONCILIATION_DELAY:5m}
+    reconciliation-republish-after: ${WORKER_RECONCILIATION_REPUBLISH_AFTER:10m}
+    stale-task-timeout: ${WORKER_STALE_TASK_TIMEOUT:30m}
+    max-task-retries: ${WORKER_MAX_RETRIES:3}
   repository-catalog:
     - repository: wzf12400/ai-pr-sandbox
       keywords: ["测试仓库", "计算器", "加法", "减法", "乘法", "除法", "calculator", "divide", "sandbox"]

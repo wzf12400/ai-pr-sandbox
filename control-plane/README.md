@@ -23,9 +23,11 @@ non-local use is intentionally not part of this slice.
 4. A deterministic local catalog searches only configured, authorized repositories.
 5. A resolved task is persisted as `PENDING`; an uncertain task is persisted as
    `NEEDS_CONTEXT` with bounded candidate repositories.
-6. After the database commit, Java writes only the task ID to a local Redis
-   list. The database remains the source of truth.
-7. The bounded Python Mock Worker claims the task through Java. With Issue
+6. In the same MySQL transaction, Java records a task-ID-only outbox row. A
+   bounded publisher sends pending outbox generations to a Redis Stream after
+   commit; Redis never receives the task body.
+7. The bounded Python Mock Worker uses a Redis Streams consumer group, then
+   claims the task through Java. With Issue
    publication disabled, it reuses `repo_locator` against an isolated, clean
    checkout without making external calls.
 8. When the policy-pinned Issue gate is enabled, the worker selects the source
@@ -43,7 +45,7 @@ read/write account permission were verified on 2026-08-10. Runtime writes remain
 disabled by default. A bounded synthetic-log integration run created Issue #40
 and Draft PR #41 in that sandbox; it did not read company logs, merge, or deploy.
 
-MySQL is the source of truth. Redis is only a local wake-up queue and stores no
+MySQL is the source of truth. Redis is only a local wake-up stream and stores no
 task body. The worker receives a minimized, sanitized claim contract rather
 than reading MySQL directly. All tasks in this slice use `executionMode=MOCK`;
 the real write gates are off by default, and only a persisted Draft PR URL
@@ -150,14 +152,12 @@ The cursor is deferred until every candidate in the batch is acknowledged by
 the Java API. A failed API call leaves the cursor unchanged. Retrying the same
 stable incident reference reuses the existing Java task, and an inbox record
 already bound to a task is not submitted again. A successful resolved task is
-then enqueued to Redis by Java for the existing Python worker; an uncertain
+then scheduled through the MySQL outbox for the existing Python worker; an uncertain
 repository match remains `NEEDS_CONTEXT` and is not guessed.
 
 This command intentionally requires `--once`. It is a verified local intake
-bridge, not a durable watcher. Scheduling, acknowledgement retries, dead-letter
-handling, and stale-task reconciliation remain part of the production queue
-gate below. Real Issue publication and code execution keep their existing,
-disabled-by-default policy gates.
+bridge, not a durable watcher. Real Issue publication and code execution keep
+their existing, disabled-by-default policy gates.
 
 Each macOS user can initialize the same connector without editing project
 files. From the repository root run:
@@ -190,9 +190,50 @@ cd ..
 The worker rejects non-loopback control-plane and Redis URLs, a repository not
 on its explicit allowlist, a checkout with a different origin or branch, and a
 dirty checkout. A duplicate Redis item is harmless because the Java claim is
-atomic and only a `PENDING` task can be claimed. If enqueueing fails, the task
-stays `PENDING` in MySQL and can be retried locally through
-`POST /api/internal/tasks/{taskId}/enqueue`.
+atomic and only a `PENDING` task can be claimed. If Redis is unavailable, the
+outbox remains unpublished in MySQL and the bounded publisher retries it. The
+manual `POST /api/internal/tasks/{taskId}/enqueue` endpoint now advances the
+durable outbox generation instead of writing directly to Redis.
+
+## Reliable Redis queue
+
+New jobs use `github-ai-agent:jobs:v2`, a Redis Stream. The legacy
+`github-ai-agent:jobs` List is deliberately not migrated or consumed. This
+preserves historical local tasks until an operator explicitly decides what to
+do with them. The stale-claim path uses `XAUTOCLAIM` and therefore requires
+Redis 6.2 or newer.
+
+The v2 delivery contract is:
+
+1. MySQL stores the task and its outbox generation in one transaction.
+2. Java publishes only `taskId`, `attempt`, `enqueuedAt`, and `schemaVersion`.
+3. The Python worker reads through consumer group `github-ai-agent-workers`.
+4. It acknowledges and deletes the Stream entry only after MySQL records a
+   terminal or human-review state.
+5. A transient control-plane failure republishes a bounded retry. After
+   `WORKER_MAX_RETRIES`, the safe task-ID-only envelope moves to
+   `github-ai-agent:jobs:v2:dead-letter`.
+6. `XAUTOCLAIM` recovers abandoned pending messages after
+   `WORKER_STALE_IDLE_MS`. Explicit reconciliation also returns stale
+   side-effect-free `PROCESSING` tasks to `PENDING`; stale tasks that may have
+   an Issue or other external side effect move to `NEEDS_CONTEXT` for manual
+   review instead of being replayed.
+7. A task that remains `PENDING` after its outbox was published for longer than
+   `WORKER_RECONCILIATION_REPUBLISH_AFTER` receives a new outbox generation.
+   This covers a Redis restart losing a recent Stream entry; the MySQL claim
+   makes a duplicate delivery harmless.
+
+`WORKER_RECONCILIATION_ENABLED` defaults to `false`. Enabling it can schedule
+pre-existing MySQL `PENDING` rows, so inspect preserved local tasks first. It
+does not start the Python worker or process a task by itself.
+
+Queue counters contain no task bodies and can be inspected locally with:
+
+```bash
+redis-cli HGETALL github-ai-agent:jobs:v2:metrics
+redis-cli XPENDING github-ai-agent:jobs:v2 github-ai-agent-workers
+redis-cli XLEN github-ai-agent:jobs:v2:dead-letter
+```
 
 The existing AI Issue generator, repository Issue deduplication logic, and
 GitHub REST Issue API adapter are connected behind
@@ -244,11 +285,13 @@ ready.
 
 ## Production queue gate
 
-Before enabling the real Python execution path, Copilot, or automatic Draft PR
-creation, replace the current `List` + `BLPOP` mock queue with a reliable
-delivery mechanism. The production gate must include explicit acknowledgement,
-retry limits, a dead-letter path, stale-task recovery, and idempotent claims
-(for example, Redis Streams consumer groups plus MySQL reconciliation).
+The local implementation now has a MySQL outbox, Redis Streams consumer group,
+explicit acknowledgement, bounded retries, dead letter, stale pending-message
+reclaim, guarded MySQL reconciliation, and idempotent task claims. This removes
+the earlier `List` + `BLPOP` loss window, but it is still local-development
+evidence: reconciliation is opt-in, there is no continuously supervised worker,
+and production AOF/replication, failover, alerting, SSO/RBAC, deployment, and an
+operator runbook remain required before continuous company automation.
 
 Run tests:
 

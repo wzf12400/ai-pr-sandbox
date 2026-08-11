@@ -5,8 +5,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.dao.DataAccessException;
+import org.springframework.data.redis.connection.stream.MapRecord;
+import org.springframework.data.redis.connection.stream.RecordId;
+import org.springframework.data.redis.connection.stream.StreamRecords;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
+
+import java.time.Instant;
+import java.util.Map;
 
 @Component
 @ConditionalOnProperty(name = "app.worker.redis-enabled", havingValue = "true")
@@ -25,10 +31,23 @@ public class RedisTaskQueue implements TaskQueue {
     @Override
     public boolean enqueue(String taskId) {
         try {
-            redisTemplate.opsForList().rightPush(properties.queueKey(), taskId);
+            MapRecord<String, String, String> message = StreamRecords
+                    .newRecord()
+                    .ofMap(Map.of(
+                            "taskId", taskId,
+                            "attempt", "0",
+                            "enqueuedAt", Instant.now().toString(),
+                            "schemaVersion", "1"
+                    ))
+                    .withStreamKey(properties.queueKey());
+            RecordId recordId = redisTemplate.opsForStream().add(message);
+            if (recordId == null) {
+                LOGGER.warn("Redis did not return a stream record id for task {}", taskId);
+                return false;
+            }
             return true;
         } catch (DataAccessException exception) {
-            LOGGER.warn("Could not enqueue task {} for the mock worker", taskId);
+            LOGGER.warn("Could not publish task {} to the worker stream", taskId);
             return false;
         }
     }

@@ -13,6 +13,8 @@ from src.mock_task_worker import (
     LocalRepositoryExecutionEngine,
     NaturalLanguageIssueExecutionEngine,
     PublishedIssueWorkerError,
+    QueueMessage,
+    RedisTaskQueue,
     StaleTaskError,
     WorkerConfig,
     WorkerError,
@@ -29,10 +31,21 @@ class FakeQueue:
     def __init__(self, task_id):
         self.task_id = task_id
         self.timeouts = []
+        self.acknowledged = []
+        self.retried = []
 
-    def next_task_id(self, timeout_seconds):
+    def next_message(self, timeout_seconds):
         self.timeouts.append(timeout_seconds)
-        return self.task_id
+        if self.task_id is None:
+            return None
+        return QueueMessage("1-0", self.task_id, 0)
+
+    def acknowledge(self, message):
+        self.acknowledged.append(message)
+
+    def retry_or_dead_letter(self, message, reason):
+        self.retried.append((message, reason))
+        return "retried"
 
 
 class FakeClient:
@@ -86,6 +99,21 @@ class FakeEngine:
 
 
 class MockTaskWorkerTest(unittest.TestCase):
+    @staticmethod
+    def _stream_queue(client):
+        queue = RedisTaskQueue.__new__(RedisTaskQueue)
+        queue._client = client
+        queue._response_error = RuntimeError
+        queue._queue_key = "github-ai-agent:jobs:v2"
+        queue._consumer_group = "workers"
+        queue._consumer_name = "worker-1"
+        queue._dead_letter_key = "github-ai-agent:jobs:v2:dead-letter"
+        queue._metrics_key = "github-ai-agent:jobs:v2:metrics"
+        queue._stale_idle_ms = 300_000
+        queue._max_retries = 3
+        queue._dead_letter_max_length = 10_000
+        return queue
+
     def test_processes_one_task_through_testing_and_completed(self):
         client = FakeClient()
         engine = FakeEngine()
@@ -210,6 +238,148 @@ class MockTaskWorkerTest(unittest.TestCase):
         self.assertEqual("no_task", result)
         self.assertEqual([7], queue.timeouts)
         self.assertEqual([], client.calls)
+
+    def test_run_once_acknowledges_only_after_terminal_state_is_recorded(self):
+        queue = FakeQueue(TASK_ID)
+        client = FakeClient()
+
+        result = run_once(queue, client, 7, FakeEngine())
+
+        self.assertEqual("completed", result)
+        self.assertEqual([QueueMessage("1-0", TASK_ID, 0)], queue.acknowledged)
+        self.assertEqual([], queue.retried)
+
+    def test_run_once_retries_when_control_plane_cannot_record_a_failure(self):
+        queue = FakeQueue(TASK_ID)
+        client = FakeClient(
+            claim_error=WorkerError("control plane unavailable"),
+            failing_status="FAILED",
+        )
+
+        result = run_once(queue, client, 7)
+
+        self.assertEqual("retried", result)
+        self.assertEqual([], queue.acknowledged)
+        self.assertEqual("control_plane_unavailable", queue.retried[0][1])
+
+    def test_stream_queue_reads_new_message_and_acknowledges_explicitly(self):
+        client = Mock()
+        client.xautoclaim.return_value = ("0-0", [], [])
+        client.xreadgroup.return_value = [
+            (
+                "github-ai-agent:jobs:v2",
+                [
+                    (
+                        "1000-0",
+                        {
+                            "taskId": TASK_ID,
+                            "attempt": "0",
+                            "enqueuedAt": "2026-08-11T00:00:00+00:00",
+                            "schemaVersion": "1",
+                        },
+                    )
+                ],
+            )
+        ]
+        pipeline = client.pipeline.return_value
+        queue = self._stream_queue(client)
+
+        message = queue.next_message(5)
+        queue.acknowledge(message)
+
+        self.assertEqual(QueueMessage("1000-0", TASK_ID, 0), message)
+        client.xreadgroup.assert_called_once_with(
+            "workers",
+            "worker-1",
+            {"github-ai-agent:jobs:v2": ">"},
+            count=1,
+            block=5000,
+        )
+        pipeline.xack.assert_called_once_with(
+            "github-ai-agent:jobs:v2", "workers", "1000-0"
+        )
+        pipeline.execute.assert_called_once()
+
+    def test_stream_queue_reclaims_stale_pending_message_first(self):
+        client = Mock()
+        client.xautoclaim.return_value = (
+            "0-0",
+            [
+                (
+                    "1000-0",
+                    {
+                        "taskId": TASK_ID,
+                        "attempt": "1",
+                        "enqueuedAt": "2026-08-11T00:00:00+00:00",
+                        "schemaVersion": "1",
+                    },
+                )
+            ],
+            [],
+        )
+        queue = self._stream_queue(client)
+
+        message = queue.next_message(5)
+
+        self.assertEqual(1, message.attempt)
+        client.xreadgroup.assert_not_called()
+        client.hincrby.assert_called_once_with(
+            "github-ai-agent:jobs:v2:metrics", "stale_reclaimed", 1
+        )
+
+    def test_stream_queue_retries_then_dead_letters_at_limit(self):
+        client = Mock()
+        pipeline = client.pipeline.return_value
+        queue = self._stream_queue(client)
+
+        retried = queue.retry_or_dead_letter(
+            QueueMessage("1000-0", TASK_ID, 2),
+            "control_plane_unavailable",
+        )
+        dead_lettered = queue.retry_or_dead_letter(
+            QueueMessage("1001-0", TASK_ID, 3),
+            "control_plane_unavailable",
+        )
+
+        self.assertEqual("retried", retried)
+        self.assertEqual("dead_lettered", dead_lettered)
+        self.assertEqual(2, pipeline.xadd.call_count)
+        retry_key, retry_fields = pipeline.xadd.call_args_list[0].args
+        dead_letter_key, dead_letter_fields = pipeline.xadd.call_args_list[1].args
+        self.assertEqual("github-ai-agent:jobs:v2", retry_key)
+        self.assertEqual("3", retry_fields["attempt"])
+        self.assertEqual("github-ai-agent:jobs:v2:dead-letter", dead_letter_key)
+        self.assertEqual("control_plane_unavailable", dead_letter_fields["reason"])
+        self.assertEqual(2, pipeline.xack.call_count)
+
+    def test_stream_queue_quarantines_unknown_fields_without_copying_them(self):
+        client = Mock()
+        client.xautoclaim.return_value = ("0-0", [], [])
+        client.xreadgroup.return_value = [
+            (
+                "github-ai-agent:jobs:v2",
+                [
+                    (
+                        "1000-0",
+                        {
+                            "taskId": TASK_ID,
+                            "schemaVersion": "1",
+                            "unexpectedSecret": "must-not-be-copied",
+                        },
+                    )
+                ],
+            )
+        ]
+        pipeline = client.pipeline.return_value
+        queue = self._stream_queue(client)
+
+        message = queue.next_message(5)
+
+        self.assertIsNone(message)
+        _, dead_letter_fields = pipeline.xadd.call_args.args
+        self.assertNotIn("taskId", dead_letter_fields)
+        self.assertNotIn("unexpectedSecret", dead_letter_fields)
+        self.assertEqual("invalid_message_contract", dead_letter_fields["reason"])
 
     def test_rejects_non_local_control_plane_configuration(self):
         with patch.dict(

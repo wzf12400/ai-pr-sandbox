@@ -19,7 +19,15 @@ app:
   policy-id: test-policy
   worker:
     redis-enabled: false
-    queue-key: github-ai-agent:test-jobs
+    queue-key: github-ai-agent:test-jobs:v2
+    outbox-batch-size: 100
+    outbox-publish-delay: 1h
+    reconciliation-enabled: false
+    reconciliation-batch-size: 100
+    reconciliation-delay: 1h
+    reconciliation-republish-after: 10m
+    stale-task-timeout: 30m
+    max-task-retries: 3
   repository-catalog:
     - repository: demo-company/payment-service
       keywords: ["支付", "订单", "payment", "order"]
