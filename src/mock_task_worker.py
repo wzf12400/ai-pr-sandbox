@@ -8,6 +8,7 @@ does not call GitHub, Jira, company logs, a model, or Copilot.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import logging
 import math
@@ -26,7 +27,8 @@ from urllib.request import Request, urlopen
 LOGGER = logging.getLogger("mock-task-worker")
 DEFAULT_CONTROL_PLANE_URL = "http://127.0.0.1:8080"
 DEFAULT_REDIS_URL = "redis://127.0.0.1:6379/0"
-DEFAULT_QUEUE_KEY = "github-ai-agent:jobs"
+DEFAULT_QUEUE_KEY = "github-ai-agent:jobs:v2"
+DEFAULT_CONSUMER_GROUP = "github-ai-agent-workers"
 DEFAULT_AUTHORIZED_REPOSITORY = "wzf12400/ai-pr-sandbox"
 DEFAULT_REPOSITORY_PATH = ".worker-repos/ai-pr-sandbox"
 
@@ -48,9 +50,22 @@ class PublishedIssueWorkerError(WorkerError):
         self.issue_url = issue_url
 
 
+@dataclass(frozen=True)
+class QueueMessage:
+    message_id: str
+    task_id: str
+    attempt: int
+
+
 class TaskQueue(Protocol):
-    def next_task_id(self, timeout_seconds: int) -> str | None:
-        """Return one task identifier, or None when the bounded wait expires."""
+    def next_message(self, timeout_seconds: int) -> QueueMessage | None:
+        """Return one stream message, or None when the bounded wait expires."""
+
+    def acknowledge(self, message: QueueMessage) -> None:
+        """Acknowledge a message only after its MySQL terminal state is durable."""
+
+    def retry_or_dead_letter(self, message: QueueMessage, reason: str) -> str:
+        """Republish a bounded retry or atomically move the message to dead letter."""
 
 
 class TaskClient(Protocol):
@@ -114,6 +129,13 @@ class WorkerConfig:
     control_plane_url: str
     redis_url: str
     queue_key: str
+    consumer_group: str
+    consumer_name: str
+    dead_letter_key: str
+    metrics_key: str
+    stale_idle_ms: int
+    max_retries: int
+    dead_letter_max_length: int
     wait_timeout_seconds: int
     request_timeout_seconds: float
     authorized_repository: str
@@ -146,6 +168,42 @@ class WorkerConfig:
         queue_key = os.getenv("WORKER_QUEUE_KEY", DEFAULT_QUEUE_KEY).strip()
         if not queue_key or len(queue_key) > 200:
             raise WorkerError("WORKER_QUEUE_KEY must contain 1 to 200 characters")
+        consumer_group = os.getenv(
+            "WORKER_CONSUMER_GROUP", DEFAULT_CONSUMER_GROUP
+        ).strip()
+        if not consumer_group or len(consumer_group) > 128:
+            raise WorkerError("WORKER_CONSUMER_GROUP must contain 1 to 128 characters")
+        consumer_name = os.getenv(
+            "WORKER_CONSUMER_NAME", f"mock-worker-{os.getpid()}"
+        ).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", consumer_name):
+            raise WorkerError("WORKER_CONSUMER_NAME contains unsupported characters")
+        dead_letter_key = os.getenv(
+            "WORKER_DEAD_LETTER_KEY", f"{queue_key}:dead-letter"
+        ).strip()
+        metrics_key = os.getenv(
+            "WORKER_QUEUE_METRICS_KEY", f"{queue_key}:metrics"
+        ).strip()
+        if not dead_letter_key or len(dead_letter_key) > 200:
+            raise WorkerError("WORKER_DEAD_LETTER_KEY must contain 1 to 200 characters")
+        if not metrics_key or len(metrics_key) > 200:
+            raise WorkerError("WORKER_QUEUE_METRICS_KEY must contain 1 to 200 characters")
+        try:
+            stale_idle_ms = int(os.getenv("WORKER_STALE_IDLE_MS", "1800000"))
+            max_retries = int(os.getenv("WORKER_MAX_RETRIES", "3"))
+            dead_letter_max_length = int(
+                os.getenv("WORKER_DEAD_LETTER_MAX_LENGTH", "10000")
+            )
+        except ValueError as exception:
+            raise WorkerError("Redis reliability settings must be integers") from exception
+        if stale_idle_ms < 1000 or stale_idle_ms > 86_400_000:
+            raise WorkerError("WORKER_STALE_IDLE_MS must be between 1000 and 86400000")
+        if max_retries < 0 or max_retries > 20:
+            raise WorkerError("WORKER_MAX_RETRIES must be between 0 and 20")
+        if dead_letter_max_length < 100 or dead_letter_max_length > 10_000_000:
+            raise WorkerError(
+                "WORKER_DEAD_LETTER_MAX_LENGTH must be between 100 and 10000000"
+            )
         request_timeout = float(os.getenv("WORKER_REQUEST_TIMEOUT_SECONDS", "5"))
         if not math.isfinite(request_timeout) or request_timeout <= 0 or request_timeout > 30:
             raise WorkerError("WORKER_REQUEST_TIMEOUT_SECONDS must be between 0 and 30")
@@ -251,6 +309,13 @@ class WorkerConfig:
             control_plane_url=control_plane_url,
             redis_url=redis_url,
             queue_key=queue_key,
+            consumer_group=consumer_group,
+            consumer_name=consumer_name,
+            dead_letter_key=dead_letter_key,
+            metrics_key=metrics_key,
+            stale_idle_ms=stale_idle_ms,
+            max_retries=max_retries,
+            dead_letter_max_length=dead_letter_max_length,
             wait_timeout_seconds=wait_timeout_seconds,
             request_timeout_seconds=request_timeout,
             authorized_repository=authorized_repository,
@@ -834,7 +899,20 @@ class NaturalLanguageIssueExecutionEngine:
 
 
 class RedisTaskQueue:
-    def __init__(self, redis_url: str, queue_key: str) -> None:
+    _ALLOWED_FIELDS = {"taskId", "attempt", "enqueuedAt", "schemaVersion"}
+
+    def __init__(
+        self,
+        redis_url: str,
+        queue_key: str,
+        consumer_group: str,
+        consumer_name: str,
+        dead_letter_key: str,
+        metrics_key: str,
+        stale_idle_ms: int,
+        max_retries: int,
+        dead_letter_max_length: int,
+    ) -> None:
         try:
             import redis
         except ImportError as exception:
@@ -842,17 +920,148 @@ class RedisTaskQueue:
                 "redis dependency is missing; install requirements-worker.txt"
             ) from exception
         self._client = redis.Redis.from_url(redis_url, decode_responses=True)
+        self._response_error = redis.exceptions.ResponseError
         self._queue_key = queue_key
+        self._consumer_group = consumer_group
+        self._consumer_name = consumer_name
+        self._dead_letter_key = dead_letter_key
+        self._metrics_key = metrics_key
+        self._stale_idle_ms = stale_idle_ms
+        self._max_retries = max_retries
+        self._dead_letter_max_length = dead_letter_max_length
+        self._ensure_consumer_group()
 
-    def next_task_id(self, timeout_seconds: int) -> str | None:
+    def _ensure_consumer_group(self) -> None:
         try:
-            item = self._client.blpop(self._queue_key, timeout=timeout_seconds)
+            self._client.xgroup_create(
+                self._queue_key,
+                self._consumer_group,
+                id="0-0",
+                mkstream=True,
+            )
+        except self._response_error as exception:
+            if "BUSYGROUP" not in str(exception):
+                raise WorkerError("local Redis consumer group is unavailable") from exception
         except Exception as exception:
-            raise WorkerError("local Redis queue is unavailable") from exception
-        if item is None:
+            raise WorkerError("local Redis consumer group is unavailable") from exception
+
+    def next_message(self, timeout_seconds: int) -> QueueMessage | None:
+        try:
+            reclaimed = self._client.xautoclaim(
+                self._queue_key,
+                self._consumer_group,
+                self._consumer_name,
+                self._stale_idle_ms,
+                start_id="0-0",
+                count=1,
+            )
+            reclaimed_messages = reclaimed[1] if len(reclaimed) > 1 else []
+            if reclaimed_messages:
+                self._client.hincrby(self._metrics_key, "stale_reclaimed", 1)
+                return self._decode_or_quarantine(reclaimed_messages[0])
+            streams = self._client.xreadgroup(
+                self._consumer_group,
+                self._consumer_name,
+                {self._queue_key: ">"},
+                count=1,
+                block=timeout_seconds * 1000,
+            )
+        except Exception as exception:
+            raise WorkerError("local Redis stream is unavailable") from exception
+        if not streams:
             return None
-        _, raw_task_id = item
-        return validate_task_id(raw_task_id)
+        _, messages = streams[0]
+        if not messages:
+            return None
+        return self._decode_or_quarantine(messages[0])
+
+    def acknowledge(self, message: QueueMessage) -> None:
+        try:
+            pipeline = self._client.pipeline(transaction=True)
+            pipeline.xack(self._queue_key, self._consumer_group, message.message_id)
+            pipeline.xdel(self._queue_key, message.message_id)
+            pipeline.hincrby(self._metrics_key, "acknowledged", 1)
+            pipeline.execute()
+        except Exception as exception:
+            raise WorkerError("could not acknowledge Redis stream message") from exception
+
+    def retry_or_dead_letter(self, message: QueueMessage, reason: str) -> str:
+        safe_reason = reason if reason in {"control_plane_unavailable"} else "worker_retry"
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        try:
+            pipeline = self._client.pipeline(transaction=True)
+            if message.attempt < self._max_retries:
+                pipeline.xadd(
+                    self._queue_key,
+                    {
+                        "taskId": message.task_id,
+                        "attempt": str(message.attempt + 1),
+                        "enqueuedAt": now,
+                        "schemaVersion": "1",
+                    },
+                )
+                pipeline.hincrby(self._metrics_key, "retried", 1)
+                disposition = "retried"
+            else:
+                pipeline.xadd(
+                    self._dead_letter_key,
+                    {
+                        "taskId": message.task_id,
+                        "attempt": str(message.attempt),
+                        "originalMessageId": message.message_id,
+                        "failedAt": now,
+                        "reason": safe_reason,
+                        "schemaVersion": "1",
+                    },
+                    maxlen=self._dead_letter_max_length,
+                    approximate=True,
+                )
+                pipeline.hincrby(self._metrics_key, "dead_lettered", 1)
+                disposition = "dead_lettered"
+            pipeline.xack(self._queue_key, self._consumer_group, message.message_id)
+            pipeline.xdel(self._queue_key, message.message_id)
+            pipeline.execute()
+            return disposition
+        except Exception as exception:
+            raise WorkerError("could not retry Redis stream message") from exception
+
+    def _decode_or_quarantine(self, raw_message: tuple[str, dict[str, str]]) -> QueueMessage | None:
+        message_id, fields = raw_message
+        try:
+            if set(fields) != self._ALLOWED_FIELDS:
+                raise WorkerError("stream message fields do not match the schema")
+            if fields.get("schemaVersion") != "1":
+                raise WorkerError("stream message schema is unsupported")
+            task_id = validate_task_id(fields.get("taskId", ""))
+            attempt = int(fields.get("attempt", ""))
+            if attempt < 0 or attempt > self._max_retries:
+                raise WorkerError("stream message attempt is invalid")
+            return QueueMessage(message_id, task_id, attempt)
+        except (ValueError, WorkerError):
+            self._quarantine_invalid(message_id)
+            return None
+
+    def _quarantine_invalid(self, message_id: str) -> None:
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        try:
+            pipeline = self._client.pipeline(transaction=True)
+            pipeline.xadd(
+                self._dead_letter_key,
+                {
+                    "originalMessageId": message_id,
+                    "failedAt": now,
+                    "reason": "invalid_message_contract",
+                    "schemaVersion": "1",
+                },
+                maxlen=self._dead_letter_max_length,
+                approximate=True,
+            )
+            pipeline.xack(self._queue_key, self._consumer_group, message_id)
+            pipeline.xdel(self._queue_key, message_id)
+            pipeline.hincrby(self._metrics_key, "invalid_dead_lettered", 1)
+            pipeline.execute()
+        except Exception as exception:
+            raise WorkerError("could not quarantine invalid Redis message") from exception
 
 
 class ControlPlaneClient:
@@ -965,16 +1174,18 @@ def process_task(
         LOGGER.info("task_id=%s result=stale", task_id)
         return "stale"
     except WorkerError:
+        transition_recorded = False
         try:
             client.transition(
                 task_id,
                 "FAILED",
                 "mock worker could not validate the claim; no external systems were called",
             )
+            transition_recorded = True
         except WorkerError:
             pass
         LOGGER.error("task_id=%s result=claim_failed", task_id)
-        return "failed"
+        return "failed" if transition_recorded else "retry"
 
     try:
         execution = execution_engine.execute(claim)
@@ -1027,6 +1238,7 @@ def process_task(
             execution.detail,
         )
     except PublishedIssueWorkerError as exception:
+        transition_recorded = False
         try:
             client.attach_issue(
                 task_id,
@@ -1038,21 +1250,24 @@ def process_task(
                 "FAILED",
                 "Issue 已记录，但后续审批标签或原 CLI 执行安全失败；未合并、未部署",
             )
+            transition_recorded = True
         except WorkerError:
             pass
         LOGGER.error("task_id=%s result=post_issue_failed", task_id)
-        return "failed"
+        return "failed" if transition_recorded else "retry"
     except WorkerError:
+        transition_recorded = False
         try:
             client.transition(
                 task_id,
                 "FAILED",
                 "mock worker failed safely; no external systems were called",
             )
+            transition_recorded = True
         except WorkerError:
             pass
         LOGGER.error("task_id=%s result=failed", task_id)
-        return "failed"
+        return "failed" if transition_recorded else "retry"
 
     LOGGER.info("task_id=%s result=completed", task_id)
     return "completed"
@@ -1064,11 +1279,20 @@ def run_once(
     timeout_seconds: int,
     engine: ExecutionEngine | None = None,
 ) -> str:
-    task_id = queue.next_task_id(timeout_seconds)
-    if task_id is None:
+    message = queue.next_message(timeout_seconds)
+    if message is None:
         LOGGER.info("result=no_task")
         return "no_task"
-    return process_task(task_id, client, engine)
+    result = process_task(message.task_id, client, engine)
+    if result == "retry":
+        disposition = queue.retry_or_dead_letter(
+            message,
+            "control_plane_unavailable",
+        )
+        LOGGER.warning("task_id=%s queue_result=%s", message.task_id, disposition)
+        return disposition
+    queue.acknowledge(message)
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1093,7 +1317,17 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         config = WorkerConfig.from_environment(args.wait_timeout)
-        queue = RedisTaskQueue(config.redis_url, config.queue_key)
+        queue = RedisTaskQueue(
+            config.redis_url,
+            config.queue_key,
+            config.consumer_group,
+            config.consumer_name,
+            config.dead_letter_key,
+            config.metrics_key,
+            config.stale_idle_ms,
+            config.max_retries,
+            config.dead_letter_max_length,
+        )
         client = ControlPlaneClient(
             config.control_plane_url,
             config.request_timeout_seconds,

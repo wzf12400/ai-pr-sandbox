@@ -10,10 +10,7 @@ import com.githubaiagent.controlplane.task.api.TaskDetailResponse;
 import com.githubaiagent.controlplane.task.api.TaskEventResponse;
 import com.githubaiagent.controlplane.task.api.TaskResponse;
 import com.githubaiagent.controlplane.worker.TaskClaimConflictException;
-import com.githubaiagent.controlplane.worker.TaskQueue;
-import com.githubaiagent.controlplane.worker.TaskQueueUnavailableException;
-import com.githubaiagent.controlplane.worker.TaskReadyForWorker;
-import org.springframework.context.ApplicationEventPublisher;
+import com.githubaiagent.controlplane.worker.TaskQueueOutboxService;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -40,8 +37,7 @@ public class TaskService {
     private final NaturalLanguageSanitizer sanitizer;
     private final RepositoryMatcher repositoryMatcher;
     private final AppProperties properties;
-    private final ApplicationEventPublisher eventPublisher;
-    private final TaskQueue taskQueue;
+    private final TaskQueueOutboxService outboxService;
 
     public TaskService(
             AutomationJobRepository jobRepository,
@@ -49,16 +45,14 @@ public class TaskService {
             NaturalLanguageSanitizer sanitizer,
             RepositoryMatcher repositoryMatcher,
             AppProperties properties,
-            ApplicationEventPublisher eventPublisher,
-            TaskQueue taskQueue
+            TaskQueueOutboxService outboxService
     ) {
         this.jobRepository = jobRepository;
         this.eventRepository = eventRepository;
         this.sanitizer = sanitizer;
         this.repositoryMatcher = repositoryMatcher;
         this.properties = properties;
-        this.eventPublisher = eventPublisher;
-        this.taskQueue = taskQueue;
+        this.outboxService = outboxService;
     }
 
     @Transactional
@@ -136,7 +130,7 @@ public class TaskService {
                 now
         ));
         if (initialStatus == TaskStatus.PENDING) {
-            eventPublisher.publishEvent(new TaskReadyForWorker(job.getId()));
+            outboxService.schedule(job.getId(), now);
         }
         return TaskResponse.from(job);
     }
@@ -250,7 +244,7 @@ public class TaskService {
                 now
         ));
         if (targetStatus == TaskStatus.PENDING) {
-            eventPublisher.publishEvent(new TaskReadyForWorker(taskId));
+            outboxService.schedule(taskId, now);
         }
         return TaskResponse.from(job);
     }
@@ -340,15 +334,13 @@ public class TaskService {
         return TaskResponse.from(job);
     }
 
-    @Transactional(readOnly = true)
+    @Transactional
     public void requeue(String taskId) {
-        AutomationJob job = findJob(taskId);
+        AutomationJob job = findJobForUpdate(taskId);
         if (job.getStatus() != TaskStatus.PENDING) {
             throw new TaskClaimConflictException(taskId, job.getStatus());
         }
-        if (!taskQueue.enqueue(taskId)) {
-            throw new TaskQueueUnavailableException();
-        }
+        outboxService.schedule(taskId, Instant.now());
     }
 
     private AutomationJob findJob(String taskId) {

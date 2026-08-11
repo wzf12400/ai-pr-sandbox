@@ -3,7 +3,6 @@ package com.githubaiagent.controlplane.task.api;
 import com.githubaiagent.controlplane.task.InvalidTaskTransitionException;
 import com.githubaiagent.controlplane.task.TaskNotFoundException;
 import com.githubaiagent.controlplane.worker.TaskClaimConflictException;
-import com.githubaiagent.controlplane.worker.TaskQueueUnavailableException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -26,11 +25,6 @@ public class ApiExceptionHandler {
     @ExceptionHandler(TaskClaimConflictException.class)
     public ProblemDetail conflict(TaskClaimConflictException exception) {
         return problem(HttpStatus.CONFLICT, exception.getMessage());
-    }
-
-    @ExceptionHandler(TaskQueueUnavailableException.class)
-    public ProblemDetail unavailable(TaskQueueUnavailableException exception) {
-        return problem(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage());
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

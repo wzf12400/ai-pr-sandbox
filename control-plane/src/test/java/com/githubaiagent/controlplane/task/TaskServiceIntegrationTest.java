@@ -5,6 +5,8 @@ import com.githubaiagent.controlplane.task.api.LogIncidentRequest;
 import com.githubaiagent.controlplane.task.api.TaskClaimResponse;
 import com.githubaiagent.controlplane.task.api.TaskDetailResponse;
 import com.githubaiagent.controlplane.task.api.TaskResponse;
+import com.githubaiagent.controlplane.worker.TaskQueueOutbox;
+import com.githubaiagent.controlplane.worker.TaskQueueOutboxRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -28,6 +30,9 @@ class TaskServiceIntegrationTest {
 
     @Autowired
     private JobEventRepository eventRepository;
+
+    @Autowired
+    private TaskQueueOutboxRepository outboxRepository;
 
     @Test
     void createsPersistsAndTransitionsResolvedNaturalLanguageTask() {
@@ -57,6 +62,35 @@ class TaskServiceIntegrationTest {
     }
 
     @Test
+    void writesPendingTaskAndQueueOutboxInTheSameTransaction() {
+        TaskResponse created = taskService.create(new CreateTaskRequest(
+                SourceType.NATURAL_LANGUAGE,
+                "支付订单列表增加分页测试"
+        ));
+
+        TaskQueueOutbox outbox = outboxRepository.findById(created.id()).orElseThrow();
+
+        assertThat(created.status()).isEqualTo(TaskStatus.PENDING);
+        assertThat(outbox.getGeneration()).isEqualTo(1);
+        assertThat(outbox.getPublishedGeneration()).isZero();
+        assertThat(outbox.getPublishedAt()).isNull();
+    }
+
+    @Test
+    void manualRequeueDurablyAdvancesOutboxGeneration() {
+        TaskResponse created = taskService.create(new CreateTaskRequest(
+                SourceType.NATURAL_LANGUAGE,
+                "支付订单列表增加分页测试"
+        ));
+
+        taskService.requeue(created.id());
+        TaskQueueOutbox outbox = outboxRepository.findById(created.id()).orElseThrow();
+
+        assertThat(outbox.getGeneration()).isEqualTo(2);
+        assertThat(outbox.getPublishedGeneration()).isZero();
+    }
+
+    @Test
     void storesUncertainRoutingAsNeedsContextWithoutSelectingRepository() {
         TaskResponse created = taskService.create(new CreateTaskRequest(
                 SourceType.NATURAL_LANGUAGE,
@@ -70,6 +104,7 @@ class TaskServiceIntegrationTest {
                 "demo-company/payment-service"
         );
         assertThat(created.blockedReason()).contains("ambiguous");
+        assertThat(outboxRepository.existsById(created.id())).isFalse();
     }
 
     @Test
