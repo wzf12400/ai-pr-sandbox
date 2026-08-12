@@ -288,6 +288,25 @@ class CopilotCodeModifierTest(unittest.TestCase):
                 evaluate_issue_approval(missing_timestamp, policy)["approved"]
             )
 
+    def test_issue_needing_clarification_or_acceptance_criteria_is_not_approved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            path.write_text(json.dumps(policy_payload()), encoding="utf-8")
+            policy = load_issue_code_policy(path)
+
+            issue = approved_issue(
+                "\n\n## Acceptance Criteria\n\n"
+                "- none\n\n"
+                "## Review Gate\n\n"
+                "- State: needs_human_context\n"
+                "- AI review verdict: needs_clarification\n"
+            )
+            result = evaluate_issue_approval(issue, policy)
+
+        self.assertFalse(result["approved"])
+        self.assertFalse(result["rules"]["review_does_not_need_clarification"])
+        self.assertFalse(result["rules"]["acceptance_criteria_are_known"])
+
     def test_cli_uses_programmatic_mode_minimal_permissions_and_no_allow_all(self):
         modifier = CopilotCLICodeModifier()
         calls = []
