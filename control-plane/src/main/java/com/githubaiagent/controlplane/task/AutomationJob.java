@@ -187,6 +187,22 @@ public class AutomationJob {
         this.updatedAt = now;
     }
 
+    public void applyRerouting(
+            String combinedRequirement,
+            String matchedRepository,
+            String routingBasis,
+            Integer routingConfidence,
+            String routingCandidates,
+            Instant now
+    ) {
+        this.normalizedRequirement = combinedRequirement;
+        this.matchedRepository = matchedRepository;
+        this.routingBasis = routingBasis;
+        this.routingConfidence = routingConfidence;
+        this.routingCandidates = routingCandidates;
+        this.updatedAt = now;
+    }
+
     public void transitionTo(TaskStatus nextStatus, String detail, Instant now) {
         this.status = nextStatus;
         this.updatedAt = now;

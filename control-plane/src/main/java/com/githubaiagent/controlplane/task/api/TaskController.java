@@ -3,6 +3,7 @@ package com.githubaiagent.controlplane.task.api;
 import com.githubaiagent.controlplane.task.TaskService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -37,5 +38,19 @@ public class TaskController {
     @GetMapping("/{taskId}")
     public TaskDetailResponse detail(@PathVariable String taskId) {
         return taskService.detail(taskId);
+    }
+
+    @PostMapping("/{taskId}/messages")
+    public TaskDetailResponse postMessage(
+            @PathVariable String taskId,
+            @Valid @RequestBody TaskMessageRequest request
+    ) {
+        return taskService.postMessage(taskId, request);
+    }
+
+    @DeleteMapping("/{taskId}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@PathVariable String taskId) {
+        taskService.delete(taskId);
     }
 }

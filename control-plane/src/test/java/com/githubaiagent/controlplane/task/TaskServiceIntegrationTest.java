@@ -4,6 +4,8 @@ import com.githubaiagent.controlplane.task.api.CreateTaskRequest;
 import com.githubaiagent.controlplane.task.api.LogIncidentRequest;
 import com.githubaiagent.controlplane.task.api.TaskClaimResponse;
 import com.githubaiagent.controlplane.task.api.TaskDetailResponse;
+import com.githubaiagent.controlplane.task.api.TaskEventResponse;
+import com.githubaiagent.controlplane.task.api.TaskMessageRequest;
 import com.githubaiagent.controlplane.task.api.TaskResponse;
 import com.githubaiagent.controlplane.worker.TaskQueueOutbox;
 import com.githubaiagent.controlplane.worker.TaskQueueOutboxRepository;
@@ -369,5 +371,109 @@ class TaskServiceIntegrationTest {
                 "synthetic Jira record"
         ))).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Jira");
+    }
+
+    @Test
+    void supplementedContextReroutesNeedsContextTaskToPending() {
+        TaskResponse created = taskService.create(new CreateTaskRequest(
+                SourceType.NATURAL_LANGUAGE,
+                "修复一个接口报错"
+        ));
+        assertThat(created.status()).isEqualTo(TaskStatus.NEEDS_CONTEXT);
+
+        TaskDetailResponse detail = taskService.postMessage(
+                created.id(),
+                new TaskMessageRequest("这是支付订单模块的问题")
+        );
+
+        assertThat(detail.task().status()).isEqualTo(TaskStatus.PENDING);
+        assertThat(detail.task().matchedRepository()).isEqualTo("demo-company/payment-service");
+        assertThat(detail.task().normalizedRequirement()).contains("支付订单模块");
+        assertThat(detail.events()).extracting(TaskEventResponse::eventType)
+                .contains("USER_MESSAGE", "STATUS_CHANGED", "AGENT_REPLY");
+        assertThat(outboxRepository.existsById(created.id())).isTrue();
+    }
+
+    @Test
+    void insufficientContextKeepsNeedsContextAndAssistantExplainsWhatIsMissing() {
+        TaskResponse created = taskService.create(new CreateTaskRequest(
+                SourceType.NATURAL_LANGUAGE,
+                "修复一个接口报错"
+        ));
+
+        TaskDetailResponse detail = taskService.postMessage(
+                created.id(),
+                new TaskMessageRequest("还不太清楚具体是哪里")
+        );
+
+        assertThat(detail.task().status()).isEqualTo(TaskStatus.NEEDS_CONTEXT);
+        assertThat(detail.task().matchedRepository()).isNull();
+        TaskEventResponse lastEvent = detail.events().getLast();
+        assertThat(lastEvent.eventType()).isEqualTo("AGENT_REPLY");
+        assertThat(lastEvent.actorType()).isEqualTo(ActorType.ASSISTANT);
+        assertThat(lastEvent.detail()).contains("授权仓库目录");
+        assertThat(outboxRepository.existsById(created.id())).isFalse();
+    }
+
+    @Test
+    void messageOnCompletedTaskIsRecordedWithoutChangingStatus() {
+        TaskResponse created = taskService.create(new CreateTaskRequest(
+                SourceType.NATURAL_LANGUAGE,
+                "支付订单列表增加分页测试"
+        ));
+        taskService.claim(created.id());
+        taskService.transition(
+                created.id(),
+                TaskStatus.TESTING,
+                "synthetic tests started",
+                ActorType.MOCK_WORKER
+        );
+        taskService.transition(
+                created.id(),
+                TaskStatus.COMPLETED,
+                "mock execution completed; no external systems were called",
+                ActorType.MOCK_WORKER
+        );
+
+        TaskDetailResponse detail = taskService.postMessage(
+                created.id(),
+                new TaskMessageRequest("再改点别的")
+        );
+
+        assertThat(detail.task().status()).isEqualTo(TaskStatus.COMPLETED);
+        assertThat(detail.events()).extracting(TaskEventResponse::eventType)
+                .contains("USER_MESSAGE", "AGENT_REPLY");
+    }
+
+    @Test
+    void rejectsBlankMessageAfterSanitization() {
+        TaskResponse created = taskService.create(new CreateTaskRequest(
+                SourceType.NATURAL_LANGUAGE,
+                "支付订单列表增加分页测试"
+        ));
+
+        assertThatThrownBy(() -> taskService.postMessage(
+                created.id(),
+                new TaskMessageRequest("   ")
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("empty");
+    }
+
+    @Test
+    void deletesTaskWithEventsAndOutbox() {
+        TaskResponse created = taskService.create(new CreateTaskRequest(
+                SourceType.NATURAL_LANGUAGE,
+                "支付订单列表增加分页测试"
+        ));
+        assertThat(outboxRepository.existsById(created.id())).isTrue();
+
+        taskService.delete(created.id());
+
+        assertThat(jobRepository.findById(created.id())).isEmpty();
+        assertThat(eventRepository.findByJobIdOrderByCreatedAtAscIdAsc(created.id()))
+                .isEmpty();
+        assertThat(outboxRepository.existsById(created.id())).isFalse();
+        assertThatThrownBy(() -> taskService.delete(created.id()))
+                .isInstanceOf(TaskNotFoundException.class);
     }
 }

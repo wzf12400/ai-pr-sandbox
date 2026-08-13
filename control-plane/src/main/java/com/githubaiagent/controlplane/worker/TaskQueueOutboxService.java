@@ -22,4 +22,8 @@ public class TaskQueueOutboxService {
         }
     }
 
+    public void discard(String taskId) {
+        repository.deleteById(taskId);
+    }
+
 }

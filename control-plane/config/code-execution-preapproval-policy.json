@@ -2,11 +2,12 @@
   "schema_version": "code-execution-preapproval-policy/v1",
   "policy_id": "local-ai-pr-sandbox-log-jira-code-preapproval-v1",
   "repository": "wzf12400/ai-pr-sandbox",
-  "issue_publication_policy_sha256": "bf7d622f977dbada1a18889621b21905a8f375db95544315c902e1ba2cb61556",
+  "issue_publication_policy_sha256": "eb56e32ca56b66af5f401178a4aaa21aac4ef28c989eabd613cff513986511eb",
   "issue_code_policy_sha256": "84dbcefe5889c272568c92823e2fa5af87160e6d5e6e96897701143a68d97da4",
   "allowed_source_types": [
     "LOG",
-    "JIRA"
+    "JIRA",
+    "NATURAL_LANGUAGE"
   ],
   "required_labels": [
     "ai-code-approved"

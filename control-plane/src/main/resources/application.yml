@@ -34,6 +34,15 @@ app:
     reconciliation-republish-after: ${WORKER_RECONCILIATION_REPUBLISH_AFTER:10m}
     stale-task-timeout: ${WORKER_STALE_TASK_TIMEOUT:30m}
     max-task-retries: ${WORKER_MAX_RETRIES:3}
+  chat:
+    enabled: ${AI_CHAT_ENABLED:true}
+    base-url: ${AI_BASE_URL:}
+    api-key: ${AI_API_KEY:}
+    model: ${AI_MODEL:ailemac/gpt-5-mini}
+    safety-identifier: ${AI_SAFETY_IDENTIFIER:}
+    timeout-seconds: ${AI_TIMEOUT_SECONDS:30}
+    max-completion-tokens: ${AI_MAX_COMPLETION_TOKENS:800}
+    api-mode: ${AI_API_MODE:strict}
   repository-catalog:
     - repository: wzf12400/ai-pr-sandbox
       keywords: ["测试仓库", "计算器", "加法", "减法", "乘法", "除法", "calculator", "divide", "sandbox"]

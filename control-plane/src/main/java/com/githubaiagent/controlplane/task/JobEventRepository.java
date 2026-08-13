@@ -6,4 +6,6 @@ import java.util.List;
 
 public interface JobEventRepository extends JpaRepository<JobEvent, Long> {
     List<JobEvent> findByJobIdOrderByCreatedAtAscIdAsc(String jobId);
+
+    void deleteByJobId(String jobId);
 }

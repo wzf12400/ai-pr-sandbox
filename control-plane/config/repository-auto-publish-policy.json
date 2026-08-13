@@ -6,7 +6,8 @@
   "provider": "github_rest_api",
   "max_issues_per_run": 1,
   "allowed_generation_states": [
-    "ready_for_human_review"
+    "ready_for_human_review",
+    "needs_human_context"
   ],
   "allowed_adapters": [
     "github-tree-probe"
