@@ -78,6 +78,7 @@ def compose_evidence(
     }
     description_categories = {finding.category for finding in description_findings}
     facts = {"reported_description": safe_description}
+    facts["requested_change"] = safe_description
     qualified_method = QUALIFIED_METHOD_PATTERN.search(safe_description)
     if qualified_method:
         facts["qualified_class"] = qualified_method.group(1)

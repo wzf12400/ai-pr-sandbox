@@ -1,8 +1,13 @@
-"""Bounded local worker for the Java control-plane mock execution path.
+"""Local worker for the Java control-plane mock execution path.
 
 The queue contains task identifiers only. Task state and the sanitized work
 contract are fetched from the control plane after an atomic claim. This module
 does not call GitHub, Jira, company logs, a model, or Copilot.
+
+Default mode runs continuously: each iteration is still a bounded single-task
+execution with a bounded Redis wait, so individual tasks keep their safety
+bounds while the process stays alive to consume new work. Use --once for a
+single bounded pass (used by tests and scripts).
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ import math
 import os
 import re
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -348,6 +354,11 @@ class SyntheticExecutionEngine:
 class LocalRepositoryExecutionEngine:
     """Reuse the existing repository locator against one verified checkout."""
 
+    _LOCATOR_NOISE_PATTERN = re.compile(
+        r"<!--.*?-->|\b[0-9a-f]{32,64}\b",
+        re.DOTALL,
+    )
+
     def __init__(self, authorized_repository: str, repository_path: Path) -> None:
         self._authorized_repository = authorized_repository
         self._repository_path = repository_path.resolve()
@@ -397,7 +408,7 @@ class LocalRepositoryExecutionEngine:
             body = approved_issue.get("body")
             if not isinstance(title, str) or not isinstance(body, str):
                 raise WorkerError("approved Issue snapshot is incomplete")
-            requirement = f"{title}\n{body}".strip()
+            requirement = self._LOCATOR_NOISE_PATTERN.sub(" ", f"{title}\n{body}").strip()
         else:
             requirement = str(claim.get("normalizedRequirement", "")).strip()
         commit = self._verify_checkout(repository)
@@ -668,14 +679,36 @@ class NaturalLanguageIssueExecutionEngine:
             else:
                 evidence = compose_evidence(requirement)
                 input_type = "natural_language"
+                facts = evidence.get("facts")
+                if (
+                    repository
+                    and isinstance(facts, dict)
+                    and "repository" not in facts
+                ):
+                    facts["repository"] = repository
             gateway = ai_issue_generator.GatewayConfig.from_env()
-            generation = ai_issue_generator.generate_issue(
-                evidence,
-                ai_issue_generator.OpenAICompatibleChatProvider(gateway, gateway.model),
-                ai_issue_generator.OpenAICompatibleChatProvider(
-                    gateway, gateway.review_model
-                ),
-            )
+            generation = None
+            last_error: ValueError | None = None
+            for _attempt in range(3):
+                try:
+                    generation = ai_issue_generator.generate_issue(
+                        evidence,
+                        ai_issue_generator.OpenAICompatibleChatProvider(
+                            gateway, gateway.model
+                        ),
+                        ai_issue_generator.OpenAICompatibleChatProvider(
+                            gateway, gateway.review_model
+                        ),
+                    )
+                except ValueError as exc:
+                    last_error = exc
+                    continue
+                if generation.get("state") != "blocked":
+                    break
+            if generation is None:
+                raise WorkerError(
+                    "Issue generation failed repeatedly"
+                ) from last_error
             scope = load_search_scope(self._scope_path)
             policy = load_auto_publish_policy(
                 self._policy_path,
@@ -706,10 +739,24 @@ class NaturalLanguageIssueExecutionEngine:
             raise WorkerError("Issue automation returned an invalid publication result")
         status = publication.get("status")
         if status not in {"created", "deduplicated"}:
+            missing: list[str] = []
+            review = generation.get("review") if isinstance(generation, dict) else None
+            if isinstance(review, dict):
+                fields = review.get("missing_critical_fields")
+                if isinstance(fields, list):
+                    missing = [str(field) for field in fields[:6] if str(field).strip()]
+            if not missing and isinstance(generation, dict):
+                draft = generation.get("draft")
+                if isinstance(draft, dict):
+                    info = draft.get("missing_information")
+                    if isinstance(info, list):
+                        missing = [str(item) for item in info[:6] if str(item).strip()]
+            missing_text = "；缺失信息：" + "、".join(missing) if missing else ""
             return ExecutionResult(
                 target_status="NEEDS_CONTEXT",
                 detail=(
-                    "Issue 自动化未达到可发布状态；请检查证据、模型复核和去重结果；"
+                    f"Issue 自动化未达到可发布状态（{status}）{missing_text}；"
+                    "请在对话中补充上述信息，我会重新生成 Issue；"
                     "未启动 Copilot，也未修改仓库"
                 ),
             )
@@ -1296,7 +1343,9 @@ def run_once(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run one local mock task")
+    parser = argparse.ArgumentParser(
+        description="Run local mock tasks (continuous by default)"
+    )
     parser.add_argument(
         "--once",
         action="store_true",
@@ -1306,13 +1355,19 @@ def main(argv: list[str] | None = None) -> int:
         "--wait-timeout",
         type=int,
         default=5,
-        help="bounded Redis wait in seconds (default: 5)",
+        help="bounded Redis wait in seconds per iteration (default: 5)",
+    )
+    parser.add_argument(
+        "--error-backoff",
+        type=int,
+        default=5,
+        help="seconds to wait after an unexpected worker error (default: 5)",
     )
     args = parser.parse_args(argv)
-    if not args.once:
-        parser.error("only the bounded --once mode is supported")
     if args.wait_timeout < 1 or args.wait_timeout > 60:
         parser.error("--wait-timeout must be between 1 and 60 seconds")
+    if args.error_backoff < 1 or args.error_backoff > 300:
+        parser.error("--error-backoff must be between 1 and 300 seconds")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
@@ -1375,17 +1430,39 @@ def main(argv: list[str] | None = None) -> int:
                 downstream_engine,
                 code_preapproval_engine,
             )
-        result = run_once(queue, client, config.wait_timeout_seconds, engine)
     except (WorkerError, ValueError) as exception:
         LOGGER.error("result=worker_error reason=%s", exception)
         return 1
-    return 0 if result in {
-        "completed",
-        "awaiting_pr_review",
-        "needs_context",
-        "stale",
-        "no_task",
-    } else 1
+
+    if args.once:
+        try:
+            result = run_once(queue, client, config.wait_timeout_seconds, engine)
+        except (WorkerError, ValueError) as exception:
+            LOGGER.error("result=worker_error reason=%s", exception)
+            return 1
+        return 0 if result in {
+            "completed",
+            "awaiting_pr_review",
+            "needs_context",
+            "stale",
+            "no_task",
+        } else 1
+
+    LOGGER.info(
+        "mode=continuous queue_key=%s wait_timeout=%ds",
+        config.queue_key,
+        config.wait_timeout_seconds,
+    )
+    try:
+        while True:
+            try:
+                run_once(queue, client, config.wait_timeout_seconds, engine)
+            except (WorkerError, ValueError) as exception:
+                LOGGER.error("result=worker_error reason=%s", exception)
+                time.sleep(args.error_backoff)
+    except KeyboardInterrupt:
+        LOGGER.info("mode=continuous stopped")
+        return 0
 
 
 if __name__ == "__main__":

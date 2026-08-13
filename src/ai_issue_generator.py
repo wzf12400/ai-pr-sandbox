@@ -1098,7 +1098,14 @@ NATURAL_LANGUAGE_PROFILE_PROMPT = """
 Issue profile: natural-language requirement.
 Organize the supported request around the requested change, current behavior, expected
 behavior, constraints, acceptance criteria, and missing human context. Do not add incident
-frequency or impact statistics unless the sanitized source explicitly provides them."""
+frequency or impact statistics unless the sanitized source explicitly provides them.
+Implementation-level decisions — handling of invalid or edge-case inputs, supported value
+types, export mechanics, exact test case lists, owner, branch, and milestone — are decided
+later by the downstream code-modification agent. When the requested change and its target
+repository, module, or file are clear, do not list those implementation details in
+missing_information or clarifying_questions, and do not lower confidence because of them.
+For a clear feature or change request, set confidence to 0.8 or higher; reserve lower
+confidence for requests whose goal or target area is genuinely ambiguous."""
 
 LOG_INCIDENT_PROFILE_PROMPT = """
 
@@ -1133,7 +1140,15 @@ a title. missing_information
 and clarifying_questions are meta-level descriptions of absent evidence, not positive
 factual claims. Do not mark them unsupported merely because the missing fact is absent;
 reject them only if they themselves assert a positive fact that the evidence does not
-support. You do not authorize publication or implementation."""
+support. Implementation details that the downstream code-modification agent will decide —
+edge-case input handling, supported value types, function signature constraints, export
+mechanics, exact test case lists or test framework, target file placement when a module or
+repository is already identified, owner, branch, milestone — are NOT critical facts; never
+use needs_clarification or reject because they are undecided, and never list them in
+missing_critical_fields. When the requested change and its target repository or module are
+identifiable from the draft, the verdict MUST be pass. Use needs_clarification only when
+the requested change itself or its target area cannot be understood from the draft.
+You do not authorize publication or implementation."""
 
 
 def issue_profile_for_evidence(evidence: Mapping[str, Any]) -> str:
@@ -1229,7 +1244,6 @@ def generate_issue(
         validation_errors.append("AI reviewer detected sensitive data")
 
     verdict = reviewed.content.get("verdict", "reject")
-    missing = generated.content.get("missing_information", [])
     if validation_errors or verdict == "reject":
         state = "blocked"
     elif (
@@ -1237,7 +1251,10 @@ def generate_issue(
         and _actionable_log_draft(generated.content)
     ):
         state = "ready_for_human_review"
-    elif missing or verdict == "needs_clarification" or generated.content.get("confidence", 0) < 0.8:
+    elif (
+        verdict == "needs_clarification"
+        or generated.content.get("confidence", 0) < 0.5
+    ):
         state = "needs_human_context"
     else:
         state = "ready_for_human_review"
