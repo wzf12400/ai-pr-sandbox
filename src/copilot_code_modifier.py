@@ -477,6 +477,18 @@ def evaluate_issue_approval(
             re.IGNORECASE,
         )
     )
+    missing_information_section = re.search(
+        r"(?ims)^## Missing Information\s*\n(?P<content>.*?)(?=^## |\Z)",
+        issue.body,
+    )
+    unresolved_missing_information = bool(
+        missing_information_section
+        and not re.fullmatch(
+            r"\s*(?:[-*]\s*)?(?:none|nothing|not applicable|n/a)[.!]?\s*",
+            missing_information_section.group("content"),
+            re.IGNORECASE,
+        )
+    )
     rules = {
         "repository_matches_policy": issue.repository.casefold()
         == policy.repository.casefold(),
@@ -490,6 +502,7 @@ def evaluate_issue_approval(
         "no_sensitive_data_detected": not findings,
         "review_does_not_need_clarification": not review_needs_clarification,
         "acceptance_criteria_are_known": not acceptance_unknown,
+        "missing_information_is_resolved": not unresolved_missing_information,
         "draft_pr_only": policy.draft_pr_only and not policy.auto_merge,
     }
     return {

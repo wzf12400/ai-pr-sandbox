@@ -307,6 +307,27 @@ class CopilotCodeModifierTest(unittest.TestCase):
         self.assertFalse(result["rules"]["review_does_not_need_clarification"])
         self.assertFalse(result["rules"]["acceptance_criteria_are_known"])
 
+    def test_issue_with_unresolved_missing_information_is_not_approved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            path.write_text(json.dumps(policy_payload()), encoding="utf-8")
+            policy = load_issue_code_policy(path)
+            issue = approved_issue(
+                "\n\n## Acceptance Criteria\n\n"
+                "- [ ] Show the expected offline state.\n\n"
+                "## Missing Information\n\n"
+                "- Expected user-visible behavior\n"
+                "- Reproduction steps\n\n"
+                "## Review Gate\n\n"
+                "- State: ready_for_human_review\n"
+                "- AI review verdict: pass\n"
+            )
+
+            result = evaluate_issue_approval(issue, policy)
+
+        self.assertFalse(result["approved"])
+        self.assertFalse(result["rules"]["missing_information_is_resolved"])
+
     def test_cli_uses_programmatic_mode_minimal_permissions_and_no_allow_all(self):
         modifier = CopilotCLICodeModifier()
         calls = []
