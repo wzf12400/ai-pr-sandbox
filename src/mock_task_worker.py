@@ -1241,11 +1241,14 @@ class ControlPlaneClient:
         if claim.get("executionMode") != "MOCK":
             raise WorkerError("this worker accepts MOCK tasks only")
         source_type = claim.get("sourceType")
-        if source_type not in {"NATURAL_LANGUAGE", "LOG"}:
-            raise WorkerError("this worker accepts NATURAL_LANGUAGE and LOG tasks only")
-        expected_profile = (
-            "LOG_INCIDENT" if source_type == "LOG" else "NATURAL_LANGUAGE"
-        )
+        if source_type not in {"NATURAL_LANGUAGE", "LOG", "JIRA"}:
+            raise WorkerError(
+                "this worker accepts NATURAL_LANGUAGE, LOG and JIRA tasks only"
+            )
+        expected_profile = {
+            "LOG": "LOG_INCIDENT",
+            "JIRA": "JIRA_ISSUE",
+        }.get(source_type, "NATURAL_LANGUAGE")
         if claim.get("issueProfile") != expected_profile:
             raise WorkerError("claimed task has an inconsistent Issue profile")
         requirement = claim.get("normalizedRequirement")

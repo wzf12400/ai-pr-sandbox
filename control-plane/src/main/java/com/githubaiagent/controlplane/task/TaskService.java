@@ -7,6 +7,7 @@ import com.githubaiagent.controlplane.config.AppProperties;
 import com.githubaiagent.controlplane.routing.RepositoryMatch;
 import com.githubaiagent.controlplane.routing.RepositoryMatcher;
 import com.githubaiagent.controlplane.task.api.CreateTaskRequest;
+import com.githubaiagent.controlplane.task.api.JiraIssueRequest;
 import com.githubaiagent.controlplane.task.api.LogIncidentRequest;
 import com.githubaiagent.controlplane.task.api.TaskClaimResponse;
 import com.githubaiagent.controlplane.task.api.TaskDetailResponse;
@@ -41,6 +42,12 @@ public class TaskService {
     private static final Map<TaskStatus, Set<TaskStatus>> ALLOWED_TRANSITIONS = allowedTransitions();
     private static final Pattern SAFE_LOG_REFERENCE = Pattern.compile(
             "(?:incident_ref|event_ref):[0-9a-f]{16,64}"
+    );
+    private static final Pattern SAFE_JIRA_REFERENCE = Pattern.compile(
+            "[A-Z][A-Z0-9_]{0,19}-\\d{1,7}"
+    );
+    private static final Pattern SAFE_JIRA_PROJECT_KEY = Pattern.compile(
+            "[A-Z][A-Z0-9_]{0,19}"
     );
 
     private final AutomationJobRepository jobRepository;
@@ -80,17 +87,13 @@ public class TaskService {
 
     @Transactional
     public TaskResponse create(CreateTaskRequest request) {
-        if (request.sourceType() == SourceType.JIRA) {
-            throw new IllegalArgumentException(
-                    "Jira tasks require a separately sanitized issue-intake record"
-            );
-        }
         String sanitizedInput = sanitizer.sanitize(request.input());
         if (sanitizedInput.isBlank()) {
             throw new IllegalArgumentException("task input is empty after sanitization");
         }
         IssueProfile issueProfile = IssueProfile.NATURAL_LANGUAGE;
         LogIncidentRequest logIncident = null;
+        JiraIssueRequest jiraIssue = null;
         if (request.sourceType() == SourceType.LOG) {
             logIncident = validateLogIncident(request, sanitizedInput);
             issueProfile = IssueProfile.LOG_INCIDENT;
@@ -106,9 +109,35 @@ public class TaskService {
                     "logIncident is allowed only when sourceType is LOG"
             );
         }
+        if (request.sourceType() == SourceType.JIRA) {
+            jiraIssue = validateJiraIssue(request, sanitizedInput);
+            issueProfile = IssueProfile.JIRA_ISSUE;
+            var existingJiraTask = jobRepository
+                    .findFirstBySourceReferenceOrderByCreatedAtAsc(
+                            jiraIssue.sourceReference()
+                    );
+            if (existingJiraTask.isPresent()) {
+                return TaskResponse.from(existingJiraTask.get());
+            }
+        } else if (request.jiraIssue() != null) {
+            throw new IllegalArgumentException(
+                    "jiraIssue is allowed only when sourceType is JIRA"
+            );
+        }
 
-        RepositoryMatch match = repositoryMatcher.match(sanitizedInput);
+        RepositoryMatch match = jiraIssue == null
+                ? repositoryMatcher.match(sanitizedInput)
+                : new RepositoryMatch(
+                        RepositoryMatch.Status.RESOLVED,
+                        jiraIssue.resolvedRepository(),
+                        "jira deterministic mapping: " + jiraIssue.mappingBasis(),
+                        100,
+                        List.of(jiraIssue.resolvedRepository())
+                );
         String requirement = sanitizedInput;
+        String sourceReference = logIncident != null
+                ? logIncident.sourceReference()
+                : jiraIssue == null ? null : jiraIssue.sourceReference();
         TaskStatus initialStatus = match.status() == RepositoryMatch.Status.RESOLVED
                 ? TaskStatus.PENDING
                 : TaskStatus.NEEDS_CONTEXT;
@@ -121,7 +150,7 @@ public class TaskService {
                 issueProfile,
                 sanitizedInput,
                 requirement,
-                logIncident == null ? null : logIncident.sourceReference(),
+                sourceReference,
                 logIncident == null ? null : logIncident.firstSeenAt(),
                 logIncident == null ? null : logIncident.lastSeenAt(),
                 logIncident == null ? null : logIncident.currentScanEventCount(),
@@ -472,6 +501,54 @@ public class TaskService {
             }
         }
         return incident;
+    }
+
+    private JiraIssueRequest validateJiraIssue(
+            CreateTaskRequest request,
+            String sanitizedInput
+    ) {
+        JiraIssueRequest evidence = request.jiraIssue();
+        if (evidence == null) {
+            throw new IllegalArgumentException("JIRA tasks require jiraIssue evidence");
+        }
+        if (!"SANITIZED".equals(evidence.dataSafetyStatus())) {
+            throw new IllegalArgumentException(
+                    "JIRA tasks accept only SANITIZED issue evidence"
+            );
+        }
+        if (!sanitizedInput.equals(request.input().trim())) {
+            throw new IllegalArgumentException(
+                    "JIRA issue summary still contains content requiring redaction"
+            );
+        }
+        if (!SAFE_JIRA_REFERENCE.matcher(evidence.sourceReference()).matches()) {
+            throw new IllegalArgumentException("JIRA sourceReference is invalid");
+        }
+        if (!SAFE_JIRA_PROJECT_KEY.matcher(evidence.projectKey()).matches()) {
+            throw new IllegalArgumentException("JIRA projectKey is invalid");
+        }
+        if (!evidence.sourceReference().startsWith(evidence.projectKey() + "-")) {
+            throw new IllegalArgumentException(
+                    "JIRA sourceReference does not belong to projectKey"
+            );
+        }
+        if (!evidence.issueUrl().startsWith("https://")) {
+            throw new IllegalArgumentException("JIRA issueUrl must use https");
+        }
+        boolean authorized = properties.repositoryCatalog().stream()
+                .anyMatch(definition -> definition.repository().equals(evidence.resolvedRepository()));
+        if (!authorized) {
+            throw new IllegalArgumentException(
+                    "JIRA resolvedRepository is not in the authorized catalog"
+            );
+        }
+        if (!sanitizer.sanitize(evidence.mappingBasis())
+                .equals(evidence.mappingBasis().trim())) {
+            throw new IllegalArgumentException(
+                    "mappingBasis still contains content requiring redaction"
+            );
+        }
+        return evidence;
     }
 
     @Transactional(readOnly = true)

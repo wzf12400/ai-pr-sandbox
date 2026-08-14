@@ -17,3 +17,6 @@ sanitized/
 .issue-entry-state/
 .benchmark-output/
 .issue-code-output/
+.jira-connector-state.json
+.jira-shadow-log.jsonl
+.jira-survey.json

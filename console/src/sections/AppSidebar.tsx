@@ -4,12 +4,12 @@ import { cn } from "@/lib/utils";
 import { STATUS_META, timeAgo } from "@/lib/status";
 import type { Task } from "@/types/task";
 
-type SourceFilter = "ALL" | "NATURAL_LANGUAGE" | "LOG";
+type SourceFilter = "NATURAL_LANGUAGE" | "LOG" | "JIRA";
 
 const FILTER_TABS: { value: SourceFilter; label: string }[] = [
-  { value: "ALL", label: "全部" },
   { value: "NATURAL_LANGUAGE", label: "自然语言" },
   { value: "LOG", label: "日志" },
+  { value: "JIRA", label: "Jira" },
 ];
 
 type Props = {
@@ -21,13 +21,12 @@ type Props = {
 };
 
 export function AppSidebar({ tasks, selectedId, onSelect, onDelete, connected }: Props) {
-  const [filter, setFilter] = useState<SourceFilter>("ALL");
-  const filtered =
-    filter === "ALL" ? tasks : tasks.filter((t) => t.sourceType === filter);
+  const [filter, setFilter] = useState<SourceFilter>("NATURAL_LANGUAGE");
+  const filtered = tasks.filter((t) => t.sourceType === filter);
   const counts: Record<SourceFilter, number> = {
-    ALL: tasks.length,
     NATURAL_LANGUAGE: tasks.filter((t) => t.sourceType === "NATURAL_LANGUAGE").length,
     LOG: tasks.filter((t) => t.sourceType === "LOG").length,
+    JIRA: tasks.filter((t) => t.sourceType === "JIRA").length,
   };
   return (
     <aside className="flex h-full w-full flex-col bg-sidebar-background">

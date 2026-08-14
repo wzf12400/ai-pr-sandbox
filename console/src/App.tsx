@@ -8,6 +8,7 @@ import { useTasks } from "@/hooks/useTasks";
 import { deleteTask } from "@/lib/api";
 import { AppSidebar } from "@/sections/AppSidebar";
 import { ChatView } from "@/sections/ChatView";
+import { JiraMonitor } from "@/sections/JiraMonitor";
 import { LogMonitor } from "@/sections/LogMonitor";
 
 export default function App() {
@@ -54,7 +55,10 @@ export default function App() {
               lastRefresh={lastRefresh}
               onRefresh={refresh}
             />
-            <LogMonitor />
+            <div className="pointer-events-none absolute right-3 top-3 z-20 flex w-60 flex-col gap-2">
+              <LogMonitor />
+              <JiraMonitor />
+            </div>
           </div>
         </ResizablePanel>
       </ResizablePanelGroup>
