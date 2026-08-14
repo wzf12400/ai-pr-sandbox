@@ -493,6 +493,33 @@ class ApprovedIssueDispatchExecutionEngine:
         except ValueError as exception:
             raise ValueError("approved-Issue audit directory must be inside the repository") from exception
 
+    def _restore_base_checkout(self) -> None:
+        """Return the dedicated worker clone to a clean main checkout.
+
+        The one-shot CLI intentionally retains a failed or published Issue
+        branch for investigation. The continuous worker instead keeps
+        investigation data in the audit report and must hand the next task a
+        clean base checkout, or every later dispatch fails the start-on-main
+        gate. Local branch refs are kept; only the worktree is reset.
+        """
+        commands = [
+            ["fetch", "origin", "main"],
+            ["checkout", "-f", "main"],
+            ["reset", "--hard", "origin/main"],
+            ["clean", "-fd", "-e", ".issue-code-output"],
+        ]
+        for args in commands:
+            try:
+                subprocess.run(
+                    ["git", "-C", str(self._repository_path), *args],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=60,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                LOGGER.warning("worker repository cleanup command failed: %s", args[0])
+
     def execute(self, claim: dict[str, Any], issue_url: str) -> ExecutionResult:
         from src.approved_issue_dispatcher import (
             GitHubCLIDispatchStateInspector,
@@ -509,28 +536,31 @@ class ApprovedIssueDispatchExecutionEngine:
         execute = self._mode in {"execute", "publish_pr"}
         publish_pr = self._mode == "publish_pr"
         try:
-            report = dispatch_once(
-                self._repository_path,
-                self._policy_path,
-                _DisabledApprovedIssueCandidateClient(),
-                GitHubCLIIssueSnapshotClient(self._github_timeout_seconds),
-                GitHubCLIDispatchStateInspector(self._github_timeout_seconds),
-                CopilotCLICodeModifier(),
-                max_candidates=1,
-                execute=execute,
-                publish_pr=publish_pr,
-                model=self._model,
-                target_issue_url=issue_url,
-                claimer=(
-                    GitRemoteBranchClaimer(max(self._github_timeout_seconds, 120.0))
-                    if execute
-                    else None
-                ),
-            )
-            audit_path = self._audit_dir / f"task-{task_id}-{self._mode}.json"
-            _atomic_write(audit_path, report)
-        except (FileExistsError, OSError, ValueError) as exception:
-            raise WorkerError("original approved-Issue dispatcher failed closed") from exception
+            try:
+                report = dispatch_once(
+                    self._repository_path,
+                    self._policy_path,
+                    _DisabledApprovedIssueCandidateClient(),
+                    GitHubCLIIssueSnapshotClient(self._github_timeout_seconds),
+                    GitHubCLIDispatchStateInspector(self._github_timeout_seconds),
+                    CopilotCLICodeModifier(),
+                    max_candidates=1,
+                    execute=execute,
+                    publish_pr=publish_pr,
+                    model=self._model,
+                    target_issue_url=issue_url,
+                    claimer=(
+                        GitRemoteBranchClaimer(max(self._github_timeout_seconds, 120.0))
+                        if execute
+                        else None
+                    ),
+                )
+                audit_path = self._audit_dir / f"task-{task_id}-{self._mode}.json"
+                _atomic_write(audit_path, report)
+            except (FileExistsError, OSError, ValueError) as exception:
+                raise WorkerError("original approved-Issue dispatcher failed closed") from exception
+        finally:
+            self._restore_base_checkout()
 
         status = report.get("status")
         dispatch = report.get("dispatch")
@@ -673,71 +703,91 @@ class NaturalLanguageIssueExecutionEngine:
         repository = str(claim.get("matchedRepository", ""))
         requirement = str(claim.get("normalizedRequirement", "")).strip()
         try:
-            if claim.get("sourceType") == "LOG":
-                evidence = self._compose_log_evidence(claim, requirement)
-                input_type = "sanitized_evidence"
-            else:
-                evidence = compose_evidence(requirement)
-                input_type = "natural_language"
-                facts = evidence.get("facts")
+            attached_number = claim.get("issueNumber")
+            attached_url = claim.get("issueUrl")
+            if attached_number is not None or attached_url:
+                # Retry path: the task already references a published Issue from an
+                # earlier run. Reuse it instead of generating a duplicate.
                 if (
-                    repository
-                    and isinstance(facts, dict)
-                    and "repository" not in facts
+                    isinstance(attached_number, bool)
+                    or not isinstance(attached_number, int)
+                    or attached_number < 1
+                    or not isinstance(attached_url, str)
+                    or attached_url
+                    != f"https://github.com/{repository}/issues/{attached_number}"
                 ):
-                    facts["repository"] = repository
-            gateway = ai_issue_generator.GatewayConfig.from_env()
-            generation = None
-            last_error: ValueError | None = None
-            for _attempt in range(3):
-                try:
-                    generation = ai_issue_generator.generate_issue(
-                        evidence,
-                        ai_issue_generator.OpenAICompatibleChatProvider(
-                            gateway, gateway.model
-                        ),
-                        ai_issue_generator.OpenAICompatibleChatProvider(
-                            gateway, gateway.review_model
-                        ),
-                    )
-                except ValueError as exc:
-                    last_error = exc
-                    continue
-                if generation.get("state") != "blocked":
-                    break
-            if generation is None:
-                raise WorkerError(
-                    "Issue generation failed repeatedly"
-                ) from last_error
-            scope = load_search_scope(self._scope_path)
-            policy = load_auto_publish_policy(
-                self._policy_path,
-                self._confirmed_policy_sha256,
-                scope,
-                self._scope_path,
-            )
-            if policy.provider != "github_rest_api":
-                raise ValueError("worker Issue publication policy must use github_rest_api")
-            automation = automate_repository_issue(
-                generation,
-                evidence,
-                scope,
-                _DisabledRepositorySearchAdapter(),
-                "github-tree-probe",
-                policy,
-                self._issue_client,
-                True,
-                preselected_repository=repository,
-                routing_mode=ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
-                input_type=input_type,
-            )
+                    raise WorkerError("claim carries an inconsistent attached Issue reference")
+                publication: dict[str, Any] = {
+                    "issue_number": attached_number,
+                    "issue_url": attached_url,
+                }
+                status = "deduplicated"
+            else:
+                if claim.get("sourceType") == "LOG":
+                    evidence = self._compose_log_evidence(claim, requirement)
+                    input_type = "sanitized_evidence"
+                else:
+                    evidence = compose_evidence(requirement)
+                    input_type = "natural_language"
+                    facts = evidence.get("facts")
+                    if (
+                        repository
+                        and isinstance(facts, dict)
+                        and "repository" not in facts
+                    ):
+                        facts["repository"] = repository
+                gateway = ai_issue_generator.GatewayConfig.from_env()
+                generation = None
+                last_error: ValueError | None = None
+                for _attempt in range(3):
+                    try:
+                        generation = ai_issue_generator.generate_issue(
+                            evidence,
+                            ai_issue_generator.OpenAICompatibleChatProvider(
+                                gateway, gateway.model
+                            ),
+                            ai_issue_generator.OpenAICompatibleChatProvider(
+                                gateway, gateway.review_model
+                            ),
+                        )
+                    except ValueError as exc:
+                        last_error = exc
+                        continue
+                    if generation.get("state") != "blocked":
+                        break
+                if generation is None:
+                    raise WorkerError(
+                        "Issue generation failed repeatedly"
+                    ) from last_error
+                scope = load_search_scope(self._scope_path)
+                policy = load_auto_publish_policy(
+                    self._policy_path,
+                    self._confirmed_policy_sha256,
+                    scope,
+                    self._scope_path,
+                )
+                if policy.provider != "github_rest_api":
+                    raise ValueError("worker Issue publication policy must use github_rest_api")
+                automation = automate_repository_issue(
+                    generation,
+                    evidence,
+                    scope,
+                    _DisabledRepositorySearchAdapter(),
+                    "github-tree-probe",
+                    policy,
+                    self._issue_client,
+                    True,
+                    preselected_repository=repository,
+                    routing_mode=ROUTING_MODE_DEMO_SINGLE_REPOSITORY,
+                    input_type=input_type,
+                )
+                publication = automation.get("publication")
+                if not isinstance(publication, dict):
+                    raise WorkerError("Issue automation returned an invalid publication result")
+                status = publication.get("status")
         except ValueError as exception:
             raise WorkerError("Issue generation or publication failed closed") from exception
 
-        publication = automation.get("publication")
-        if not isinstance(publication, dict):
-            raise WorkerError("Issue automation returned an invalid publication result")
-        status = publication.get("status")
         if status not in {"created", "deduplicated"}:
             missing: list[str] = []
             review = generation.get("review") if isinstance(generation, dict) else None
