@@ -1,6 +1,7 @@
 package com.githubaiagent.controlplane.task;
 
 import com.githubaiagent.controlplane.task.api.CreateTaskRequest;
+import com.githubaiagent.controlplane.task.api.JiraIssueRequest;
 import com.githubaiagent.controlplane.task.api.LogIncidentRequest;
 import com.githubaiagent.controlplane.task.api.TaskClaimResponse;
 import com.githubaiagent.controlplane.task.api.TaskDetailResponse;
@@ -365,12 +366,107 @@ class TaskServiceIntegrationTest {
     }
 
     @Test
-    void keepsJiraDisconnectedUntilSanitizedIntakeIsImplemented() {
+    void rejectsJiraTaskWithoutEvidence() {
         assertThatThrownBy(() -> taskService.create(new CreateTaskRequest(
                 SourceType.JIRA,
                 "synthetic Jira record"
         ))).isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Jira");
+                .hasMessageContaining("jiraIssue");
+    }
+
+    @Test
+    void createsJiraTaskWithExplicitRepositoryBinding() {
+        JiraIssueRequest evidence = new JiraIssueRequest(
+                "SANITIZED",
+                "PAY-123",
+                "https://jira.example/browse/PAY-123",
+                "PAY",
+                "demo-company/payment-service",
+                "components: 支付网关"
+        );
+        TaskResponse created = taskService.create(new CreateTaskRequest(
+                SourceType.JIRA,
+                "支付回调偶发重复通知",
+                null,
+                evidence
+        ));
+
+        assertThat(created.status()).isEqualTo(TaskStatus.PENDING);
+        assertThat(created.issueProfile()).isEqualTo(IssueProfile.JIRA_ISSUE);
+        assertThat(created.matchedRepository()).isEqualTo("demo-company/payment-service");
+        assertThat(created.routingBasis()).contains("jira deterministic mapping");
+
+        TaskResponse repeated = taskService.create(new CreateTaskRequest(
+                SourceType.JIRA,
+                "支付回调偶发重复通知",
+                null,
+                evidence
+        ));
+        assertThat(repeated.id()).isEqualTo(created.id());
+        assertThat(jobRepository.count()).isEqualTo(1);
+    }
+
+    @Test
+    void rejectsUnsanitizedOrUnauthorizedJiraEvidence() {
+        assertThatThrownBy(() -> taskService.create(new CreateTaskRequest(
+                SourceType.JIRA,
+                "支付回调偶发重复通知",
+                null,
+                new JiraIssueRequest(
+                        "RAW",
+                        "PAY-123",
+                        "https://jira.example/browse/PAY-123",
+                        "PAY",
+                        "demo-company/payment-service",
+                        "components: 支付网关"
+                )
+        ))).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("SANITIZED");
+
+        assertThatThrownBy(() -> taskService.create(new CreateTaskRequest(
+                SourceType.JIRA,
+                "支付回调偶发重复通知",
+                null,
+                new JiraIssueRequest(
+                        "SANITIZED",
+                        "PAY-123",
+                        "https://jira.example/browse/PAY-123",
+                        "PAY",
+                        "unknown-org/unknown-repo",
+                        "components: 支付网关"
+                )
+        ))).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("authorized catalog");
+
+        assertThatThrownBy(() -> taskService.create(new CreateTaskRequest(
+                SourceType.JIRA,
+                "支付回调偶发重复通知",
+                null,
+                new JiraIssueRequest(
+                        "SANITIZED",
+                        "BAD KEY",
+                        "https://jira.example/browse/PAY-123",
+                        "PAY",
+                        "demo-company/payment-service",
+                        "components: 支付网关"
+                )
+        ))).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("sourceReference");
+
+        assertThatThrownBy(() -> taskService.create(new CreateTaskRequest(
+                SourceType.NATURAL_LANGUAGE,
+                "支付订单列表增加分页测试",
+                null,
+                new JiraIssueRequest(
+                        "SANITIZED",
+                        "PAY-123",
+                        "https://jira.example/browse/PAY-123",
+                        "PAY",
+                        "demo-company/payment-service",
+                        "components: 支付网关"
+                )
+        ))).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("sourceType is JIRA");
     }
 
     @Test

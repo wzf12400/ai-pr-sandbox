@@ -40,7 +40,7 @@ export function LogMonitor() {
     <>
       {/* 苹果风格悬浮小窗（展开大窗时隐藏，避免重叠） */}
       {!expanded && (
-      <div className="pointer-events-none absolute right-3 top-3 z-20 w-60">
+      <div className="pointer-events-none w-full">
         <div
           onClick={() => setExpanded(true)}
           className="pointer-events-auto cursor-pointer select-none rounded-2xl border border-border/70 bg-white/85 shadow-lg shadow-zinc-900/5 backdrop-blur-md transition-shadow hover:shadow-xl hover:shadow-zinc-900/10"

@@ -1,0 +1,236 @@
+{
+  "schema_version": "jira-projects/v1",
+  "projects": {
+    "AI": {
+      "enabled": true,
+      "jql_extra": "status not in (Done, Closed, Resolved)",
+      "issue_types": [
+        "新需求"
+      ],
+      "severity_map": {
+        "致命": "S0",
+        "严重": "S1",
+        "一般": "S2",
+        "提示": "S3"
+      },
+      "repositories": [
+        {
+          "repository": "wzf12400/ai-pr-sandbox",
+          "components": [
+            "calculator",
+            "沙箱"
+          ],
+          "labels": [
+            "sandbox"
+          ],
+          "keywords": [
+            "calculator",
+            "sandbox",
+            "沙箱"
+          ]
+        }
+      ],
+      "max_dispatch_per_poll": 1,
+      "auto_dispatch": false,
+      "strict_matching": true
+    },
+    "FF": {
+      "enabled": true,
+      "jql_extra": "status not in (Done, Closed, Resolved)",
+      "issue_types": [
+        "新需求"
+      ],
+      "severity_map": {
+        "致命": "S0",
+        "严重": "S1",
+        "一般": "S2",
+        "提示": "S3"
+      },
+      "repositories": [
+        {
+          "repository": "wzf12400/ai-pr-sandbox",
+          "components": [
+            "calculator",
+            "沙箱"
+          ],
+          "labels": [
+            "sandbox"
+          ],
+          "keywords": [
+            "calculator",
+            "sandbox",
+            "沙箱"
+          ]
+        }
+      ],
+      "max_dispatch_per_poll": 1,
+      "auto_dispatch": false,
+      "strict_matching": true
+    },
+    "AE": {
+      "enabled": true,
+      "jql_extra": "status not in (Done, Closed, Resolved)",
+      "issue_types": [
+        "新需求"
+      ],
+      "severity_map": {
+        "致命": "S0",
+        "严重": "S1",
+        "一般": "S2",
+        "提示": "S3"
+      },
+      "repositories": [
+        {
+          "repository": "wzf12400/ai-pr-sandbox",
+          "components": [
+            "calculator",
+            "沙箱"
+          ],
+          "labels": [
+            "sandbox"
+          ],
+          "keywords": [
+            "calculator",
+            "sandbox",
+            "沙箱"
+          ]
+        }
+      ],
+      "max_dispatch_per_poll": 1,
+      "auto_dispatch": false,
+      "strict_matching": true
+    },
+    "AF": {
+      "enabled": true,
+      "jql_extra": "status not in (Done, Closed, Resolved)",
+      "issue_types": [
+        "新需求"
+      ],
+      "severity_map": {
+        "致命": "S0",
+        "严重": "S1",
+        "一般": "S2",
+        "提示": "S3"
+      },
+      "repositories": [
+        {
+          "repository": "wzf12400/ai-pr-sandbox",
+          "components": [
+            "calculator",
+            "沙箱"
+          ],
+          "labels": [
+            "sandbox"
+          ],
+          "keywords": [
+            "calculator",
+            "sandbox",
+            "沙箱"
+          ]
+        }
+      ],
+      "max_dispatch_per_poll": 1,
+      "auto_dispatch": false,
+      "strict_matching": true
+    },
+    "CEL": {
+      "enabled": true,
+      "jql_extra": "status not in (Done, Closed, Resolved)",
+      "issue_types": [
+        "新需求"
+      ],
+      "severity_map": {
+        "致命": "S0",
+        "严重": "S1",
+        "一般": "S2",
+        "提示": "S3"
+      },
+      "repositories": [
+        {
+          "repository": "wzf12400/ai-pr-sandbox",
+          "components": [
+            "calculator",
+            "沙箱"
+          ],
+          "labels": [
+            "sandbox"
+          ],
+          "keywords": [
+            "calculator",
+            "sandbox",
+            "沙箱"
+          ]
+        }
+      ],
+      "max_dispatch_per_poll": 1,
+      "auto_dispatch": false,
+      "strict_matching": true
+    },
+    "MOD": {
+      "enabled": true,
+      "jql_extra": "status not in (Done, Closed, Resolved)",
+      "issue_types": [
+        "新需求"
+      ],
+      "severity_map": {
+        "致命": "S0",
+        "严重": "S1",
+        "一般": "S2",
+        "提示": "S3"
+      },
+      "repositories": [
+        {
+          "repository": "wzf12400/ai-pr-sandbox",
+          "components": [
+            "calculator",
+            "沙箱"
+          ],
+          "labels": [
+            "sandbox"
+          ],
+          "keywords": [
+            "calculator",
+            "sandbox",
+            "沙箱"
+          ]
+        }
+      ],
+      "max_dispatch_per_poll": 1,
+      "auto_dispatch": false,
+      "strict_matching": true
+    },
+    "KEYB": {
+      "enabled": true,
+      "jql_extra": "status not in (Done, Closed, Resolved)",
+      "issue_types": [
+        "新需求"
+      ],
+      "severity_map": {
+        "致命": "S0",
+        "严重": "S1",
+        "一般": "S2",
+        "提示": "S3"
+      },
+      "repositories": [
+        {
+          "repository": "wzf12400/ai-pr-sandbox",
+          "components": [
+            "calculator",
+            "沙箱"
+          ],
+          "labels": [
+            "sandbox"
+          ],
+          "keywords": [
+            "calculator",
+            "sandbox",
+            "沙箱"
+          ]
+        }
+      ],
+      "max_dispatch_per_poll": 1,
+      "auto_dispatch": false,
+      "strict_matching": true
+    }
+  }
+}
