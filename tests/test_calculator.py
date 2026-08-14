@@ -1,6 +1,6 @@
 import unittest
 
-from src.calculator import add, subtract
+from src.calculator import add, mod, subtract
 
 
 class CalculatorTest(unittest.TestCase):
@@ -9,6 +9,9 @@ class CalculatorTest(unittest.TestCase):
 
     def test_subtract(self) -> None:
         self.assertEqual(subtract(7, 4), 3)
+
+    def test_mod(self) -> None:
+        self.assertEqual(mod(7, 4), 3)
 
     def test_allows_operands_equal_to_50(self) -> None:
         self.assertEqual(add(50, 0), 50)

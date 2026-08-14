@@ -16,3 +16,9 @@ def subtract(left: float, right: float) -> float:
     _validate_operand(left)
     _validate_operand(right)
     return left - right
+
+
+def mod(left: float, right: float) -> float:
+    _validate_operand(left)
+    _validate_operand(right)
+    return left % right
