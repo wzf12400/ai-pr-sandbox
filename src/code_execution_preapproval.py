@@ -15,7 +15,7 @@ from src.copilot_code_modifier import load_issue_code_policy
 POLICY_SCHEMA_VERSION = "code-execution-preapproval-policy/v1"
 POLICY_ID_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,80}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
-ALLOWED_SOURCE_TYPES = frozenset({"LOG", "JIRA"})
+ALLOWED_SOURCE_TYPES = frozenset({"LOG", "JIRA", "NATURAL_LANGUAGE"})
 MAX_POLICY_BYTES = 64_000
 
 

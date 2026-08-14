@@ -68,9 +68,18 @@ class CodeExecutionPreapprovalPolicyTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not bound"):
                 load_code_execution_preapproval_policy(*inputs)
 
-    def test_natural_language_cannot_be_added_to_automatic_policy(self):
+    def test_natural_language_can_be_added_to_automatic_policy(self):
         with tempfile.TemporaryDirectory() as directory:
-            inputs = self._fixture(Path(directory), ["NATURAL_LANGUAGE"])
+            inputs = self._fixture(Path(directory), ["LOG", "NATURAL_LANGUAGE"])
+
+            policy = load_code_execution_preapproval_policy(*inputs)
+
+        self.assertEqual(("ai-code-approved",), policy.labels_for("NATURAL_LANGUAGE", "created"))
+        self.assertEqual((), policy.labels_for("NATURAL_LANGUAGE", "deduplicated"))
+
+    def test_unknown_source_type_still_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            inputs = self._fixture(Path(directory), ["MANUAL"])
 
             with self.assertRaisesRegex(ValueError, "invalid source type"):
                 load_code_execution_preapproval_policy(*inputs)

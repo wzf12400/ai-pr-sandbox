@@ -15,7 +15,9 @@ public record TaskClaimResponse(
         String routingBasis,
         Integer routingConfidence,
         String policyId,
-        LogIncidentView logIncident
+        LogIncidentView logIncident,
+        Long issueNumber,
+        String issueUrl
 ) {
     public static TaskClaimResponse from(AutomationJob job) {
         return new TaskClaimResponse(
@@ -28,7 +30,9 @@ public record TaskClaimResponse(
                 job.getRoutingBasis(),
                 job.getRoutingConfidence(),
                 job.getPolicyId(),
-                LogIncidentView.from(job)
+                LogIncidentView.from(job),
+                job.getIssueNumber(),
+                job.getIssueUrl()
         );
     }
 }
