@@ -137,7 +137,8 @@ export function LogMonitor() {
               )}
               <button
                 onClick={refresh}
-                className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                title="重新扫描"
+                className="ml-auto mr-7 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               >
                 <RefreshCw
                   className={cn("h-3.5 w-3.5", refreshing && "animate-spin")}
@@ -159,7 +160,7 @@ export function LogMonitor() {
                   hint={scan.configure}
                 />
               )}
-              {live && <LiveDetail scan={scan} />}
+              {live && <LiveDetail scan={scan} onRulesSaved={async () => { await reload(); }} />}
             </div>
           </div>
         </DialogContent>
@@ -181,7 +182,13 @@ function EmptyHint({ title, hint }: { title: string; hint?: string }) {
   );
 }
 
-function LiveDetail({ scan }: { scan: LogMonitorScan }) {
+function LiveDetail({
+  scan,
+  onRulesSaved,
+}: {
+  scan: LogMonitorScan;
+  onRulesSaved: () => Promise<void>;
+}) {
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -227,7 +234,7 @@ function LiveDetail({ scan }: { scan: LogMonitorScan }) {
         </div>
       </div>
 
-      <AutomationPanel scan={scan} />
+      <AutomationPanel scan={scan} onSaved={onRulesSaved} />
 
       <div>
         <h3 className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
@@ -349,9 +356,16 @@ function IncidentRow({ incident }: { incident: IncidentView }) {
   );
 }
 
-function AutomationPanel({ scan }: { scan: LogMonitorScan }) {
+function AutomationPanel({
+  scan,
+  onSaved,
+}: {
+  scan: LogMonitorScan;
+  onSaved: () => Promise<void>;
+}) {
   const auto = scan.automation;
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [threshold, setThreshold] = useState(
     String(auto?.rules.minGroupEvents ?? 10)
   );
@@ -359,8 +373,9 @@ function AutomationPanel({ scan }: { scan: LogMonitorScan }) {
 
   async function save(nextEnabled?: boolean) {
     setSaving(true);
+    setSaveError(null);
     try {
-      await fetch("/log-monitor/rules", {
+      const res = await fetch("/log-monitor/rules", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -368,6 +383,13 @@ function AutomationPanel({ scan }: { scan: LogMonitorScan }) {
           minGroupEvents: Number(threshold) || auto!.rules.minGroupEvents,
         }),
       });
+      if (!res.ok) {
+        throw new Error(`保存失败（${res.status}）`);
+      }
+      // 保存成功后立即刷新，让启用/停用状态即时生效
+      await onSaved();
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : "保存失败");
     } finally {
       setSaving(false);
     }
@@ -417,15 +439,18 @@ function AutomationPanel({ scan }: { scan: LogMonitorScan }) {
           disabled={saving}
           className="rounded-md bg-primary px-2.5 py-1 text-[11px] text-primary-foreground disabled:opacity-40"
         >
-          保存
+          {saving ? "保存中…" : "保存"}
         </button>
         <button
           onClick={() => save(!auto.rules.enabled)}
           disabled={saving}
-          className="rounded-md border border-border px-2.5 py-1 text-[11px] text-muted-foreground hover:bg-accent"
+          className="rounded-md border border-border px-2.5 py-1 text-[11px] text-muted-foreground hover:bg-accent disabled:opacity-40"
         >
           {auto.rules.enabled ? "停用规则" : "启用规则"}
         </button>
+        {saveError && (
+          <span className="text-[11px] text-red-600">{saveError}</span>
+        )}
         <span className="ml-auto text-[11px] text-muted-foreground">
           本次超阈值 {auto.overThreshold} 组 · 单次最多 {auto.rules.maxTasksPerScan} 个任务
         </span>
