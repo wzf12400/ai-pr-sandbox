@@ -307,6 +307,24 @@ class CopilotCodeModifierTest(unittest.TestCase):
         self.assertFalse(result["rules"]["review_does_not_need_clarification"])
         self.assertFalse(result["rules"]["acceptance_criteria_are_known"])
 
+    def test_issue_with_identical_current_and_expected_behavior_is_not_approved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            path.write_text(json.dumps(policy_payload()), encoding="utf-8")
+            policy = load_issue_code_policy(path)
+            issue = approved_issue(
+                "\n\n## Behavior\n\n"
+                "- Current: The page has no loading effect.\n"
+                "- Expected: The page has no loading effect.\n\n"
+                "## Acceptance Criteria\n\n"
+                "- [ ] The page has no loading effect.\n"
+            )
+
+            result = evaluate_issue_approval(issue, policy)
+
+        self.assertFalse(result["approved"])
+        self.assertFalse(result["rules"]["acceptance_criteria_are_known"])
+
     def test_cli_uses_programmatic_mode_minimal_permissions_and_no_allow_all(self):
         modifier = CopilotCLICodeModifier()
         calls = []

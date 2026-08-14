@@ -477,6 +477,14 @@ def evaluate_issue_approval(
             re.IGNORECASE,
         )
     )
+    current_behavior = re.search(r"(?im)^- Current:\s*(?P<value>.+?)\s*$", issue.body)
+    expected_behavior = re.search(r"(?im)^- Expected:\s*(?P<value>.+?)\s*$", issue.body)
+    behavior_change_unknown = bool(
+        current_behavior
+        and expected_behavior
+        and current_behavior.group("value").strip().casefold()
+        == expected_behavior.group("value").strip().casefold()
+    )
     rules = {
         "repository_matches_policy": issue.repository.casefold()
         == policy.repository.casefold(),
@@ -489,7 +497,9 @@ def evaluate_issue_approval(
         "one_automation_fingerprint": len(markers) == 1,
         "no_sensitive_data_detected": not findings,
         "review_does_not_need_clarification": not review_needs_clarification,
-        "acceptance_criteria_are_known": not acceptance_unknown,
+        "acceptance_criteria_are_known": not (
+            acceptance_unknown or behavior_change_unknown
+        ),
         "draft_pr_only": policy.draft_pr_only and not policy.auto_merge,
     }
     return {
