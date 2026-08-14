@@ -53,7 +53,7 @@ class TaskServiceAssistantTest {
         assertThat(created.matchedRepository()).isEqualTo("demo-company/payment-service");
         TaskDetailResponse detail = taskService.detail(created.id());
         assertThat(detail.events()).extracting(TaskEventResponse::eventType)
-                .containsExactly("TASK_CREATED", "AGENT_REPLY");
+                .containsExactly("TASK_CREATED", "STATUS_CHANGED", "AGENT_REPLY");
         assertThat(detail.events().getLast().detail()).contains("demo-company/payment-service");
         assertThat(outboxRepository.existsById(created.id())).isTrue();
     }

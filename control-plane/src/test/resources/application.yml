@@ -33,3 +33,5 @@ app:
       keywords: ["支付", "订单", "payment", "order"]
     - repository: demo-company/customer-portal
       keywords: ["用户", "登录", "user", "login"]
+  chat:
+    async-reply: false

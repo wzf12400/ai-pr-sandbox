@@ -2,7 +2,7 @@ package com.githubaiagent.controlplane.task;
 
 import com.githubaiagent.controlplane.assistant.AssistantAnswer;
 import com.githubaiagent.controlplane.assistant.AssistantService;
-import com.githubaiagent.controlplane.assistant.TaskConversationContext;
+import com.githubaiagent.controlplane.assistant.ChatProperties;
 import com.githubaiagent.controlplane.config.AppProperties;
 import com.githubaiagent.controlplane.routing.RepositoryMatch;
 import com.githubaiagent.controlplane.routing.RepositoryMatcher;
@@ -15,9 +15,15 @@ import com.githubaiagent.controlplane.task.api.TaskMessageRequest;
 import com.githubaiagent.controlplane.task.api.TaskResponse;
 import com.githubaiagent.controlplane.worker.TaskClaimConflictException;
 import com.githubaiagent.controlplane.worker.TaskQueueOutboxService;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.core.task.TaskExecutor;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.util.EnumMap;
@@ -44,6 +50,9 @@ public class TaskService {
     private final AppProperties properties;
     private final TaskQueueOutboxService outboxService;
     private final AssistantService assistantService;
+    private final ChatProperties chatProperties;
+    private final TaskExecutor assistantReplyExecutor;
+    private final TransactionTemplate assistantTransaction;
 
     public TaskService(
             AutomationJobRepository jobRepository,
@@ -52,7 +61,10 @@ public class TaskService {
             RepositoryMatcher repositoryMatcher,
             AppProperties properties,
             TaskQueueOutboxService outboxService,
-            AssistantService assistantService
+            AssistantService assistantService,
+            ChatProperties chatProperties,
+            @Qualifier("assistantReplyExecutor") TaskExecutor assistantReplyExecutor,
+            PlatformTransactionManager transactionManager
     ) {
         this.jobRepository = jobRepository;
         this.eventRepository = eventRepository;
@@ -61,6 +73,9 @@ public class TaskService {
         this.properties = properties;
         this.outboxService = outboxService;
         this.assistantService = assistantService;
+        this.chatProperties = chatProperties;
+        this.assistantReplyExecutor = assistantReplyExecutor;
+        this.assistantTransaction = new TransactionTemplate(transactionManager);
     }
 
     @Transactional
@@ -94,33 +109,6 @@ public class TaskService {
 
         RepositoryMatch match = repositoryMatcher.match(sanitizedInput);
         String requirement = sanitizedInput;
-        Optional<AssistantAnswer> opening = Optional.empty();
-        if (match.status() != RepositoryMatch.Status.RESOLVED) {
-            opening = assistantService.converse(
-                    new TaskConversationContext(
-                            request.sourceType().name(),
-                            TaskStatus.NEEDS_CONTEXT.name(),
-                            sanitizedInput,
-                            match.basis(),
-                            "",
-                            "",
-                            ""
-                    ),
-                    List.of(),
-                    sanitizedInput
-            );
-            if (opening.isPresent() && !opening.get().routingHints().isEmpty()) {
-                String withHints = appendCapped(
-                        sanitizedInput,
-                        String.join(" ", opening.get().routingHints())
-                );
-                RepositoryMatch hintedMatch = repositoryMatcher.match(withHints);
-                if (hintedMatch.status() == RepositoryMatch.Status.RESOLVED) {
-                    requirement = withHints;
-                    match = hintedMatch;
-                }
-            }
-        }
         TaskStatus initialStatus = match.status() == RepositoryMatch.Status.RESOLVED
                 ? TaskStatus.PENDING
                 : TaskStatus.NEEDS_CONTEXT;
@@ -167,34 +155,12 @@ public class TaskService {
         ));
         if (initialStatus == TaskStatus.PENDING) {
             outboxService.schedule(job.getId(), now);
-            if (opening.isPresent()) {
-                eventRepository.save(new JobEvent(
-                        job.getId(),
-                        "AGENT_REPLY",
-                        initialStatus,
-                        initialStatus,
-                        ActorType.ASSISTANT,
-                        "已根据你的描述路由到授权仓库 " + match.repository()
-                                + "（" + match.basis() + "），任务已排队。",
-                        now
-                ));
-            }
         } else {
-            RepositoryMatch unresolvedMatch = match;
-            String openingReply = opening
-                    .map(AssistantAnswer::reply)
-                    .orElseGet(() -> buildMissingContextReply(unresolvedMatch));
-            eventRepository.save(new JobEvent(
-                    job.getId(),
-                    "AGENT_REPLY",
-                    initialStatus,
-                    initialStatus,
-                    ActorType.ASSISTANT,
-                    openingReply,
-                    now
-            ));
+            scheduleOpeningAssistantPass(job.getId());
         }
-        return TaskResponse.from(job);
+        // 同步模式（测试/直连执行器）下开场分析可能已就地完成重路由，
+        // 重新读取托管实体以反映最新状态
+        return TaskResponse.from(findJobForUpdate(job.getId()));
     }
 
     @Transactional
@@ -205,8 +171,6 @@ public class TaskService {
         }
         AutomationJob job = findJobForUpdate(taskId);
         TaskStatus status = job.getStatus();
-        List<JobEvent> priorEvents =
-                eventRepository.findByJobIdOrderByCreatedAtAscIdAsc(taskId);
         Instant now = Instant.now();
         eventRepository.save(new JobEvent(
                 taskId,
@@ -220,84 +184,210 @@ public class TaskService {
 
         String reply;
         if (status == TaskStatus.NEEDS_CONTEXT || status == TaskStatus.FAILED) {
-            reply = rerouteWithSuppliedContext(job, sanitized, priorEvents, status, now);
+            // 先跑确定性匹配：能直接解析就不调用 AI，同步完成重路由
+            String combined = appendCapped(job.getNormalizedRequirement(), sanitized);
+            RepositoryMatch match = repositoryMatcher.match(combined);
+            if (match.status() == RepositoryMatch.Status.RESOLVED) {
+                applyResolvedRerouting(job, combined, match, status, now);
+                reply = "已根据补充信息重新路由到授权仓库 " + match.repository()
+                        + "（" + match.basis() + "），任务已重新排队。";
+                saveAgentReply(taskId, status, job.getStatus(), reply, now);
+            } else {
+                // 上下文先同步合并进需求，AI 线索分析异步补齐
+                job.applyRerouting(
+                        combined,
+                        null,
+                        match.basis(),
+                        match.confidence(),
+                        String.join(",", match.candidates()),
+                        now
+                );
+                job.transitionTo(status, match.basis(), now);
+                scheduleFollowUpAssistantPass(taskId, sanitized, status);
+            }
         } else if (status == TaskStatus.COMPLETED) {
-            reply = assistantService.converse(job, priorEvents, sanitized)
-                    .map(AssistantAnswer::reply)
-                    .orElse("该任务已完成。如有新的变更需求，请直接描述，我会创建新任务。");
+            scheduleAssistantReply(
+                    taskId,
+                    sanitized,
+                    "该任务已完成。如有新的变更需求，请直接描述，我会创建新任务。"
+            );
         } else {
-            String fallback = "收到，补充信息已记录到事件流。任务当前处于「" + status
-                    + "」状态，流水线处理中，不会被对话打断。";
-            reply = assistantService.converse(job, priorEvents, sanitized)
-                    .map(AssistantAnswer::reply)
-                    .orElse(fallback);
+            scheduleAssistantReply(
+                    taskId,
+                    sanitized,
+                    "收到，补充信息已记录到事件流。任务当前处于「" + status
+                            + "」状态，流水线处理中，不会被对话打断。"
+            );
         }
+        return detail(taskId);
+    }
+
+    private void applyResolvedRerouting(
+            AutomationJob job,
+            String requirement,
+            RepositoryMatch match,
+            TaskStatus fromStatus,
+            Instant now
+    ) {
+        job.applyRerouting(
+                requirement,
+                match.repository(),
+                match.basis(),
+                match.confidence(),
+                String.join(",", match.candidates()),
+                now
+        );
+        job.transitionTo(TaskStatus.PENDING, "context supplemented via conversation", now);
+        eventRepository.save(new JobEvent(
+                job.getId(),
+                "STATUS_CHANGED",
+                fromStatus,
+                TaskStatus.PENDING,
+                ActorType.USER,
+                "context supplemented; rerouted to " + match.repository(),
+                now
+        ));
+        outboxService.schedule(job.getId(), now);
+    }
+
+    private void saveAgentReply(
+            String taskId,
+            TaskStatus fromStatus,
+            TaskStatus toStatus,
+            String reply,
+            Instant now
+    ) {
         eventRepository.save(new JobEvent(
                 taskId,
                 "AGENT_REPLY",
-                status,
-                job.getStatus(),
+                fromStatus,
+                toStatus,
                 ActorType.ASSISTANT,
                 reply,
                 now
         ));
-        return detail(taskId);
     }
 
-    private String rerouteWithSuppliedContext(
-            AutomationJob job,
+    private void scheduleOpeningAssistantPass(String taskId) {
+        submitAssistantWork(() -> assistantTransaction.executeWithoutResult(tx -> {
+            AutomationJob job = findJobForUpdate(taskId);
+            if (job.getStatus() != TaskStatus.NEEDS_CONTEXT) {
+                return;
+            }
+            List<JobEvent> priorEvents =
+                    eventRepository.findByJobIdOrderByCreatedAtAscIdAsc(taskId);
+            Optional<AssistantAnswer> opening =
+                    assistantService.converse(job, priorEvents, job.getInputSummary());
+            RepositoryMatch match = repositoryMatcher.match(job.getNormalizedRequirement());
+            if (opening.isPresent() && !opening.get().routingHints().isEmpty()) {
+                String withHints = appendCapped(
+                        job.getNormalizedRequirement(),
+                        String.join(" ", opening.get().routingHints())
+                );
+                RepositoryMatch hintedMatch = repositoryMatcher.match(withHints);
+                if (hintedMatch.status() == RepositoryMatch.Status.RESOLVED) {
+                    Instant now = Instant.now();
+                    applyResolvedRerouting(
+                            job, withHints, hintedMatch, TaskStatus.NEEDS_CONTEXT, now);
+                    saveAgentReply(
+                            taskId,
+                            TaskStatus.NEEDS_CONTEXT,
+                            TaskStatus.PENDING,
+                            "已根据你的描述路由到授权仓库 " + hintedMatch.repository()
+                                    + "（" + hintedMatch.basis() + "），任务已排队。",
+                            now
+                    );
+                    return;
+                }
+            }
+            RepositoryMatch unresolvedMatch = match;
+            String reply = opening
+                    .map(AssistantAnswer::reply)
+                    .orElseGet(() -> buildMissingContextReply(unresolvedMatch));
+            saveAgentReply(
+                    taskId, TaskStatus.NEEDS_CONTEXT, TaskStatus.NEEDS_CONTEXT,
+                    reply, Instant.now());
+        }));
+    }
+
+    private void scheduleFollowUpAssistantPass(
+            String taskId,
             String sanitized,
-            List<JobEvent> priorEvents,
-            TaskStatus status,
-            Instant now
+            TaskStatus fromStatus
     ) {
-        String combined = appendCapped(job.getNormalizedRequirement(), sanitized);
-        RepositoryMatch match = repositoryMatcher.match(combined);
-        Optional<AssistantAnswer> answer = Optional.empty();
-        if (match.status() != RepositoryMatch.Status.RESOLVED) {
-            answer = assistantService.converse(job, priorEvents, sanitized);
+        submitAssistantWork(() -> assistantTransaction.executeWithoutResult(tx -> {
+            AutomationJob job = findJobForUpdate(taskId);
+            if (job.getStatus() != fromStatus) {
+                return;
+            }
+            List<JobEvent> priorEvents =
+                    eventRepository.findByJobIdOrderByCreatedAtAscIdAsc(taskId);
+            Optional<AssistantAnswer> answer =
+                    assistantService.converse(job, priorEvents, sanitized);
+            RepositoryMatch match = repositoryMatcher.match(job.getNormalizedRequirement());
             if (answer.isPresent() && !answer.get().routingHints().isEmpty()) {
                 String withHints = appendCapped(
-                        combined,
+                        job.getNormalizedRequirement(),
                         String.join(" ", answer.get().routingHints())
                 );
                 RepositoryMatch hintedMatch = repositoryMatcher.match(withHints);
                 if (hintedMatch.status() == RepositoryMatch.Status.RESOLVED) {
-                    combined = withHints;
-                    match = hintedMatch;
+                    Instant now = Instant.now();
+                    applyResolvedRerouting(job, withHints, hintedMatch, fromStatus, now);
+                    saveAgentReply(
+                            taskId,
+                            fromStatus,
+                            TaskStatus.PENDING,
+                            "已根据补充信息重新路由到授权仓库 " + hintedMatch.repository()
+                                    + "（" + hintedMatch.basis() + "），任务已重新排队。",
+                            now
+                    );
+                    return;
                 }
             }
+            RepositoryMatch unresolvedMatch = match;
+            String reply = answer
+                    .map(AssistantAnswer::reply)
+                    .orElseGet(() -> buildMissingContextReply(unresolvedMatch));
+            saveAgentReply(taskId, fromStatus, fromStatus, reply, Instant.now());
+        }));
+    }
+
+    private void scheduleAssistantReply(
+            String taskId,
+            String sanitized,
+            String fallbackReply
+    ) {
+        submitAssistantWork(() -> assistantTransaction.executeWithoutResult(tx -> {
+            AutomationJob job = findJobForUpdate(taskId);
+            List<JobEvent> priorEvents =
+                    eventRepository.findByJobIdOrderByCreatedAtAscIdAsc(taskId);
+            String reply = assistantService.converse(job, priorEvents, sanitized)
+                    .map(AssistantAnswer::reply)
+                    .orElse(fallbackReply);
+            saveAgentReply(taskId, job.getStatus(), job.getStatus(), reply, Instant.now());
+        }));
+    }
+
+    private void submitAssistantWork(Runnable work) {
+        // 测试配置（async-reply=false）下内联执行，保持断言同步
+        if (!chatProperties.asyncReply()) {
+            work.run();
+            return;
         }
-        String candidates = String.join(",", match.candidates());
-        if (match.status() == RepositoryMatch.Status.RESOLVED) {
-            job.applyRerouting(
-                    combined,
-                    match.repository(),
-                    match.basis(),
-                    match.confidence(),
-                    candidates,
-                    now
+        // 请求事务提交后再执行，避免异步线程读到未提交数据或等待行锁
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(
+                    new TransactionSynchronization() {
+                        @Override
+                        public void afterCommit() {
+                            assistantReplyExecutor.execute(work);
+                        }
+                    }
             );
-            job.transitionTo(TaskStatus.PENDING, "context supplemented via conversation", now);
-            eventRepository.save(new JobEvent(
-                    job.getId(),
-                    "STATUS_CHANGED",
-                    status,
-                    TaskStatus.PENDING,
-                    ActorType.USER,
-                    "context supplemented; rerouted to " + match.repository(),
-                    now
-            ));
-            outboxService.schedule(job.getId(), now);
-            return "已根据补充信息重新路由到授权仓库 " + match.repository()
-                    + "（" + match.basis() + "），任务已重新排队。";
+        } else {
+            assistantReplyExecutor.execute(work);
         }
-        job.applyRerouting(combined, null, match.basis(), match.confidence(), candidates, now);
-        job.transitionTo(status, match.basis(), now);
-        RepositoryMatch unresolvedMatch = match;
-        return answer
-                .map(AssistantAnswer::reply)
-                .orElseGet(() -> buildMissingContextReply(unresolvedMatch));
     }
 
     private static String appendCapped(String base, String extra) {

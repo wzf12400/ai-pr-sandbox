@@ -15,10 +15,12 @@ public record ChatProperties(
         String safetyIdentifier,
         Integer timeoutSeconds,
         Integer maxCompletionTokens,
-        String apiMode
+        String apiMode,
+        Boolean asyncReply
 ) {
     public ChatProperties {
         enabled = enabled == null || enabled;
+        asyncReply = asyncReply == null || asyncReply;
         baseUrl = baseUrl == null ? "" : baseUrl.strip();
         apiKey = apiKey == null ? "" : apiKey.strip();
         model = model == null || model.isBlank() ? "ailemac/gpt-5-mini" : model.strip();
