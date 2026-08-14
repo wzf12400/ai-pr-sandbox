@@ -43,6 +43,7 @@ app:
     timeout-seconds: ${AI_TIMEOUT_SECONDS:30}
     max-completion-tokens: ${AI_MAX_COMPLETION_TOKENS:800}
     api-mode: ${AI_API_MODE:strict}
+    async-reply: ${AI_ASYNC_REPLY:true}
   repository-catalog:
     - repository: wzf12400/ai-pr-sandbox
       keywords: ["测试仓库", "计算器", "加法", "减法", "乘法", "除法", "calculator", "divide", "sandbox"]

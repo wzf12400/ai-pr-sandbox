@@ -33,7 +33,32 @@ export function ChatView({
 }: Props) {
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [loading, setLoading] = useState(false);
+  const [pendingMessages, setPendingMessages] = useState<string[]>([]);
+  const [awaitingReplyAt, setAwaitingReplyAt] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const detailRef = useRef<TaskDetail | null>(null);
+  detailRef.current = detail;
+
+  useEffect(() => {
+    setPendingMessages([]);
+    setAwaitingReplyAt(null);
+  }, [selectedId]);
+
+  // AI 回复到达后（或 90 秒兜底）关闭「正在思考」指示
+  useEffect(() => {
+    if (awaitingReplyAt === null) return;
+    const replied = detail?.events.some(
+      (e) =>
+        e.eventType === "AGENT_REPLY" &&
+        Date.parse(e.createdAt) >= awaitingReplyAt - 5000
+    );
+    if (replied) {
+      setAwaitingReplyAt(null);
+      return;
+    }
+    const timer = setTimeout(() => setAwaitingReplyAt(null), 90_000);
+    return () => clearTimeout(timer);
+  }, [awaitingReplyAt, detail]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -41,11 +66,20 @@ export function ChatView({
       return;
     }
     let cancelled = false;
-    setLoading(true);
+    // 只在切换线程时显示骨架屏；后台轮询静默更新，避免内容闪烁
+    const switching = detailRef.current?.task.id !== selectedId;
+    if (switching) setLoading(true);
     getTaskDetail(selectedId)
-      .then((d) => !cancelled && setDetail(d))
-      .catch(() => !cancelled && setDetail(null))
-      .finally(() => !cancelled && setLoading(false));
+      .then((d) => {
+        if (cancelled) return;
+        setDetail(d);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        if (switching) setDetail(null);
+        setLoading(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -54,7 +88,13 @@ export function ChatView({
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [selectedId, detail?.events.length, detail?.task.status]);
+  }, [
+    selectedId,
+    detail?.events.length,
+    detail?.task.status,
+    pendingMessages.length,
+    awaitingReplyAt,
+  ]);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-white">
@@ -83,6 +123,8 @@ export function ChatView({
               无法加载任务详情
             </p>
           )}
+          <PendingBubbles detail={detail} pending={pendingMessages} />
+          {awaitingReplyAt !== null && <ThinkingBubble />}
         </div>
       </div>
 
@@ -90,7 +132,17 @@ export function ChatView({
         disabled={connected === false}
         selectedId={selectedId}
         selectedStatus={detail?.task.status ?? null}
+        onOptimistic={(text, expectReply) => {
+          setPendingMessages((prev) => [...prev, text]);
+          if (expectReply) setAwaitingReplyAt(Date.now());
+        }}
+        onOptimisticSettled={(text, ok) => {
+          setPendingMessages((prev) => prev.filter((m) => m !== text));
+          if (!ok) setAwaitingReplyAt(null);
+        }}
         onSubmitted={(task) => {
+          // NEEDS_CONTEXT 的追问回复由 AI 异步生成，显示思考指示
+          if (task.status === "NEEDS_CONTEXT") setAwaitingReplyAt(Date.now());
           onRefresh();
           onSelect(task.id);
         }}
@@ -207,6 +259,59 @@ function Conversation({ detail }: { detail: TaskDetail }) {
             </div>
           )
         )}
+    </div>
+  );
+}
+
+function PendingBubbles({
+  detail,
+  pending,
+}: {
+  detail: TaskDetail | null;
+  pending: string[];
+}) {
+  if (pending.length === 0) return null;
+  // 服务端已入库的消息不再重复显示乐观气泡
+  const known = new Set<string>();
+  if (detail) {
+    known.add(detail.task.inputSummary);
+    for (const ev of detail.events) {
+      if (ev.eventType === "USER_MESSAGE" && ev.detail) known.add(ev.detail);
+    }
+  }
+  const visible = pending.filter((text) => !known.has(text));
+  if (visible.length === 0) return null;
+  return (
+    <div className="mt-5 space-y-5">
+      {visible.map((text) => (
+        <div key={text} className="flex justify-end">
+          <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 opacity-70">
+            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              发送中…
+            </div>
+            <p className="mt-1 whitespace-pre-wrap break-words text-[14px] leading-relaxed">
+              {text}
+            </p>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ThinkingBubble() {
+  return (
+    <div className="mt-5 flex gap-3">
+      <BotAvatar />
+      <div className="flex items-center gap-2.5 rounded-2xl rounded-tl-md border border-border bg-card px-4 py-3">
+        <span className="flex gap-1">
+          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:-0.3s]" />
+          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:-0.15s]" />
+          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/50" />
+        </span>
+        <span className="text-[12px] text-muted-foreground">正在思考…</span>
+      </div>
     </div>
   );
 }
@@ -425,12 +530,16 @@ function Composer({
   disabled,
   selectedId,
   selectedStatus,
+  onOptimistic,
+  onOptimisticSettled,
   onSubmitted,
   onMessaged,
 }: {
   disabled: boolean;
   selectedId: string | null;
   selectedStatus: TaskStatus | null;
+  onOptimistic: (text: string, expectReply: boolean) => void;
+  onOptimisticSettled: (text: string, ok: boolean) => void;
   onSubmitted: (task: Task) => void;
   onMessaged: (detail: TaskDetail) => void;
 }) {
@@ -444,20 +553,25 @@ function Composer({
     if (!text || sending) return;
     setSending(true);
     setError(null);
+    // 乐观发送：立即清空输入框并上屏，不等 AI 接口返回
+    setValue("");
+    onOptimistic(text, selectedId !== null);
     try {
       if (selectedId) {
         const d = await postTaskMessage(selectedId, text);
-        setValue("");
+        onOptimisticSettled(text, true);
         onMessaged(d);
       } else {
         const task = await createTask({
           sourceType: "NATURAL_LANGUAGE",
           input: text,
         });
-        setValue("");
+        onOptimisticSettled(text, true);
         onSubmitted(task);
       }
     } catch (e) {
+      onOptimisticSettled(text, false);
+      setValue(text);
       setError(e instanceof Error ? e.message : "提交失败");
     } finally {
       setSending(false);
@@ -478,7 +592,7 @@ function Composer({
             ref={ref}
             rows={1}
             value={value}
-            disabled={disabled || sending}
+            disabled={disabled}
             placeholder={composerPlaceholder(disabled, selectedId, selectedStatus)}
             className="max-h-40 min-h-[24px] flex-1 resize-none bg-transparent text-[14px] outline-none placeholder:text-muted-foreground disabled:opacity-50"
             onChange={(e) => setValue(e.target.value)}
@@ -502,8 +616,8 @@ function Composer({
           </button>
         </div>
         <p className="mt-1.5 text-center text-[10px] text-muted-foreground/70">
-          对话经脱敏处理且只匹配授权仓库目录；Issue、Copilot 与 Draft PR
-          写入门禁默认关闭
+          对话经脱敏处理且只匹配授权仓库目录；Issue 自动发布，Copilot 仅生成 Draft
+          PR，合并需人工审核
         </p>
       </div>
     </div>
