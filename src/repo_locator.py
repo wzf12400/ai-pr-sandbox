@@ -27,11 +27,14 @@ EXCLUDED_PARTS = {".git", "build", "dist", "node_modules", "vendor", "vendors"}
 MAX_FILE_BYTES = 512_000
 MAX_CANDIDATES = 20
 STOP_WORDS = {
-    "about", "after", "again", "and", "attribute", "because", "before", "being", "between",
-    "bug", "but", "change", "class", "could", "does", "empty", "error", "exists", "from",
-    "given", "had", "has", "have", "instance", "instances", "into", "issue", "may", "now",
-    "purpose", "returns", "since", "some", "that", "the", "this", "version", "where", "with",
-    "would",
+    "about", "acceptance", "affected", "after", "again", "and", "attribute", "background",
+    "because", "before", "being", "between", "bug", "business", "but", "change", "class",
+    "could", "criteria", "current", "custom", "does", "downstream", "empty", "error",
+    "expected", "exists", "file", "flow", "from", "given", "had", "has", "have", "impact",
+    "instance", "instances", "interface", "into", "issue", "method", "module", "now", "path",
+    "product", "protocol", "purpose", "repository", "returns", "risk", "service", "since",
+    "some", "subjects", "that", "the", "this", "unknown", "upstream", "version", "where",
+    "with", "workaround", "would",
 }
 STRUCTURAL_WORDS = {"parent", "base", "inherit", "inherits", "mixin", "slots", "dict"}
 NOTEBOOK_FRAME_PATTERN = re.compile(r"<(?:(?:i)?python-)?input-\d+-[A-Fa-f0-9]+>", re.IGNORECASE)

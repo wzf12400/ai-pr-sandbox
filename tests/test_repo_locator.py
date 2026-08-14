@@ -73,6 +73,28 @@ class RepoLocatorTest(unittest.TestCase):
         self.assertIn("ValueError", code_terms)
         self.assertIn("widget", words)
 
+    def test_generated_issue_boilerplate_does_not_localize_unrelated_code(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "automation.py").write_text(
+                "COPILOT_FLAGS = ('--no-custom-instructions',)\n",
+                encoding="utf-8",
+            )
+
+            result = locate_issue(
+                repo,
+                "Keyboard keeps the previous font",
+                (
+                    "Product: unknown. Service: unknown. Module: unknown. "
+                    "File / Class / Method: unknown. Protocol: unknown. "
+                    "Current: after applying a custom font and saving a theme, "
+                    "the keyboard keeps the previous font. "
+                    "Expected: the keyboard uses the theme font."
+                ),
+            )
+
+        self.assertEqual([], result["candidates"])
+
     def test_python_parent_without_slots_is_ranked(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)

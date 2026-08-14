@@ -412,6 +412,35 @@ class CopilotCodeModifierTest(unittest.TestCase):
             self.assertEqual("main", result["repository"]["base_branch"])
             self.assertEqual([], result["changes"]["paths"])
 
+    def test_execute_blocks_issue_without_a_localization_candidate(self):
+        issue = ApprovedIssue(
+            **{
+                **approved_issue().__dict__,
+                "title": "Keyboard keeps the previous font",
+                "body": (
+                    "After applying a custom font, saving a theme with another "
+                    "font leaves the keyboard on the previous font.\n\n"
+                    f"<!-- repository-issue-fingerprint/v2:{FINGERPRINT} -->"
+                ),
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            repo = initialize_repo(Path(directory))
+            modifier = FakeModifier(write_change=True)
+
+            result = execute_issue_code_workflow(
+                ISSUE_URL,
+                repo,
+                repo / ".github" / "issue-code-policy.json",
+                FakeIssueClient([issue]),
+                modifier,
+                execute=True,
+            )
+
+        self.assertEqual("blocked", result["status"])
+        self.assertFalse(result["approval"]["rules"]["localization_has_candidates"])
+        self.assertEqual([], modifier.calls)
+
     def test_execute_modifies_and_runs_only_policy_tests(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = initialize_repo(Path(directory))
