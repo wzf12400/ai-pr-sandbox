@@ -16,6 +16,8 @@ POLICY_SCHEMA_VERSION = "code-execution-preapproval-policy/v1"
 POLICY_ID_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,80}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 ALLOWED_SOURCE_TYPES = frozenset({"LOG", "JIRA"})
+# Natural-language Issues always require separate downstream human approval.
+NATURAL_LANGUAGE_SOURCE_TYPES = frozenset({"NATURAL_LANGUAGE", "natural_language"})
 MAX_POLICY_BYTES = 64_000
 
 
@@ -46,6 +48,8 @@ class CodeExecutionPreapprovalPolicy:
     max_issues_per_run: int
 
     def labels_for(self, source_type: str, publication_status: str) -> tuple[str, ...]:
+        if source_type in NATURAL_LANGUAGE_SOURCE_TYPES:
+            return ()
         if source_type not in self.allowed_source_types:
             return ()
         # Reused Issues keep their existing approval state. Automatic approval is
@@ -114,6 +118,7 @@ def load_code_execution_preapproval_policy(
     if (
         "" in source_types
         or len(source_types) != len(raw_sources)
+        or source_types & NATURAL_LANGUAGE_SOURCE_TYPES
         or not source_types <= ALLOWED_SOURCE_TYPES
     ):
         raise ValueError("code preapproval policy contains an invalid source type")
