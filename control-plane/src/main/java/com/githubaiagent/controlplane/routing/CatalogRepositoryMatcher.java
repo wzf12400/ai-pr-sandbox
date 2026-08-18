@@ -79,6 +79,12 @@ public class CatalogRepositoryMatcher implements RepositoryMatcher {
         );
     }
 
+    @Override
+    public boolean isAuthorized(String repository) {
+        return properties.repositoryCatalog().stream()
+                .anyMatch(definition -> definition.repository().equals(repository));
+    }
+
     private record ScoredRepository(String repository, int score, List<String> matches) {
     }
 }

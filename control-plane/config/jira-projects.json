@@ -5,7 +5,8 @@
       "enabled": true,
       "jql_extra": "status not in (Done, Closed, Resolved)",
       "issue_types": [
-        "新需求"
+        "新需求",
+        "缺陷"
       ],
       "severity_map": {
         "致命": "S0",
@@ -15,18 +16,40 @@
       },
       "repositories": [
         {
-          "repository": "wzf12400/ai-pr-sandbox",
-          "components": [
-            "calculator",
-            "沙箱"
-          ],
-          "labels": [
-            "sandbox"
-          ],
+          "repository": "KikaTech/frontend-aicompanion",
+          "components": [],
+          "labels": [],
           "keywords": [
-            "calculator",
-            "sandbox",
-            "沙箱"
+            "前端",
+            "页面",
+            "按钮",
+            "界面",
+            "样式",
+            "弹窗",
+            "显示",
+            "气泡",
+            "键盘皮肤",
+            "ui",
+            "交互",
+            "vue"
+          ]
+        },
+        {
+          "repository": "KikaTech/backend-aicompanion",
+          "components": [],
+          "labels": [],
+          "keywords": [
+            "后端",
+            "接口",
+            "api",
+            "服务",
+            "数据库",
+            "服务器",
+            "报错",
+            "500",
+            "超时",
+            "性能",
+            "积分"
           ]
         }
       ],
