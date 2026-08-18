@@ -37,22 +37,57 @@ class ExtractAnchorsTest(unittest.TestCase):
 
 class DecideTest(unittest.TestCase):
     def test_unique_winner_routes(self):
-        hits = {"aiAssistant": {"KikaTech/backend-aicompanion": 2}}
+        hits = {"aiAssistant": {"KikaTech/backend-aicompanion": {"score": 9.0, "impl": 3}}}
         decision = repo_anchor_router.decide(hits, ["KikaTech/backend-aicompanion"])
         self.assertIsNotNone(decision)
         self.assertEqual(decision["repository"], "KikaTech/backend-aicompanion")
         self.assertEqual(decision["anchor"], "aiAssistant")
 
     def test_tie_returns_none(self):
-        hits = {"wallpaper": {"KikaTech/a": 1, "KikaTech/b": 1}}
+        hits = {"wallpaper": {
+            "KikaTech/a": {"score": 6.0, "impl": 2},
+            "KikaTech/b": {"score": 6.0, "impl": 2},
+        }}
         self.assertIsNone(repo_anchor_router.decide(hits, ["KikaTech/a", "KikaTech/b"]))
 
     def test_unauthorized_repo_ignored(self):
-        hits = {"x": {"elsewhere/repo": 3}}
+        hits = {"x": {"elsewhere/repo": {"score": 9.0, "impl": 3}}}
         self.assertIsNone(repo_anchor_router.decide(hits, ["KikaTech/a"]))
 
     def test_no_hits_returns_none(self):
         self.assertIsNone(repo_anchor_router.decide({"x": {}}, ["KikaTech/a"]))
+
+    def test_config_only_evidence_rejected(self):
+        # 只有配置/文档提到服务名（典型调用方），证据太弱不路由
+        hits = {"backend-apple-iap": {"KikaTech/a": {"score": 2.0, "impl": 0}}}
+        self.assertIsNone(repo_anchor_router.decide(hits, ["KikaTech/a"]))
+
+    def test_low_score_below_threshold_rejected(self):
+        # 只有一个实现文件命中，孤证不立
+        hits = {"x": {"KikaTech/a": {"score": 3.0, "impl": 1}}}
+        self.assertIsNone(repo_anchor_router.decide(hits, ["KikaTech/a"]))
+
+
+class PathWeightTest(unittest.TestCase):
+    def test_implementation_code_scores_highest(self):
+        w = repo_anchor_router._path_weight("src/main/java/com/x/service/UserServiceImpl.java")
+        self.assertEqual(w, repo_anchor_router.WEIGHT_IMPLEMENTATION)
+
+    def test_plain_source_scores_middle(self):
+        w = repo_anchor_router._path_weight("src/main/java/com/x/util/DateUtil.java")
+        self.assertEqual(w, repo_anchor_router.WEIGHT_SOURCE)
+
+    def test_resources_config_scores_low(self):
+        w = repo_anchor_router._path_weight("src/main/resources/prod/application-prod.yml")
+        self.assertEqual(w, repo_anchor_router.WEIGHT_CONFIG)
+
+    def test_config_class_scores_low(self):
+        w = repo_anchor_router._path_weight("src/main/java/com/x/config/XxlJobConfig.java")
+        self.assertEqual(w, repo_anchor_router.WEIGHT_CONFIG)
+
+    def test_markdown_doc_scores_lowest(self):
+        w = repo_anchor_router._path_weight("docs/topic-backend-design.md")
+        self.assertEqual(w, repo_anchor_router.WEIGHT_DOC)
 
 
 class RouteIncidentTest(unittest.TestCase):
@@ -73,8 +108,14 @@ class RouteIncidentTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _fake_response(self, repos):
-        payload = {"items": [{"repository": {"full_name": r}} for r in repos]}
+    def _fake_response(self, items):
+        # items: [(repo_full_name, file_path), ...]
+        payload = {
+            "items": [
+                {"repository": {"full_name": repo}, "path": path}
+                for repo, path in items
+            ]
+        }
 
         class _Resp:
             def __enter__(self):
@@ -88,10 +129,16 @@ class RouteIncidentTest(unittest.TestCase):
 
         return _Resp()
 
+    IMPL_ITEMS = [
+        ("KikaTech/backend-aicompanion", "src/main/java/com/x/module/ai/AiAssistantService.java"),
+        ("KikaTech/backend-aicompanion", "src/main/java/com/x/module/ai/AiAssistantController.java"),
+        ("KikaTech/backend-aicompanion", "src/main/java/com/x/module/ai/AiAssistantMapper.java"),
+    ]
+
     def test_routes_by_code_search(self):
         with mock.patch.object(
             repo_anchor_router.urllib.request, "urlopen",
-            return_value=self._fake_response(["KikaTech/backend-aicompanion"]),
+            return_value=self._fake_response(self.IMPL_ITEMS),
         ):
             decision = repo_anchor_router.route_incident(
                 "Throws an exception : request_path=/v3/api/aiAssistant/chat",
@@ -101,10 +148,26 @@ class RouteIncidentTest(unittest.TestCase):
         self.assertIsNotNone(decision)
         self.assertEqual(decision["repository"], "KikaTech/backend-aicompanion")
 
+    def test_config_only_hits_do_not_route(self):
+        items = [
+            ("KikaTech/backend-aicompanion", "src/main/resources/application-prod.yml"),
+            ("KikaTech/backend-aicompanion", "docs/design.md"),
+        ]
+        with mock.patch.object(
+            repo_anchor_router.urllib.request, "urlopen",
+            return_value=self._fake_response(items),
+        ):
+            decision = repo_anchor_router.route_incident(
+                "Throws an exception : request_path=/v3/api/aiAssistant/chat",
+                [], [], "token",
+                scope_path=self.scope_path, cache_path=self.cache_path,
+            )
+        self.assertIsNone(decision)
+
     def test_second_call_uses_cache_without_http(self):
         with mock.patch.object(
             repo_anchor_router.urllib.request, "urlopen",
-            return_value=self._fake_response(["KikaTech/backend-aicompanion"]),
+            return_value=self._fake_response(self.IMPL_ITEMS),
         ) as http:
             repo_anchor_router.route_incident(
                 "request_path=/v3/api/aiAssistant/chat", [], [], "token",

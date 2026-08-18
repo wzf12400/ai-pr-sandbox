@@ -29,6 +29,30 @@ MAX_QUERIES = 4
 HTTP_TIMEOUT_SECONDS = 15
 USER_AGENT = "ai-pr-sandbox-anchor-router"
 
+# 路由采纳门槛：总分 >= MIN_SCORE 且实现类文件 >= MIN_IMPL_FILES。
+# 防止"调用方仓库"（只在配置/文档里提到服务名）被误判为属主。
+MIN_SCORE = 5.0
+MIN_IMPL_FILES = 2
+
+# 命中文件权重：实现代码 3 / 普通源码 2 / 配置 1 / 文档 0.5
+WEIGHT_IMPLEMENTATION = 3.0
+WEIGHT_SOURCE = 2.0
+WEIGHT_CONFIG = 1.0
+WEIGHT_DOC = 0.5
+
+IMPL_PATH_PATTERN = re.compile(
+    r"controller|service|mapper|repository|model|dto|vo|handler|provider|impl|cmd|module",
+    re.IGNORECASE,
+)
+SOURCE_FILE_PATTERN = re.compile(r"\.(java|kt|scala|py|ts|tsx|js|jsx|go|rb|php|cs)$", re.IGNORECASE)
+CONFIG_PATH_PATTERN = re.compile(
+    r"src/main/resources/|src/test/resources/|\.(ya?ml|properties|xml|gradle|toml|ini|conf)$"
+    r"|pom\.xml$|package\.json$|Dockerfile$",
+    re.IGNORECASE,
+)
+CONFIG_CLASS_PATTERN = re.compile(r"(?:Config|Configuration|Properties)\.(java|kt)$")
+DOC_PATH_PATTERN = re.compile(r"\.(md|markdown|txt|rst|adoc)$|^docs?/", re.IGNORECASE)
+
 REQUEST_PATH_PATTERN = re.compile(r"\brequest_path\s*=\s*(?P<path>/[^\s?;,|]+)")
 STACK_FRAME_PATTERN = re.compile(
     r"\bat\s+(?:[a-z][\w$]*\.)+(?P<class>[A-Z][A-Za-z0-9_$]*)\."
@@ -109,7 +133,7 @@ def _load_cache(path: Path = CACHE_PATH) -> Dict[str, Any]:
                 return payload
     except (OSError, ValueError):
         pass
-    return {"version": 1, "anchors": {}}
+    return {"version": 2, "anchors": {}}
 
 
 def _save_cache(cache: Dict[str, Any], path: Path = CACHE_PATH) -> None:
@@ -123,6 +147,22 @@ def _save_cache(cache: Dict[str, Any], path: Path = CACHE_PATH) -> None:
         pass
 
 
+def _path_weight(path: str) -> float:
+    """按命中文件类型给权重：实现代码 > 普通源码 > 配置 > 文档。
+
+    服务名天然会出现在调用方的配置/文档里，只有实现代码才算"拥有"。
+    """
+    if DOC_PATH_PATTERN.search(path):
+        return WEIGHT_DOC
+    if CONFIG_PATH_PATTERN.search(path) or CONFIG_CLASS_PATTERN.search(path):
+        return WEIGHT_CONFIG
+    if SOURCE_FILE_PATTERN.search(path):
+        if IMPL_PATH_PATTERN.search(path):
+            return WEIGHT_IMPLEMENTATION
+        return WEIGHT_SOURCE
+    return WEIGHT_CONFIG
+
+
 class SearchBudgetExceeded(RuntimeError):
     pass
 
@@ -133,13 +173,16 @@ def _search_code(
     token: str,
     cache: Dict[str, Any],
     cache_path: Path = CACHE_PATH,
-) -> Dict[str, int]:
-    """返回 {repository: 命中数}。带缓存；限流/失败抛 SearchBudgetExceeded 让上层降级。"""
+) -> Dict[str, Dict[str, Any]]:
+    """返回 {repository: {"score": 加权分, "impl": 实现文件数}}。带缓存；限流/失败抛 SearchBudgetExceeded。"""
     cached = cache["anchors"].get(anchor)
     if isinstance(cached, dict) and time.time() - cached.get("at", 0) < CACHE_TTL_SECONDS:
-        return {str(k): int(v) for k, v in (cached.get("hits") or {}).items()}
+        hits = cached.get("hits") or {}
+        # 只认 v2 格式（值为 dict）；旧的计次格式视为过期重新搜
+        if all(isinstance(v, dict) for v in hits.values()):
+            return {str(k): dict(v) for k, v in hits.items()}
 
-    hits: Dict[str, int] = {}
+    hits: Dict[str, Dict[str, Any]] = {}
     for org in orgs:
         query = urllib.parse.quote(f"{anchor} org:{org}")
         request = urllib.request.Request(
@@ -162,23 +205,31 @@ def _search_code(
             raise SearchBudgetExceeded(f"code search error: {exc}") from exc
         for item in payload.get("items") or []:
             repo = (item.get("repository") or {}).get("full_name")
-            if repo:
-                hits[repo] = hits.get(repo, 0) + 1
+            path = str(item.get("path") or "")
+            if not repo:
+                continue
+            entry = hits.setdefault(repo, {"score": 0.0, "impl": 0})
+            weight = _path_weight(path)
+            entry["score"] += weight
+            if weight >= WEIGHT_SOURCE:
+                entry["impl"] += 1
 
     cache["anchors"][anchor] = {"at": time.time(), "hits": hits}
     _save_cache(cache, cache_path)
     return hits
 
 
-def decide(hits_per_anchor: Dict[str, Dict[str, int]], authorized: List[str]) -> Optional[Dict[str, Any]]:
-    """汇总各锚点命中：唯一领先仓库才路由，平票/无命中返回 None。"""
-    totals: Dict[str, int] = {}
+def decide(hits_per_anchor: Dict[str, Dict[str, Dict[str, Any]]], authorized: List[str]) -> Optional[Dict[str, Any]]:
+    """汇总各锚点加权命中：唯一领先且过门槛（分数+实现文件数）才路由。"""
+    totals: Dict[str, float] = {}
+    impl_counts: Dict[str, int] = {}
     evidence: Dict[str, str] = {}
     for anchor, hits in hits_per_anchor.items():
-        for repo, count in hits.items():
+        for repo, entry in hits.items():
             if repo not in authorized:
                 continue
-            totals[repo] = totals.get(repo, 0) + count
+            totals[repo] = totals.get(repo, 0.0) + float(entry.get("score", 0.0))
+            impl_counts[repo] = impl_counts.get(repo, 0) + int(entry.get("impl", 0))
             evidence.setdefault(repo, anchor)
     if not totals:
         return None
@@ -186,11 +237,17 @@ def decide(hits_per_anchor: Dict[str, Dict[str, int]], authorized: List[str]) ->
     if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
         return None  # 平票不敢猜
     winner, score = ranked[0]
+    impl = impl_counts.get(winner, 0)
+    if score < MIN_SCORE or impl < MIN_IMPL_FILES:
+        return None  # 证据太弱（只有配置/文档提及），宁可不派也不派错
     return {
         "repository": winner,
         "anchor": evidence[winner],
-        "hit_count": score,
-        "basis": f"code anchor '{evidence[winner]}' found in {winner} ({score} hits)",
+        "hit_count": round(score, 1),
+        "basis": (
+            f"code anchor '{evidence[winner]}' found in {winner} "
+            f"(weighted score {score:.1f}, {impl} implementation files)"
+        ),
     }
 
 
@@ -213,7 +270,7 @@ def route_incident(
         return None
     orgs = sorted({repo.split("/", 1)[0] for repo in authorized})
     cache = _load_cache(cache_path)
-    hits_per_anchor: Dict[str, Dict[str, int]] = {}
+    hits_per_anchor: Dict[str, Dict[str, Dict[str, Any]]] = {}
     queries = 0
     for anchor in anchors:
         if queries >= MAX_QUERIES:
