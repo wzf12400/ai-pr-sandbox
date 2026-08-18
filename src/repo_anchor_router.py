@@ -64,6 +64,10 @@ SERVICE_NAME_PATTERN = re.compile(r"\bbackend-[a-z0-9-]{2,40}\b")
 GENERIC_SEGMENTS = {
     "api", "v1", "v2", "v3", "get", "list", "query", "page", "info",
     "detail", "save", "update", "delete", "check", "status", "config",
+    # REST 路径里的通用资源词，几乎每个仓库都有，没有区分度
+    "category", "resources", "resource", "items", "data", "result",
+    # 错误摘要里的通用技术词
+    "contenttype", "totallines",
 }
 GENERIC_CLASSES = {
     "Controller", "Service", "ServiceImpl", "Repository", "Mapper",
