@@ -91,11 +91,20 @@ def _auto_scan_loop(interval: int) -> None:
                 }
             )
         except Exception as exc:  # noqa: BLE001 - the loop must never die
+            message = str(exc)
+            if isinstance(exc, jira_connector.JiraAuthError):
+                try:
+                    from src import jira_session_refresh
+
+                    jira_session_refresh.refresh_session()
+                    message += "（会话已自动续期，下一轮恢复正常）"
+                except Exception as refresh_exc:  # noqa: BLE001
+                    message += f"（自动续期失败：{refresh_exc}）"
             _AUTO_SCAN_STATE.update(
                 {
                     "lastRunAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "lastResult": None,
-                    "lastError": str(exc),
+                    "lastError": message,
                 }
             )
         time.sleep(interval)

@@ -25,6 +25,8 @@ export type IncidentView = {
   strategy: string;
   services: string[];
   affectedEndpoints: string[];
+  codeLocations?: string[];
+  mergedIncidentRefs?: string[];
   affectedUserCount: number | null;
   summary: string;
   members: IncidentMember[];

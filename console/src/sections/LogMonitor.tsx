@@ -317,6 +317,22 @@ function IncidentRow({ incident }: { incident: IncidentView }) {
               </div>
             </div>
           )}
+          {incident.affectedEndpoints.length === 0 &&
+            (incident.codeLocations?.length ?? 0) > 0 && (
+              <div className="mt-3">
+                <span className="text-[12px] text-muted-foreground">出错位置</span>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {(incident.codeLocations ?? []).map((loc) => (
+                    <span
+                      key={loc}
+                      className="rounded border border-border bg-white px-1.5 py-0.5 font-mono text-[11px]"
+                    >
+                      {loc}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           <div className="mt-3">
             <span className="text-[12px] text-muted-foreground">
               事件明细（{incident.members.length} 条，已脱敏）
