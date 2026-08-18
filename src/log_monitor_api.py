@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,7 +32,8 @@ PORT = 8099
 FETCH_SIZE = 100
 MAX_BATCHES = 5
 TARGET_ERROR_EVENTS = 50
-CACHE_TTL_SECONDS = 30
+CACHE_TTL_SECONDS = 300
+AUTO_SCAN_INTERVAL = 300
 MAX_MESSAGE = 240
 
 CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "http://127.0.0.1:8080")
@@ -46,6 +48,7 @@ DEFAULT_RULES = {
 }
 
 _cache: Dict[str, Any] = {"at": 0.0, "payload": None}
+_scan_lock = threading.Lock()
 
 
 def _text(value: Any, limit: int = MAX_MESSAGE) -> str:
@@ -220,6 +223,9 @@ def _scan_payload() -> Dict[str, Any]:
             for m in members
             if isinstance(m, dict) and isinstance(m.get("event"), dict)
         ]
+        code_locations = sorted(
+            {_code_location(m) for m in members if isinstance(m, dict)} - {""}
+        )[:5]
         member_views = []
         for m in members[:20]:
             if not isinstance(m, dict):
@@ -243,11 +249,14 @@ def _scan_payload() -> Dict[str, Any]:
                 "strategy": _text(grouping.get("strategy"), 40),
                 "services": member_services[:5],
                 "affectedEndpoints": list(statistics.get("affected_endpoints") or [])[:8],
+                "codeLocations": code_locations,
                 "affectedUserCount": statistics.get("affected_user_count"),
                 "summary": summaries[0] if summaries else "",
                 "members": member_views,
             }
         )
+
+    merged_views = _merge_views_by_issue_signature(incidents, incident_views)
 
     return {
         "status": "ok",
@@ -275,9 +284,90 @@ def _scan_payload() -> Dict[str, Any]:
             "from": min(timestamps) if timestamps else None,
             "to": max(timestamps) if timestamps else None,
         },
-        "incidents": incident_views,
-        "automation": _apply_automation_rules(incident_views),
+        "incidents": merged_views,
+        "automation": _apply_automation_rules(merged_views),
     }
+
+
+def _code_location(member: Dict[str, Any]) -> str:
+    """从脱敏事件提取代码位置：优先业务类.方法，退回 日志类:行号。"""
+    target = member.get("target") if isinstance(member.get("target"), dict) else {}
+    business_class = _text(target.get("business_class"), 120)
+    business_method = _text(target.get("business_method"), 60)
+    if business_class:
+        simple = business_class.rsplit(".", 1)[-1]
+        return f"{simple}.{business_method}" if business_method else simple
+    logger_class = _text(target.get("logger_class"), 120)
+    if logger_class:
+        simple = logger_class.rsplit(".", 1)[-1]
+        line = _text(str(target.get("logger_line") or ""), 10)
+        return f"{simple}:{line}" if line else simple
+    return ""
+
+
+def _merge_views_by_issue_signature(
+    incidents: List[Dict[str, Any]], incident_views: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """把"同一问题"（issue 指纹相同）的跨 trace 聚类在展示层合并。
+
+    trace_ref 策略让每次请求各自成组；相同接口反复报相同错误时，
+    面板会出现大量内容一样的 1 事件聚类。这里按
+    kibana_incident_grouper.issue_signature 的指纹合并展示，
+    底层 incident 的审计结构保持不变。
+    """
+    buckets: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for incident, view in zip(incidents[:50], incident_views):
+        fingerprint = ""
+        try:
+            signature = kibana_incident_grouper.issue_signature(incident)
+            if signature.get("eligible"):
+                fingerprint = _text(signature.get("fingerprint"), 60)
+        except ValueError:
+            fingerprint = ""
+        key = fingerprint or f"raw:{view['incidentRef']}"
+        bucket = buckets.get(key)
+        if bucket is None:
+            bucket = dict(view)
+            bucket["mergedIncidentRefs"] = [view["incidentRef"]]
+            if fingerprint:
+                # 控制面只认 incident_ref:/event_ref: 前缀；复用指纹的哈希部分，
+                # 保证同一问题的 ref 跨扫描稳定（server 端据此去重复用任务）
+                bucket["incidentRef"] = "incident_ref:" + fingerprint.removeprefix(
+                    "issue_ref:"
+                )
+                bucket["strategy"] = "issue_signature"
+            buckets[key] = bucket
+            order.append(key)
+            continue
+        bucket["eventCount"] += view.get("eventCount", 0)
+        first_seen = [v for v in (bucket.get("firstSeenAt"), view.get("firstSeenAt")) if v]
+        last_seen = [v for v in (bucket.get("lastSeenAt"), view.get("lastSeenAt")) if v]
+        if first_seen:
+            bucket["firstSeenAt"] = min(first_seen)
+        if last_seen:
+            bucket["lastSeenAt"] = max(last_seen)
+        bucket["services"] = sorted(
+            set(bucket.get("services") or []) | set(view.get("services") or [])
+        )[:5]
+        bucket["affectedEndpoints"] = sorted(
+            set(bucket.get("affectedEndpoints") or [])
+            | set(view.get("affectedEndpoints") or [])
+        )[:8]
+        bucket["codeLocations"] = sorted(
+            set(bucket.get("codeLocations") or [])
+            | set(view.get("codeLocations") or [])
+        )[:5]
+        users = [
+            u
+            for u in (bucket.get("affectedUserCount"), view.get("affectedUserCount"))
+            if isinstance(u, int)
+        ]
+        bucket["affectedUserCount"] = max(users) if users else None
+        merged_members = (bucket.get("members") or []) + (view.get("members") or [])
+        bucket["members"] = merged_members[:20]
+        bucket["mergedIncidentRefs"].append(view["incidentRef"])
+    return [buckets[key] for key in order]
 
 
 def _load_rules() -> Dict[str, Any]:
@@ -452,10 +542,7 @@ def _apply_automation_rules(
     return automation
 
 
-def _get_scan() -> Dict[str, Any]:
-    now = time.time()
-    if _cache["payload"] is not None and now - _cache["at"] < CACHE_TTL_SECONDS:
-        return _cache["payload"]
+def _run_scan() -> Dict[str, Any]:
     try:
         payload = _scan_payload()
     except Exception as exception:  # bounded: never leak internals
@@ -463,9 +550,50 @@ def _get_scan() -> Dict[str, Any]:
             "status": "error",
             "detail": f"扫描失败：{type(exception).__name__}",
         }
-    _cache["at"] = now
+    _cache["at"] = time.time()
     _cache["payload"] = payload
     return payload
+
+
+def _warming_payload() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "detail": "首次扫描进行中，约 1 分钟后自动展示",
+        "incidents": [],
+    }
+
+
+def _kick_background_scan() -> None:
+    if not _scan_lock.acquire(blocking=False):
+        return  # 已有扫描在跑
+
+    def _bg() -> None:
+        try:
+            _run_scan()
+        finally:
+            _scan_lock.release()
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+def _get_scan(force: bool = False) -> Dict[str, Any]:
+    if force:
+        with _scan_lock:
+            return _run_scan()
+    now = time.time()
+    cached = _cache["payload"]
+    if cached is not None and now - _cache["at"] < CACHE_TTL_SECONDS:
+        return cached
+    # 过期或无缓存：后台补扫，本次请求立刻返回，绝不让前端干等
+    _kick_background_scan()
+    return cached if cached is not None else _warming_payload()
+
+
+def _auto_scan_loop() -> None:
+    while True:
+        with _scan_lock:
+            _run_scan()
+        time.sleep(AUTO_SCAN_INTERVAL)
 
 
 _ISSUE_PATH = re.compile(
@@ -538,8 +666,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/log-monitor", "/log-monitor/scan"):
             self._send(200, _get_scan())
         elif self.path == "/log-monitor/refresh":
-            _cache["at"] = 0.0
-            self._send(200, _get_scan())
+            self._send(200, _get_scan(force=True))
         elif self.path == "/log-monitor/rules":
             rules = _load_rules()
             self._send(
@@ -633,8 +760,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    threading.Thread(target=_auto_scan_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"log monitor api on http://{HOST}:{PORT}/log-monitor")
+    print(
+        f"log monitor api on http://{HOST}:{PORT}/log-monitor"
+        f" (auto-scan every {AUTO_SCAN_INTERVAL}s)"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

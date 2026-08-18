@@ -127,6 +127,10 @@ def _validate_project(key: str, project: Dict[str, Any]) -> None:
 # HTTP
 
 
+class JiraAuthError(RuntimeError):
+    """会话失效（401/403 或被 SSO 网关重定向到登录页），需要刷新 Cookie。"""
+
+
 def _require_env() -> tuple[str, str]:
     base = os.environ.get(BASE_URL_ENV, "").strip().rstrip("/")
     cookie = os.environ.get(COOKIE_ENV, "").strip()
@@ -148,10 +152,22 @@ def _get_json(path: str) -> Any:
     )
     try:
         with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
-            return json.loads(response.read().decode("utf-8"))
+            final_url = response.geturl()
+            if "login" in final_url and "/rest/" not in final_url:
+                raise JiraAuthError(
+                    f"Jira session expired (redirected to {final_url}); "
+                    f"refresh {COOKIE_ENV}"
+                )
+            try:
+                return json.loads(response.read().decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                raise JiraAuthError(
+                    f"Jira returned non-JSON (likely SSO login page); "
+                    f"refresh {COOKIE_ENV}"
+                ) from exc
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
-            raise RuntimeError(
+            raise JiraAuthError(
                 f"Jira session rejected (HTTP {exc.code}); refresh {COOKIE_ENV}"
             ) from exc
         raise RuntimeError(f"Jira API error: HTTP {exc.code} for {path}") from exc

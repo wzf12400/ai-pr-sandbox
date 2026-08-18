@@ -31,8 +31,13 @@
 
 ## 当前状态
 
-- **全部代码已合并到 main**（PR #54、#55 均已 MERGED）。工作区干净。
-- **运行中的服务**：控制面 8080、worker、日志监控 8099、vite 7100（vite 由 Kimi Work 管生命周期）。
+- **PR #64（Jira 接入）已合并到 main**。当前修复分支 fix/monitor-stability 待开 PR。
+- **2026-08-17/18 稳定性修复**（在本分支）：
+  - log_monitor_api：缓存 TTL 30s→300s + 后台自动扫描线程（修复前端轮询把扫描堆死）；聚类展示层按 issue_signature 指纹跨 trace 合并（修复同一错误一请求一聚类）；合并 ref 保留 incident_ref: 前缀（修复控制面 400 拒单）；无 request_path 时展示 codeLocations（出错类.方法）
+  - jira_connector：新增 JiraAuthError（401/403/SSO 重定向/非 JSON 统一归类）
+  - jira_session_refresh（新）：会话过期自动续期——WebBridge 驱动 Chrome 走 Jira 原生表单登录（JIRA_USERNAME/JIRA_PASSWORD 在 .env），提取 Cookie 写回 .env 并热更新进程环境；jira_monitor_api 自动扫描遇 JiraAuthError 自动触发（冷却 10 分钟）
+  - 关键发现：公网网关下 curl 自己表单登录的会话对 REST 无效，必须用浏览器建会话后导出 Cookie（指纹绑定，原因未深究）；Basic Auth 被网关拦截不可行
+- **运行中的服务**：控制面 8080、worker、日志监控 8099（带自动扫描）、Jira 监控 8098（带自动扫描+自动续期）、vite 7100。
 - **Issue 发布门禁已开启**；**Copilot 代码修改已开启**（`WORKER_CODE_MODE=publish_pr`）。
 - **待处理的开放 PR（都是 Copilot 生成的测试 PR，等用户决定）**：
   - #49（power 幂运算，与 #48 关联，是调试期的重复产物）
@@ -40,7 +45,7 @@
   - #53（abs 绝对值，Issue #52）
   - #57（Jira 来源首单：KEYB-3784 direct boot 新需求，Issue #56，端到端自动化验证产物）
 - **测试残留 Issue**：#44-#48 已于 2026-08-14 关闭清理完毕（#48 关闭后 PR #49 已无关联 Issue）。
-- 测试基线：Java 38 个全绿；Python 401 个全绿。
+- 测试基线：Java 38 个全绿；Python 407+ 个全绿。
 
 ## JIRA 接入（进行中，2026-08-14）
 
