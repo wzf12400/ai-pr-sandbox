@@ -443,6 +443,23 @@ def _dispatch_incident_task(
     base = _loopback_control_plane_url()
     if base is None:
         return {"result": "skipped", "detail": "控制面地址不是本机回环，已跳过"}
+    # 证据路由：锚点代码搜索（失败时静默降级到控制面关键词匹配）
+    repository_hint = None
+    routing_token = os.environ.get("GITHUB_ROUTING_TOKEN", "").strip()
+    if routing_token:
+        try:
+            from src import repo_anchor_router
+
+            decision = repo_anchor_router.route_incident(
+                incident_view.get("summary") or "",
+                incident_view.get("affectedEndpoints") or [],
+                incident_view.get("services") or [],
+                routing_token,
+            )
+            if decision:
+                repository_hint = decision["repository"]
+        except Exception:  # noqa: BLE001 - 路由失败不阻断派单
+            repository_hint = None
     payload = {
         "sourceType": "LOG",
         "input": (incident_view.get("summary") or "")[:400]
@@ -466,6 +483,8 @@ def _dispatch_incident_task(
             )[:240],
         },
     }
+    if repository_hint:
+        payload["repositoryHint"] = repository_hint
     request = urllib.request.Request(
         f"{base}/api/tasks",
         data=json.dumps(payload).encode("utf-8"),

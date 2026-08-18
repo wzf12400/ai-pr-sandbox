@@ -47,3 +47,11 @@ app:
   repository-catalog:
     - repository: wzf12400/ai-pr-sandbox
       keywords: ["测试仓库", "计算器", "加法", "减法", "乘法", "除法", "calculator", "divide", "sandbox"]
+    - repository: KikaTech/backend-aicompanion
+      keywords: ["aiassistant", "ai陪伴", "陪伴", "companion", "聊天", "chat", "积分", "bubble"]
+    - repository: KikaTech/frontend-aicompanion
+      keywords: ["ai陪伴前端", "companion前端", "陪伴页面", "聊天页面", "对话界面"]
+    - repository: KikaTech/kika-global-studio
+      keywords: ["wallpaper", "壁纸", "sticker", "studio", "theme", "主题", "icon", "s3"]
+    - repository: KikaTech/kika-global-studio-front
+      keywords: ["官网", "落地页", "landing", "下载页"]

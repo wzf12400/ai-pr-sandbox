@@ -125,15 +125,27 @@ public class TaskService {
             );
         }
 
-        RepositoryMatch match = jiraIssue == null
-                ? repositoryMatcher.match(sanitizedInput)
-                : new RepositoryMatch(
-                        RepositoryMatch.Status.RESOLVED,
-                        jiraIssue.resolvedRepository(),
-                        "jira deterministic mapping: " + jiraIssue.mappingBasis(),
-                        100,
-                        List.of(jiraIssue.resolvedRepository())
-                );
+        RepositoryMatch match;
+        if (jiraIssue != null) {
+            match = new RepositoryMatch(
+                    RepositoryMatch.Status.RESOLVED,
+                    jiraIssue.resolvedRepository(),
+                    "jira deterministic mapping: " + jiraIssue.mappingBasis(),
+                    100,
+                    List.of(jiraIssue.resolvedRepository())
+            );
+        } else if (request.repositoryHint() != null
+                && repositoryMatcher.isAuthorized(request.repositoryHint())) {
+            match = new RepositoryMatch(
+                    RepositoryMatch.Status.RESOLVED,
+                    request.repositoryHint(),
+                    "evidence-based repository hint from source monitor",
+                    100,
+                    List.of(request.repositoryHint())
+            );
+        } else {
+            match = repositoryMatcher.match(sanitizedInput);
+        }
         String requirement = sanitizedInput;
         String sourceReference = logIncident != null
                 ? logIncident.sourceReference()

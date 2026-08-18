@@ -11,6 +11,42 @@
         "calculator",
         "sandbox"
       ]
+    },
+    {
+      "repository": "KikaTech/backend-aicompanion",
+      "enabled": true,
+      "default_branch": "master",
+      "labels": [
+        "ai陪伴",
+        "后端"
+      ]
+    },
+    {
+      "repository": "KikaTech/frontend-aicompanion",
+      "enabled": true,
+      "default_branch": "master",
+      "labels": [
+        "ai陪伴",
+        "前端"
+      ]
+    },
+    {
+      "repository": "KikaTech/kika-global-studio",
+      "enabled": true,
+      "default_branch": "master",
+      "labels": [
+        "studio",
+        "后端"
+      ]
+    },
+    {
+      "repository": "KikaTech/kika-global-studio-front",
+      "enabled": true,
+      "default_branch": "main",
+      "labels": [
+        "studio",
+        "前端"
+      ]
     }
   ],
   "limits": {
