@@ -233,6 +233,16 @@ class JqlAndWatermarkTest(unittest.TestCase):
 class FallbackRoutingTest(unittest.TestCase):
     """route_issue_with_fallbacks：确定性失败后的锚点/AI 兜底链。"""
 
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cache_path = Path(self.tmp.name) / "routing-cache.json"
+
+    def _route(self, issue, project):
+        return jira_connector.route_issue_with_fallbacks(
+            issue, project, cache_path=self.cache_path
+        )
+
     def test_resolved_deterministically_skips_fallbacks(self):
         issue = make_issue(components=["前端"])
         project = dict(TWO_REPO_PROJECT, ai_routing=True)
@@ -240,7 +250,7 @@ class FallbackRoutingTest(unittest.TestCase):
             jira_connector, "_anchor_fallback",
             side_effect=AssertionError("should not run anchor stage"),
         ):
-            decision = jira_connector.route_issue_with_fallbacks(issue, project)
+            decision = self._route(issue, project)
         self.assertEqual(decision.status, "RESOLVED")
         self.assertEqual(decision.repository, "org/app-web")
 
@@ -254,7 +264,7 @@ class FallbackRoutingTest(unittest.TestCase):
         with mock.patch.object(
             jira_connector, "_anchor_fallback", return_value=None
         ), mock.patch.object(jira_connector, "_ai_fallback", return_value=ai_result):
-            decision = jira_connector.route_issue_with_fallbacks(issue, project)
+            decision = self._route(issue, project)
         self.assertEqual(decision.status, "RESOLVED")
         self.assertEqual(decision.repository, "org/app-server")
         self.assertEqual(decision.confidence, 80)
@@ -265,7 +275,7 @@ class FallbackRoutingTest(unittest.TestCase):
         with mock.patch.object(
             jira_connector, "_anchor_fallback", return_value=None
         ), mock.patch.object(jira_connector, "_ai_fallback", return_value=None):
-            decision = jira_connector.route_issue_with_fallbacks(issue, project)
+            decision = self._route(issue, project)
         self.assertEqual(decision.status, "NEEDS_CONTEXT")
 
     def test_ai_fallback_disabled_without_project_flag(self):
@@ -276,7 +286,7 @@ class FallbackRoutingTest(unittest.TestCase):
         ), mock.patch.dict("os.environ", {
             "AI_BASE_URL": "https://x", "AI_API_KEY": "k"
         }):
-            decision = jira_connector.route_issue_with_fallbacks(issue, TWO_REPO_PROJECT)
+            decision = self._route(issue, TWO_REPO_PROJECT)
         self.assertEqual(decision.status, "NEEDS_CONTEXT")
 
     def test_fallback_exception_never_propagates(self):
@@ -285,7 +295,7 @@ class FallbackRoutingTest(unittest.TestCase):
         with mock.patch.object(
             jira_connector, "_anchor_fallback", side_effect=RuntimeError("boom")
         ):
-            decision = jira_connector.route_issue_with_fallbacks(issue, project)
+            decision = self._route(issue, project)
         self.assertEqual(decision.status, "NEEDS_CONTEXT")
 
     def test_anchor_fallback_runs_before_ai(self):
@@ -301,9 +311,77 @@ class FallbackRoutingTest(unittest.TestCase):
             jira_connector, "_ai_fallback",
             side_effect=AssertionError("AI must not run after anchor hit"),
         ):
-            decision = jira_connector.route_issue_with_fallbacks(issue, project)
+            decision = self._route(issue, project)
         self.assertEqual(decision.repository, "org/app-server")
         self.assertEqual(decision.confidence, 95)
+
+    def _routed_once(self, tmp_dir, summary="系统有问题"):
+        """跑第一次路由并写入缓存，返回 (issue, project, cache_path)。"""
+        cache_path = Path(tmp_dir) / "routing-cache.json"
+        project = dict(TWO_REPO_PROJECT, ai_routing=True)
+        issue = make_issue(summary=summary, description="请看看")
+        ai_result = jira_connector.RouteDecision(
+            "RESOLVED", repository="org/app-server",
+            basis="ai classification (confidence 80): x", confidence=80,
+        )
+        with mock.patch.object(
+            jira_connector, "_anchor_fallback", return_value=None
+        ), mock.patch.object(jira_connector, "_ai_fallback", return_value=ai_result):
+            first = jira_connector.route_issue_with_fallbacks(
+                issue, project, cache_path=cache_path
+            )
+        self.assertEqual(first.repository, "org/app-server")
+        return issue, project, cache_path
+
+    def test_second_run_uses_cache_without_stages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            issue, project, cache_path = self._routed_once(tmp)
+            with mock.patch.object(
+                jira_connector, "_anchor_fallback",
+                side_effect=AssertionError("cached: must not re-run anchor"),
+            ), mock.patch.object(
+                jira_connector, "_ai_fallback",
+                side_effect=AssertionError("cached: must not re-run AI"),
+            ):
+                second = jira_connector.route_issue_with_fallbacks(
+                    issue, project, cache_path=cache_path
+                )
+            self.assertEqual(second.repository, "org/app-server")
+            self.assertEqual(second.confidence, 80)
+
+    def test_changed_summary_invalidates_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _issue, project, cache_path = self._routed_once(tmp)
+            changed = make_issue(summary="完全另一个问题", description="请看看")
+            with mock.patch.object(
+                jira_connector, "_anchor_fallback", return_value=None
+            ), mock.patch.object(
+                jira_connector, "_ai_fallback", return_value=None
+            ) as ai_spy:
+                decision = jira_connector.route_issue_with_fallbacks(
+                    changed, project, cache_path=cache_path
+                )
+            self.assertEqual(decision.status, "NEEDS_CONTEXT")
+            self.assertTrue(ai_spy.called)  # 重新走了兜底链而不是用旧缓存
+
+    def test_cache_dropped_when_repo_unbound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            issue, _project, cache_path = self._routed_once(tmp)
+            # 项目绑定变了：org/app-server 已不在候选里（strict_matching 防止
+            # 单仓捷径直接拦截，确保走到缓存校验这一步）
+            new_project = dict(TWO_REPO_PROJECT, ai_routing=True,
+                               strict_matching=True, repositories=[FRONTEND])
+            with mock.patch.object(
+                jira_connector, "_anchor_fallback", return_value=None
+            ), mock.patch.object(
+                jira_connector, "_ai_fallback", return_value=None
+            ) as ai_spy:
+                decision = jira_connector.route_issue_with_fallbacks(
+                    issue, new_project, cache_path=cache_path
+                )
+            # 旧缓存的仓库已解绑，结论作废，重新走兜底（无信号 -> 待人工）
+            self.assertEqual(decision.status, "NEEDS_CONTEXT")
+            self.assertTrue(ai_spy.called)
 
 
 if __name__ == "__main__":
