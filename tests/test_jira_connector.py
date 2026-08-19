@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from src import jira_connector
 
@@ -227,6 +228,82 @@ class JqlAndWatermarkTest(unittest.TestCase):
         self.assertFalse(jira_connector._issue_type_allowed(make_issue(issue_type="新需求"), project))
         # 未配置 issue_types 时全部放行
         self.assertTrue(jira_connector._issue_type_allowed(make_issue(issue_type="新需求"), TWO_REPO_PROJECT))
+
+
+class FallbackRoutingTest(unittest.TestCase):
+    """route_issue_with_fallbacks：确定性失败后的锚点/AI 兜底链。"""
+
+    def test_resolved_deterministically_skips_fallbacks(self):
+        issue = make_issue(components=["前端"])
+        project = dict(TWO_REPO_PROJECT, ai_routing=True)
+        with mock.patch.object(
+            jira_connector, "_anchor_fallback",
+            side_effect=AssertionError("should not run anchor stage"),
+        ):
+            decision = jira_connector.route_issue_with_fallbacks(issue, project)
+        self.assertEqual(decision.status, "RESOLVED")
+        self.assertEqual(decision.repository, "org/app-web")
+
+    def test_ai_fallback_resolves_when_enabled(self):
+        issue = make_issue(summary="系统有问题", description="请看看")
+        project = dict(TWO_REPO_PROJECT, ai_routing=True)
+        ai_result = jira_connector.RouteDecision(
+            "RESOLVED", repository="org/app-server",
+            basis="ai classification (confidence 80): x", confidence=80,
+        )
+        with mock.patch.object(
+            jira_connector, "_anchor_fallback", return_value=None
+        ), mock.patch.object(jira_connector, "_ai_fallback", return_value=ai_result):
+            decision = jira_connector.route_issue_with_fallbacks(issue, project)
+        self.assertEqual(decision.status, "RESOLVED")
+        self.assertEqual(decision.repository, "org/app-server")
+        self.assertEqual(decision.confidence, 80)
+
+    def test_no_fallback_signal_stays_needs_context(self):
+        issue = make_issue(summary="系统有问题", description="请看看")
+        project = dict(TWO_REPO_PROJECT, ai_routing=True)
+        with mock.patch.object(
+            jira_connector, "_anchor_fallback", return_value=None
+        ), mock.patch.object(jira_connector, "_ai_fallback", return_value=None):
+            decision = jira_connector.route_issue_with_fallbacks(issue, project)
+        self.assertEqual(decision.status, "NEEDS_CONTEXT")
+
+    def test_ai_fallback_disabled_without_project_flag(self):
+        issue = make_issue(summary="系统有问题", description="请看看")
+        # TWO_REPO_PROJECT 没有 ai_routing 字段 -> _ai_fallback 直接返回 None
+        with mock.patch.object(
+            jira_connector, "_anchor_fallback", return_value=None
+        ), mock.patch.dict("os.environ", {
+            "AI_BASE_URL": "https://x", "AI_API_KEY": "k"
+        }):
+            decision = jira_connector.route_issue_with_fallbacks(issue, TWO_REPO_PROJECT)
+        self.assertEqual(decision.status, "NEEDS_CONTEXT")
+
+    def test_fallback_exception_never_propagates(self):
+        issue = make_issue(summary="系统有问题", description="请看看")
+        project = dict(TWO_REPO_PROJECT, ai_routing=True)
+        with mock.patch.object(
+            jira_connector, "_anchor_fallback", side_effect=RuntimeError("boom")
+        ):
+            decision = jira_connector.route_issue_with_fallbacks(issue, project)
+        self.assertEqual(decision.status, "NEEDS_CONTEXT")
+
+    def test_anchor_fallback_runs_before_ai(self):
+        anchor_result = jira_connector.RouteDecision(
+            "RESOLVED", repository="org/app-server",
+            basis="code anchor 'x' found", confidence=95,
+        )
+        issue = make_issue(summary="系统有问题", description="请看看")
+        project = dict(TWO_REPO_PROJECT, ai_routing=True)
+        with mock.patch.object(
+            jira_connector, "_anchor_fallback", return_value=anchor_result
+        ), mock.patch.object(
+            jira_connector, "_ai_fallback",
+            side_effect=AssertionError("AI must not run after anchor hit"),
+        ):
+            decision = jira_connector.route_issue_with_fallbacks(issue, project)
+        self.assertEqual(decision.repository, "org/app-server")
+        self.assertEqual(decision.confidence, 95)
 
 
 if __name__ == "__main__":
