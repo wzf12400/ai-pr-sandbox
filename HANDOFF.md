@@ -1,6 +1,6 @@
 # AI Agent 控制台 · 接力文档
 
-> 更新时间：2026-08-19 11:20 ｜ 仓库：wzf12400/ai-pr-sandbox ｜ 工作区：/Users/zf/Desktop/ai-pr-sandbox
+> 更新时间：2026-08-19 11:55 ｜ 仓库：wzf12400/ai-pr-sandbox ｜ 工作区：/Users/zf/Desktop/ai-pr-sandbox
 > 新对话第一句：「读一下 HANDOFF.md 继续工作」
 
 ## 这个项目是什么
@@ -22,19 +22,17 @@ no external systems were called" —— **这是故意的，不是出错**。
 
 ## 待办（最重要的事）
 
-1. **等用户审批 PR #66**：https://github.com/wzf12400/ai-pr-sandbox/pull/66
-   「零配置仓库路由——日志锚点搜索 + Jira AI 画像分类」，5 个提交，全部测试绿。
+1. **等用户审批 PR #67**：https://github.com/wzf12400/ai-pr-sandbox/pull/67
+   「Jira 线 AI 画像分类路由 + 路由结论缓存」——PR #66 合并时这两个提交还没推上去，
+   单独补开的 PR（`src/repo_profiler.py` + Jira 三级路由链 + 路由结论缓存 + 本文档），
+   Python 437 个测试全绿。
 2. 用户批完后候选下一步：加固 Jira 会话自动续期（2026-08-19 手动救过一次，见排障备忘）。
 
 ## PR 状态
 
-- PR #64（Jira 接入）、#65（监控稳定性修复）：**已合并**
-- PR #66（路由方案）：**待用户审批**，分支 feat/anchor-routing，内容：
-  1. `src/repo_anchor_router.py`（新）+ Java hint 链路（锚点路由基础版）
-  2. 命中按文件类型加权 + 低分拦截
-  3. 通用词过滤修复（category/resources 误判）
-  4. `src/repo_profiler.py`（新）+ Jira 三级路由链（AI 画像分类）
-  5. Jira 路由结论缓存
+- PR #64（Jira 接入）、#65（监控稳定性修复）、**#66（路由方案前三提交）**：**已合并**
+- PR #66 只带走了前 3 个提交（锚点路由器 + 加权 + 通用词过滤），AI 画像分类和
+  路由缓存 2 个提交当时在本地没推上去，已补开 **PR #67 待审批**（分支 feat/jira-ai-routing）
 
 ## 路由方案架构（核心，勿推翻重来）
 
