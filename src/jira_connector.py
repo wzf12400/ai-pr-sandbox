@@ -58,6 +58,8 @@ MAX_INTERVAL_SECONDS = 3600
 KEYWORD_SCORE_PER_HIT = 25
 KEYWORD_RESOLVED_SCORE = 50
 KEYWORD_MIN_MARGIN = 25
+AI_ROUTE_MIN_CONFIDENCE = 70
+ANCHOR_ROUTE_CONFIDENCE = 95
 
 REQUEST_TYPE_MAP = {
     "bug": "Bug",
@@ -338,6 +340,206 @@ def route_issue(issue: Dict[str, Any], project: Dict[str, Any]) -> RouteDecision
 
 
 # ---------------------------------------------------------------------------
+# Fallback routing: anchor code search + AI profile classification
+#
+# route_issue stays pure/deterministic. route_issue_with_fallbacks layers two
+# evidence-based stages on top for issues that land on NEEDS_CONTEXT:
+#   2nd: anchor code search (when the issue text carries technical anchors)
+#   3rd: AI classification against auto-generated repo profiles
+# Both stages are fail-open: any error leaves the NEEDS_CONTEXT decision
+# untouched, so the worst case is "待人工" — never a wrong guess.
+
+JIRA_ROUTING_CACHE_PATH = Path(".issue-entry-state/jira-routing-cache.json")
+
+
+def _issue_signature(issue: Dict[str, Any]) -> str:
+    """标题+描述的指纹：内容没变就沿用上次的路由结论，变了才重新判。"""
+    import hashlib
+
+    fields = issue.get("fields") or {}
+    text = (fields.get("summary") or "") + "\n" + (fields.get("description") or "")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _routing_cache_load(path: Path = JIRA_ROUTING_CACHE_PATH) -> Dict[str, Any]:
+    try:
+        if path.is_file() and path.stat().st_size <= 1_000_000:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("issues"), dict):
+                return payload
+    except (OSError, ValueError):
+        pass
+    return {"version": 1, "issues": {}}
+
+
+def _routing_cache_save(cache: Dict[str, Any], path: Path = JIRA_ROUTING_CACHE_PATH) -> None:
+    try:
+        _atomic_write_json(path, cache)
+    except OSError:
+        pass
+
+
+def _routing_cache_hit(
+    issue: Dict[str, Any], candidates: List[str], path: Path
+) -> Optional[RouteDecision]:
+    key = issue.get("key") or ""
+    if not key:
+        return None
+    entry = _routing_cache_load(path)["issues"].get(key)
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("signature") != _issue_signature(issue):
+        return None  # 需求内容变了，重新判
+    repo = entry.get("repository")
+    if repo not in candidates:
+        return None  # 项目绑定的仓库变了，旧结论作废
+    return RouteDecision(
+        "RESOLVED",
+        repository=repo,
+        basis=str(entry.get("basis") or "")[:240],
+        confidence=int(entry.get("confidence") or 0),
+        candidates=candidates,
+    )
+
+
+def _routing_cache_store(
+    issue: Dict[str, Any], decision: RouteDecision, path: Path
+) -> None:
+    key = issue.get("key") or ""
+    if not key or decision.status != "RESOLVED":
+        return
+    cache = _routing_cache_load(path)
+    cache["issues"][key] = {
+        "signature": _issue_signature(issue),
+        "repository": decision.repository,
+        "basis": decision.basis,
+        "confidence": decision.confidence,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    _routing_cache_save(cache, path)
+
+
+def _ai_config_from_env() -> Optional[Dict[str, str]]:
+    base = os.environ.get("AI_BASE_URL", "").strip()
+    key = os.environ.get("AI_API_KEY", "").strip()
+    if not base or not key:
+        return None
+    return {
+        "base_url": base,
+        "api_key": key,
+        "model": os.environ.get("AI_MODEL", "ailemac/gpt-5-mini").strip(),
+        "safety_id": os.environ.get("AI_SAFETY_IDENTIFIER", "").strip(),
+    }
+
+
+def _anchor_fallback(
+    text: str, candidates: List[str]
+) -> Optional[RouteDecision]:
+    token = os.environ.get("GITHUB_ROUTING_TOKEN", "").strip()
+    if not token:
+        return None
+    try:
+        from src import repo_anchor_router
+
+        anchors = repo_anchor_router.extract_anchors(text, [], [])
+        if not anchors:
+            return None
+        orgs = sorted({repo.split("/", 1)[0] for repo in candidates})
+        cache = repo_anchor_router._load_cache()
+        hits_per_anchor: Dict[str, Any] = {}
+        for anchor in anchors[: repo_anchor_router.MAX_QUERIES]:
+            try:
+                hits_per_anchor[anchor] = repo_anchor_router._search_code(
+                    anchor, orgs, token, cache
+                )
+            except repo_anchor_router.SearchBudgetExceeded:
+                break
+        anchor_decision = repo_anchor_router.decide(hits_per_anchor, candidates)
+        if anchor_decision:
+            return RouteDecision(
+                "RESOLVED",
+                repository=anchor_decision["repository"],
+                basis=anchor_decision["basis"][:240],
+                confidence=ANCHOR_ROUTE_CONFIDENCE,
+                candidates=candidates,
+            )
+    except Exception:  # noqa: BLE001 - fail-open, deterministic path already answered
+        return None
+    return None
+
+
+def _ai_fallback(
+    issue: Dict[str, Any], project: Dict[str, Any], candidates: List[str]
+) -> Optional[RouteDecision]:
+    if not project.get("ai_routing"):
+        return None
+    ai = _ai_config_from_env()
+    if ai is None:
+        return None
+    fields = issue.get("fields") or {}
+    project_key = _text((fields.get("project") or {}).get("key"), 24)
+    try:
+        from src import repo_profiler
+
+        ai_decision = repo_profiler.classify_issue(
+            project_key,
+            _text(fields.get("summary"), MAX_SUMMARY_CHARS),
+            _text(fields.get("description")),
+            candidates,
+            ai,
+            min_confidence=AI_ROUTE_MIN_CONFIDENCE,
+        )
+    except Exception:  # noqa: BLE001 - fail-open
+        return None
+    if ai_decision is None:
+        return None
+    return RouteDecision(
+        "RESOLVED",
+        repository=ai_decision["repository"],
+        basis=ai_decision["basis"][:240],
+        confidence=ai_decision["confidence"],
+        candidates=candidates,
+    )
+
+
+def route_issue_with_fallbacks(
+    issue: Dict[str, Any],
+    project: Dict[str, Any],
+    cache_path: Path = JIRA_ROUTING_CACHE_PATH,
+) -> RouteDecision:
+    """确定性路由 + 证据兜底（锚点搜索 → AI 画像分类），结论按需求缓存。
+
+    兜底的置信度都低于 100，因此不会触发 auto_dispatch（该门槛要求 100），
+    只会在面板标出建议仓库，等人工确认或后续策略放开。同一条需求
+    （标题+描述不变）判过一次就固定，避免 AI 波动导致两次派到不同仓库。
+    """
+    decision = route_issue(issue, project)
+    if decision.status != "NEEDS_CONTEXT":
+        return decision
+    candidates = [entry["repository"] for entry in project["repositories"]]
+    cached = _routing_cache_hit(issue, candidates, cache_path)
+    if cached is not None:
+        return cached
+    fields = issue.get("fields") or {}
+    text = "\n".join(
+        part
+        for part in (fields.get("summary") or "", fields.get("description") or "")
+        if part
+    )[:MAX_FIELD_CHARS]
+    fallback: Optional[RouteDecision] = None
+    try:
+        fallback = _anchor_fallback(text, candidates)
+        if fallback is None:
+            fallback = _ai_fallback(issue, project, candidates)
+    except Exception:  # noqa: BLE001 - 兜底阶段永远不许炸掉主流程
+        fallback = None
+    if fallback is not None:
+        _routing_cache_store(issue, fallback, cache_path)
+        return fallback
+    return decision
+
+
+# ---------------------------------------------------------------------------
 # Mapping Jira issue -> minimized intake dict
 
 
@@ -529,7 +731,7 @@ def dispatch_issue(
             "detail": "敏感数据拦截: "
             + ", ".join(sorted(f.path for f in findings))[:200],
         }
-    decision = route_issue(issue, project)
+    decision = route_issue_with_fallbacks(issue, project)
     if decision.status != "RESOLVED":
         allowed = [r["repository"] for r in project["repositories"]]
         if repository_override and repository_override in allowed:
@@ -627,7 +829,7 @@ def poll(
                     + ", ".join(sorted(f"{f.path}" for f in findings))[:240],
                 )
             else:
-                decision = route_issue(issue, project)
+                decision = route_issue_with_fallbacks(issue, project)
             record: Dict[str, Any] = {
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "issue": key,

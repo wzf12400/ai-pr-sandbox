@@ -55,7 +55,8 @@
       ],
       "max_dispatch_per_poll": 1,
       "auto_dispatch": false,
-      "strict_matching": true
+      "strict_matching": true,
+      "ai_routing": true
     },
     "FF": {
       "enabled": true,
