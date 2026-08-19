@@ -349,6 +349,75 @@ def route_issue(issue: Dict[str, Any], project: Dict[str, Any]) -> RouteDecision
 # Both stages are fail-open: any error leaves the NEEDS_CONTEXT decision
 # untouched, so the worst case is "待人工" — never a wrong guess.
 
+JIRA_ROUTING_CACHE_PATH = Path(".issue-entry-state/jira-routing-cache.json")
+
+
+def _issue_signature(issue: Dict[str, Any]) -> str:
+    """标题+描述的指纹：内容没变就沿用上次的路由结论，变了才重新判。"""
+    import hashlib
+
+    fields = issue.get("fields") or {}
+    text = (fields.get("summary") or "") + "\n" + (fields.get("description") or "")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _routing_cache_load(path: Path = JIRA_ROUTING_CACHE_PATH) -> Dict[str, Any]:
+    try:
+        if path.is_file() and path.stat().st_size <= 1_000_000:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("issues"), dict):
+                return payload
+    except (OSError, ValueError):
+        pass
+    return {"version": 1, "issues": {}}
+
+
+def _routing_cache_save(cache: Dict[str, Any], path: Path = JIRA_ROUTING_CACHE_PATH) -> None:
+    try:
+        _atomic_write_json(path, cache)
+    except OSError:
+        pass
+
+
+def _routing_cache_hit(
+    issue: Dict[str, Any], candidates: List[str], path: Path
+) -> Optional[RouteDecision]:
+    key = issue.get("key") or ""
+    if not key:
+        return None
+    entry = _routing_cache_load(path)["issues"].get(key)
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("signature") != _issue_signature(issue):
+        return None  # 需求内容变了，重新判
+    repo = entry.get("repository")
+    if repo not in candidates:
+        return None  # 项目绑定的仓库变了，旧结论作废
+    return RouteDecision(
+        "RESOLVED",
+        repository=repo,
+        basis=str(entry.get("basis") or "")[:240],
+        confidence=int(entry.get("confidence") or 0),
+        candidates=candidates,
+    )
+
+
+def _routing_cache_store(
+    issue: Dict[str, Any], decision: RouteDecision, path: Path
+) -> None:
+    key = issue.get("key") or ""
+    if not key or decision.status != "RESOLVED":
+        return
+    cache = _routing_cache_load(path)
+    cache["issues"][key] = {
+        "signature": _issue_signature(issue),
+        "repository": decision.repository,
+        "basis": decision.basis,
+        "confidence": decision.confidence,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    _routing_cache_save(cache, path)
+
 
 def _ai_config_from_env() -> Optional[Dict[str, str]]:
     base = os.environ.get("AI_BASE_URL", "").strip()
@@ -433,16 +502,24 @@ def _ai_fallback(
     )
 
 
-def route_issue_with_fallbacks(issue: Dict[str, Any], project: Dict[str, Any]) -> RouteDecision:
-    """确定性路由 + 证据兜底（锚点搜索 → AI 画像分类）。
+def route_issue_with_fallbacks(
+    issue: Dict[str, Any],
+    project: Dict[str, Any],
+    cache_path: Path = JIRA_ROUTING_CACHE_PATH,
+) -> RouteDecision:
+    """确定性路由 + 证据兜底（锚点搜索 → AI 画像分类），结论按需求缓存。
 
     兜底的置信度都低于 100，因此不会触发 auto_dispatch（该门槛要求 100），
-    只会在面板标出建议仓库，等人工确认或后续策略放开。
+    只会在面板标出建议仓库，等人工确认或后续策略放开。同一条需求
+    （标题+描述不变）判过一次就固定，避免 AI 波动导致两次派到不同仓库。
     """
     decision = route_issue(issue, project)
     if decision.status != "NEEDS_CONTEXT":
         return decision
     candidates = [entry["repository"] for entry in project["repositories"]]
+    cached = _routing_cache_hit(issue, candidates, cache_path)
+    if cached is not None:
+        return cached
     fields = issue.get("fields") or {}
     text = "\n".join(
         part
@@ -456,7 +533,10 @@ def route_issue_with_fallbacks(issue: Dict[str, Any], project: Dict[str, Any]) -
             fallback = _ai_fallback(issue, project, candidates)
     except Exception:  # noqa: BLE001 - 兜底阶段永远不许炸掉主流程
         fallback = None
-    return fallback if fallback is not None else decision
+    if fallback is not None:
+        _routing_cache_store(issue, fallback, cache_path)
+        return fallback
+    return decision
 
 
 # ---------------------------------------------------------------------------
