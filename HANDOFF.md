@@ -1,164 +1,172 @@
 # AI Agent 控制台 · 接力文档
 
-> 更新时间：2026-08-14 14:35 ｜ 仓库：wzf12400/ai-pr-sandbox ｜ 工作区：/Users/zf/Desktop/ai-pr-sandbox
+> 更新时间：2026-08-19 11:20 ｜ 仓库：wzf12400/ai-pr-sandbox ｜ 工作区：/Users/zf/Desktop/ai-pr-sandbox
+> 新对话第一句：「读一下 HANDOFF.md 继续工作」
 
 ## 这个项目是什么
 
-企业内部 AI 代码变更 agent 的端到端闭环：
+企业内部 AI 代码变更 agent 的端到端闭环，两条输入线：
 
 ```
-自然语言 / 日志故障
-  → 控制面（Java Spring，8080）：脱敏 → 授权仓库目录匹配 → 任务落库 → Redis 队列
-  → worker（Python，持续模式）：GPT-5 mini 生成 Issue → 复核 → 真实发布到 GitHub
-  → 自动审批标签（ai-code-approved，策略钉哈希，只对新建 Issue）
-  → Copilot CLI（gpt-5.6-sol）在 .worker-repos 克隆里改代码 → 策略测试
-  → Draft PR（不自动合并，人工 review 收尾）
+日志线：Kibana/ES 错误日志 → 聚类 → 锚点代码搜索路由 → 建任务
+Jira 线：jira.xinmei365.com 新需求 → 确定性/锚点/AI 画像三级路由 → 建任务
+        ↓
+控制面（Java Spring，8080）→ Redis 队列 → worker → Issue → Copilot 改代码 → Draft PR
 ```
 
-## 目录结构
+**当前处于「纯路由观察期」**：只验证路由准不准，不发 Issue、不改代码、不开 PR。
+`.env` 里三个门禁都关着：`WORKER_ISSUE_PUBLICATION_ENABLED=false`、
+`WORKER_CODE_MODE=disabled`、`WORKER_CODE_AUTO_APPROVAL_ENABLED=false`（三个都要改 worker 才起得来）。
+任务走完路由后被 mock worker 安全拦截，状态 FAILED + "mock worker failed safely;
+no external systems were called" —— **这是故意的，不是出错**。
 
-| 路径 | 说明 |
-|---|---|
-| `control-plane/` | Java 21 + Spring Boot 控制面，端口 8080，MySQL + Redis |
-| `src/mock_task_worker.py` | Python worker（持续循环模式），跑完整流水线 |
-| `src/ai_issue_generator.py` | GPT-5 mini Issue 生成 + 复核（复核已放宽：主需求明确即可） |
-| `src/log_monitor_api.py` | 日志监控 API，端口 8099（Kibana/ES 扫描、聚类、自动化规则） |
-| `src/approved_issue_dispatcher.py` / `copilot_code_modifier.py` | Copilot 调度器与门禁（一次性 CLI 设计） |
-| `src/code_execution_preapproval.py` | 预审批策略（允许 LOG/JIRA/NATURAL_LANGUAGE） |
-| `console/` | React + Vite 前端（Codex 风格），dev 端口 7100 |
-| `.env` | 全部密钥（gitignored，600 权限），改它用 Bash printf |
-| `.worker-repos/ai-pr-sandbox` | worker 专用克隆，调度后自动复位到干净的 main |
+## 待办（最重要的事）
 
-## 当前状态
+1. **等用户审批 PR #66**：https://github.com/wzf12400/ai-pr-sandbox/pull/66
+   「零配置仓库路由——日志锚点搜索 + Jira AI 画像分类」，5 个提交，全部测试绿。
+2. 用户批完后候选下一步：加固 Jira 会话自动续期（2026-08-19 手动救过一次，见排障备忘）。
 
-- **PR #64（Jira 接入）已合并到 main**。当前修复分支 fix/monitor-stability 待开 PR。
-- **2026-08-17/18 稳定性修复**（在本分支）：
-  - log_monitor_api：缓存 TTL 30s→300s + 后台自动扫描线程（修复前端轮询把扫描堆死）；聚类展示层按 issue_signature 指纹跨 trace 合并（修复同一错误一请求一聚类）；合并 ref 保留 incident_ref: 前缀（修复控制面 400 拒单）；无 request_path 时展示 codeLocations（出错类.方法）
-  - jira_connector：新增 JiraAuthError（401/403/SSO 重定向/非 JSON 统一归类）
-  - jira_session_refresh（新）：会话过期自动续期——WebBridge 驱动 Chrome 走 Jira 原生表单登录（JIRA_USERNAME/JIRA_PASSWORD 在 .env），提取 Cookie 写回 .env 并热更新进程环境；jira_monitor_api 自动扫描遇 JiraAuthError 自动触发（冷却 10 分钟）
-  - 关键发现：公网网关下 curl 自己表单登录的会话对 REST 无效，必须用浏览器建会话后导出 Cookie（指纹绑定，原因未深究）；Basic Auth 被网关拦截不可行
-- **运行中的服务**：控制面 8080、worker、日志监控 8099（带自动扫描）、Jira 监控 8098（带自动扫描+自动续期）、vite 7100。
-- **Issue 发布门禁已开启**；**Copilot 代码修改已开启**（`WORKER_CODE_MODE=publish_pr`）。
-- **待处理的开放 PR（都是 Copilot 生成的测试 PR，等用户决定）**：
-  - #49（power 幂运算，与 #48 关联，是调试期的重复产物）
-  - #51（mod 取余，Issue #50）
-  - #53（abs 绝对值，Issue #52）
-  - #57（Jira 来源首单：KEYB-3784 direct boot 新需求，Issue #56，端到端自动化验证产物）
-- **测试残留 Issue**：#44-#48 已于 2026-08-14 关闭清理完毕（#48 关闭后 PR #49 已无关联 Issue）。
-- 测试基线：Java 38 个全绿；Python 407+ 个全绿。
+## PR 状态
 
-## JIRA 接入（进行中，2026-08-14）
+- PR #64（Jira 接入）、#65（监控稳定性修复）：**已合并**
+- PR #66（路由方案）：**待用户审批**，分支 feat/anchor-routing，内容：
+  1. `src/repo_anchor_router.py`（新）+ Java hint 链路（锚点路由基础版）
+  2. 命中按文件类型加权 + 低分拦截
+  3. 通用词过滤修复（category/resources 误判）
+  4. `src/repo_profiler.py`（新）+ Jira 三级路由链（AI 画像分类）
+  5. Jira 路由结论缓存
 
-目标平台：`https://jira.xinmei365.com`（钉钉 SSO 网关 + 后端就是 Kika JIRA 6.3.6，
-与 `10.11.11.156` 同版本同 build，疑为同一实例的内外网两个入口）。
-**未解之谜**：wzf/123456 网页登录成功，但 LAN 地址 Basic Auth 仍 401
-（AUTHENTICATED_FAILED，非验证码锁定）——不影响，认证走 Cookie 方案。
+## 路由方案架构（核心，勿推翻重来）
 
-认证方案：**浏览器 SSO 会话 Cookie**，已写入 `.env`
-（`JIRA_BASE_URL` / `JIRA_SESSION_COOKIE`，值含空格分号必须加双引号）。
-Cookie 失效后重新走 WebBridge 提取（Chrome 已装扩展，session 名 `jira-access-verify`）。
+用户明确否定关键词映射（Jira 24 中 1、日志 0% 命中），拍板「代码即真相」零配置方案：
 
-已完成（本工作区未提交）：
+### 日志线：锚点代码搜索（`src/repo_anchor_router.py`）
 
-- **勘察已跑通**：`python3 -m src.jira_connector survey` → 45 个项目 → `.jira-survey.json`。
-  优先级是中文：致命/严重/一般/提示；Issue 类型：缺陷/新需求/任务/Story/Epic 等。
-  KEYB（Keyboard及App）有 20 个组件、3816 个 Issue。
-- `src/jira_connector.py`：`survey` + `poll`（JQL watermark 增量 → intake 映射 →
-  敏感扫描 fail-closed → 确定性路由 → 影子日志；`--dispatch` 且 auto_dispatch=true
-  才真实建任务，仅 loopback）。**Issue 类型用客户端过滤**（`issue_types` 配置），
-  JQL 里过滤中文类型名会 400（"字段中没有 '缺陷'"），勿用。附件只留元数据。
-  中文类型映射已内置（缺陷→Bug、新需求→Feature）。
-- **真实 Bug 全链路验证通过**：KEYB-3858 映射正确、截图附件只留元数据、
-  敏感扫描 clean、单绑定路由 RESOLVED。
-- `control-plane/config/jira-projects.json`：映射配置骨架（SANDBOX 示例 disabled，
-  severity_map 已是中文优先级）。
-- 控制面 JIRA 证据通道：`JiraIssueRequest`（SANITIZED + key 格式 + 项目归属 +
-  https URL + resolvedRepository 必须在授权目录内），按 sourceReference 去重，
-  显式绑定仓库直通（跳过文本匹配器），`IssueProfile.JIRA_ISSUE`。
-- worker 接受 `JIRA` + `JIRA_ISSUE` profile。
-- 测试：Python 402 全绿（新增 21）；Java 38 全绿（旧 `keepsJiraDisconnected` 已替换）。
+- 从脱敏聚类提取锚点：接口路径段 / 驼峰标识符 / 栈帧类名 / 服务名
+  （GENERIC_SEGMENTS / GENERIC_CLASSES 过滤通用词）
+- GitHub code search API（`{anchor} org:{org}`）在授权组织内搜代码
+- **命中按文件类型加权**：实现代码(Controller/Service/Mapper/Model 等) 3 分、
+  普通源码 2 分、配置(yml/pom/Config 类) 1 分、文档 0.5 分
+- **采纳门槛**：总分 ≥5 且实现文件 ≥2，唯一领先才路由；平票/弱证据放弃（宁缺毋滥）
+- 缓存 7 天：`.issue-entry-state/log-routing-cache.json`（v2 加权格式）
+- 实测 8 条真实聚类：5 正确路由、3 合理放弃（属主未授权）、0 错判
 
-待办：
+### Jira 线：三级路由（`jira_connector.route_issue_with_fallbacks`）
 
-- **端到端已验证（2026-08-14）**：KEYB-3784（新需求）→ 自动扫描 → 路由 → 任务
-  → Issue #56（自动 ai-code-approved）→ Copilot → **Draft PR #57 → AWAITING_PR_REVIEW**。
-  全程零人工。
-- 接线更多项目：已接 7 个活跃项目（AI/FF/AE/AF/CEL/MOD/KEYB，均只扫「新需求」，
-  单绑沙箱仓库；仅 KEYB 开了 auto_dispatch，其余纯扫描展示）。存量影子扫描已
-  跑过一轮（17 条入列）。接真实仓库时改 `jira-projects.json` 的 repository 即可
-  （真实仓库需先加进 `repository-search-scope.json` 授权目录，用户此前暂拒）
-- 持续运行：`set -a && . ./.env && set +a && .venv/bin/python3 -m src.jira_connector poll
-  --dispatch --interval-seconds 300`（首次启用项目自动跳过存量，防洪水；
-  每轮派发上限 `max_dispatch_per_poll`）
-- **前端已完成（2026-08-14）**：
-  - `src/jira_monitor_api.py`（端口 8098，loopback）：`GET /jira-monitor`、
-    `POST /jira-monitor/scan|dispatch|rules`；**内置自动扫描线程**，默认每 300s
-    `poll(dispatch=True)`（尊重每项目 auto_dispatch），间隔用
-    `JIRA_MONITOR_SCAN_INTERVAL` 调（下限 60s），状态暴露在 `autoScan` 字段
-  - 启动：`set -a && . ./.env && set +a && nohup .venv/bin/python3 -m src.jira_monitor_api > /tmp/jira-monitor.log 2>&1 &`
-  - console：`JiraMonitor.tsx` 悬浮卡片（日志监控下方，top-[132px]）+ 大窗
-    （统计/接线项目规则开关/按项目分组的需求列表/单条「建任务」按钮）；
-    侧边栏新增 Jira 线程栏；vite 代理 `/jira-monitor` → 8098（改过 vite.config，
-    dev server 需重启生效）
-  - 测试：Python 406 全绿（新增 test_jira_monitor_api.py 4 个）
+```
+① 确定性（组件/标签/关键词，单仓绑定）→ RESOLVED 置信度 100
+② 锚点代码搜索（需求带技术线索时复用日志线路由器）→ 置信度 95
+③ AI 画像分类（repo_profiler.classify_issue）→ 置信度 70-99
+都不行 → NEEDS_CONTEXT（待人工）
+```
 
-## 服务启动/重启命令
+- 兜底两级全 fail-open，异常绝不炸主流程；置信度 <100 不触发 auto_dispatch
+- **路由结论缓存**：`.issue-entry-state/jira-routing-cache.json`，按 issue key +
+  标题/描述 SHA 指纹；内容变更或项目换绑仓库自动作废（防 AI 波动双派）
+- 实测 20 条 AI 项目真实需求：**19/20 = 95% 匹配率**（18 条 AI 分类、1 条关键词、
+  1 条待人工）
+
+### 仓库画像（`src/repo_profiler.py`）
+
+- 抓 README + 目录结构 + 依赖清单 → 公司 AI 网关生成中文画像
+  （summary/keywords/modules）
+- 存 `.issue-entry-state/repo-profiles.json`（本地，不进 git），7 天自动刷新
+- 4 个已授权仓库画像已生成，业务定位准确
+
+## Java 控制面路由（已随 PR #66 提交）
+
+- `CreateTaskRequest` 第 5 字段 `repositoryHint`（`org/repo` 格式校验）
+- `TaskService.createTask` 三分支：jiraIssue 绑定 > repositoryHint（须
+  `CatalogRepositoryMatcher.isAuthorized()` 通过）> 关键词兜底
+- log_monitor 派单时带 hint（`src/log_monitor_api.py` 的 `_dispatch_incident_task`）
+
+## 关键配置与密钥（值都在 .env）
+
+- `GITHUB_ROUTING_TOKEN` — Beckham505 账号的 PAT，可见 4 个 KikaTech 私有仓
+  （backend-aicompanion / frontend-aicompanion / kika-global-studio /
+  kika-global-studio-front，push+triage+pull）。**用户说过"先不要动"这些仓**
+- `AI_BASE_URL=https://kika-airouter-test.kika-backend.com/api/v1`（公司 AI 网关，
+  test 环境）/ `AI_API_KEY` / `AI_MODEL=ailemac/gpt-5-mini` /
+  `AI_SAFETY_IDENTIFIER`（**请求体必带 safety_identifier 字段，否则 400**）
+- `JIRA_BASE_URL=https://jira.xinmei365.com` / `JIRA_SESSION_COOKIE` /
+  `JIRA_USERNAME=wzf` / `JIRA_PASSWORD=123456`
+- 授权目录：`control-plane/config/repository-search-scope.json` +
+  `application.yml` 的 `app.repository-catalog`（4 个 KikaTech 仓，默认分支：
+  前三个 master、studio-front 是 main）
+- Jira 项目配置：`control-plane/config/jira-projects.json` —— AI 项目绑
+  aicompanion 前后端双仓 + `ai_routing: true`；其余 6 个项目（FF/AE/AF/CEL/MOD/KEYB）
+  仍单绑沙箱仓库占位（真实仓库未授权）
+
+## 运行中的服务与重启命令
 
 ```bash
 cd /Users/zf/Desktop/ai-pr-sandbox
 
-# 控制面（必须 JAVA_HOME 指定 21）
+# 控制面 8080（必须 JAVA_HOME 21）
 set -a && . ./.env && set +a && cd control-plane && \
   JAVA_HOME=/opt/homebrew/opt/openjdk@21 nohup mvn spring-boot:run > /tmp/control-plane.log 2>&1 &
 
-# worker（持续模式；--once 为单次）
+# worker（纯路由期 mock 模式）
 set -a && . ./.env && set +a && \
   GITHUB_ISSUE_TOKEN=$(gh auth token) nohup .venv/bin/python3 -m src.mock_task_worker \
   --wait-timeout 5 > /tmp/mock-worker.log 2>&1 &
 
-# 日志监控
-nohup .venv/bin/python3 -m src.log_monitor_api > /tmp/log-monitor.log 2>&1 &
+# 日志监控 8099 / Jira 监控 8098（都必须先 source .env，否则没有路由 token 和 AI 配置）
+pkill -f "src.jira_monitor_api"; sleep 2
+set -a && . ./.env && set +a && \
+  nohup .venv/bin/python3 -m src.jira_monitor_api > /tmp/jira-monitor-8098.log 2>&1 &
+set -a && . ./.env && set +a && \
+  nohup .venv/bin/python3 -m src.log_monitor_api > /tmp/log-monitor-8099.log 2>&1 &
 
-# 前端（Kimi Work 管理，不要自己留 dev server）
-cd console && npm run dev   # 端口 7100
+# 前端 console/（Kimi Work 管生命周期，别自己留 dev server）
 ```
 
-## 关键环境变量（值在 .env）
+注意：Python 一律用 `.venv/bin/python3`（worker 需要 redis 依赖），别用系统 python。
 
-- `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL=ailemac/gpt-5-mini` / `AI_SAFETY_IDENTIFIER` — GPT-5 mini 网关
-- `WORKER_ISSUE_PUBLICATION_ENABLED=true` + `WORKER_ISSUE_POLICY_SHA256` — Issue 发布门禁
-- `WORKER_CODE_MODE=publish_pr`、`WORKER_CODE_AUTO_APPROVAL_ENABLED=true` + `WORKER_CODE_AUTO_APPROVAL_POLICY_SHA256` — Copilot 线与自动审批
-- `AI_ASYNC_REPLY=true`（默认）— AI 回复异步化；测试配置里关掉
-- `GITHUB_ISSUE_TOKEN=$(gh auth token)` 启动时注入，不写进文件
-
-## 安全边界（不要无意中削弱）
-
-- 路由最终由确定性授权目录匹配器决定，AI 只提供文本线索
-- 预审批只对**本次新建**的 Issue 打 `ai-code-approved` 标签；复用/去重的 Issue 保持原审批状态
-- Copilot 仅允许写 `src/**`、`tests/**`；禁改 `.github/`、部署、基础设施；只发 Draft PR，不自动合并
-- 所有用户输入和模型输出过脱敏器；策略文件改动会使钉住的 SHA 失效（fail-closed）
-
-## 踩过的坑（排障备忘）
-
-1. **worker 报 "unclassified high-entropy data"**：Issue 正文里我们自己生成的 64 位 hex（策略 SHA/指纹注释）触发高熵拦截，`LocalRepositoryExecutionEngine` 已用 `_LOCATOR_NOISE_PATTERN` 剥离。
-2. **"一任务一 Issue"**：重试时重复建 Issue 会导致 attach 冲突 FAILED。claim 响应已带 issueNumber/issueUrl，重试复用。
-3. **worker 克隆停在 Issue 分支**：调度器一次性设计会保留分支；worker 已在 finally 里自动复位（fetch + checkout -f main + reset --hard origin/main + clean，保留 .issue-code-output 审计）。
-4. **`save()` 返回旧快照**：预分配 UUID 的实体 save 走 merge，`create()` 返回前必须 `findJobForUpdate` 重读。
-5. **前端闪烁**：轮询时不要 setLoading(true) 卸载内容，只在切换线程时显示骨架屏。
-6. **规则启用"失效"假象**：后端正常，是前端保存后没刷新（30s 轮询）；已改为保存后立即 reload。
-7. 改 `control-plane/config/*.json` 策略后必须重算 SHA256 同步进 `.env`，否则门禁 fail-closed。
-
-## 下一步候选
-
-- 用户审批/合并或关闭 PR #49、#51、#53（#49 关联 Issue 已关闭且是调试期重复产物，建议直接关闭）
-- 日志自动化规则（聚类阈值建任务）已可真实跑通，可观察一轮真实故障的「日志 → Issue → Draft PR」
-- JIRA 接入进行中，详见上方「JIRA 接入」节
-- 多仓库目录：目前授权目录只有 wzf12400/ai-pr-sandbox 一个（用户曾拒绝加真实仓库，不要再主动提议）
-
-## 测试命令
+## 测试基线
 
 ```bash
-.venv/bin/python3 -m unittest discover -s tests        # Python 381 个
-cd control-plane && JAVA_HOME=/opt/homebrew/opt/openjdk@21 mvn test   # Java 36 个
-cd console && npm run build                            # 前端构建验证
+.venv/bin/python3 -m unittest discover -s tests      # Python 全绿（锚点 21 + Jira 35 等）
+cd control-plane && JAVA_HOME=/opt/homebrew/opt/openjdk@21 mvn test   # Java 38 全绿
 ```
+
+## Jira 认证备忘（重要，反复踩）
+
+- 平台在钉钉 SSO 网关后面，**Basic Auth 和 curl 自建会话都被网关废掉**；
+  唯一可行：浏览器登录 → CDP 提取 Cookie → 写回 .env
+- `src/jira_session_refresh.py` 自动续期：WebBridge（127.0.0.1:10086）驱动 Chrome。
+  jira_monitor 自动扫描遇 JiraAuthError 自动触发（冷却 10 分钟）
+- **2026-08-19 续期翻车过一次**：login.jsp 被 SSO 重定向到钉钉授权页，
+  原生表单选择器找不到。手动救援流程：先 `_click_dingtalk_login()` 点"立即登录"
+  → 跳回 login.jsp → 再填原生表单（#login-form-username/password/submit）→
+  跳到 Dashboard → `_extract_cookies()` → `_verify_cookie` → `_persist_env`。
+  加固方向：把"SSO 点一下再回原生表单"编排进自动续期
+
+## 已知待确认/未解
+
+- backend-wallpaper 服务归属：锚点路由判给 kika-global-studio（配置+业务代码命中），
+  但 backend-aicompanion 里有 `com.kikatech.aiapp.wallpaper` 包，真实归属待用户确认
+- kika-global-studio 对应哪个 Jira 项目未知；IRL/IK/AT 等项目仓库未授权给 Beckham505
+- 接口路径动态段被脱敏吃掉（`[REDACTED:path_segment]`），损失部分锚点；
+  可考虑把路径段从用户数据里豁免（已向用户提议过，未拍板）
+- 日志派单阈值 `minGroupEvents=8`（用户以为设的 5，实际配置是 8）
+- 前端待优化（用户提过，未做）："mock worker failed safely" 显示成中文
+  「已路由 · 安全拦截（测试模式）」；详情页加需求简介；去掉"严重程度裁决依据"展示
+
+## 用户偏好（务必遵守）
+
+- 不懂技术术语，回复用中文大白话，给链接，别堆术语
+- 要全自动，"只有确实需要才要人参与"
+- 界面中文简洁；测试 PR 让他批，别自己合并
+- 密钥/账号写 .env 或配置文件，**绝不写进前端代码**
+- git 提交用户是 wzf12400；真实公司仓库操作前必须确认授权范围
+
+## 历史坑（排障备忘）
+
+1. worker "unclassified high-entropy data"：生成 Issue 正文里的 64 位 hex 触发高熵拦截，已剥离
+2. 重试重复建 Issue 会 attach 冲突；claim 响应带 issueNumber 复用
+3. `save()` 预分配 UUID 实体走 merge 返回旧快照，create 后要 findJobForUpdate 重读
+4. 前端轮询别 setLoading(true) 卸载内容（闪烁）
+5. 改 `control-plane/config/*.json` 策略文件要重算 SHA256 同步 .env（fail-closed）
+6. Jira JQL 里别过滤中文 issue 类型名（400 错误），用客户端 `issue_types` 过滤
+7. 锚点路由缓存有两个版本：v1 计次、v2 加权；旧格式自动重搜
