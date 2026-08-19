@@ -384,5 +384,138 @@ class FallbackRoutingTest(unittest.TestCase):
             self.assertTrue(ai_spy.called)
 
 
+class MultiRepoRoutingTest(unittest.TestCase):
+    """前后端都要改的需求：多仓结论的生成、缓存与作废。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cache_path = Path(self.tmp.name) / "routing-cache.json"
+
+    def _route(self, issue, project):
+        return jira_connector.route_issue_with_fallbacks(
+            issue, project, cache_path=self.cache_path
+        )
+
+    @staticmethod
+    def _multi_decision():
+        return jira_connector.RouteDecision(
+            "RESOLVED",
+            repository="org/app-server",
+            basis="ai classification (multi-repo): 接口+界面",
+            confidence=85,
+            candidates=["org/app-web", "org/app-server"],
+            repositories=["org/app-server", "org/app-web"],
+        )
+
+    def test_multi_repo_decision_keeps_all_repositories(self):
+        issue = make_issue(summary="语音列表接口和播放界面都要改", description="前后端联动")
+        project = dict(TWO_REPO_PROJECT, ai_routing=True)
+        with mock.patch.object(
+            jira_connector, "_anchor_fallback", return_value=None
+        ), mock.patch.object(
+            jira_connector, "_ai_fallback", return_value=self._multi_decision()
+        ):
+            decision = self._route(issue, project)
+        self.assertEqual(decision.status, "RESOLVED")
+        self.assertEqual(decision.repository, "org/app-server")
+        self.assertEqual(
+            decision.repositories, ["org/app-server", "org/app-web"]
+        )
+
+    def test_multi_repo_decision_roundtrips_through_cache(self):
+        issue = make_issue(summary="语音列表接口和播放界面都要改", description="前后端联动")
+        project = dict(TWO_REPO_PROJECT, ai_routing=True)
+        with mock.patch.object(
+            jira_connector, "_anchor_fallback", return_value=None
+        ), mock.patch.object(
+            jira_connector, "_ai_fallback", return_value=self._multi_decision()
+        ):
+            first = self._route(issue, project)
+        self.assertEqual(len(first.repositories), 2)
+        with mock.patch.object(
+            jira_connector, "_anchor_fallback",
+            side_effect=AssertionError("cached: must not re-run anchor"),
+        ), mock.patch.object(
+            jira_connector, "_ai_fallback",
+            side_effect=AssertionError("cached: must not re-run AI"),
+        ):
+            second = self._route(issue, project)
+        self.assertEqual(second.repository, "org/app-server")
+        self.assertEqual(second.repositories, ["org/app-server", "org/app-web"])
+        self.assertEqual(second.confidence, 85)
+
+    def test_multi_repo_cache_dropped_when_one_repo_unbound(self):
+        issue = make_issue(summary="语音列表接口和播放界面都要改", description="前后端联动")
+        project = dict(TWO_REPO_PROJECT, ai_routing=True)
+        with mock.patch.object(
+            jira_connector, "_anchor_fallback", return_value=None
+        ), mock.patch.object(
+            jira_connector, "_ai_fallback", return_value=self._multi_decision()
+        ):
+            self._route(issue, project)
+        # 项目换绑：org/app-server 不在候选里了，多仓旧结论整体作废
+        new_project = dict(
+            TWO_REPO_PROJECT, ai_routing=True, strict_matching=True,
+            repositories=[FRONTEND],
+        )
+        with mock.patch.object(
+            jira_connector, "_anchor_fallback", return_value=None
+        ), mock.patch.object(
+            jira_connector, "_ai_fallback", return_value=None
+        ) as ai_spy:
+            decision = self._route(issue, new_project)
+        self.assertEqual(decision.status, "NEEDS_CONTEXT")
+        self.assertTrue(ai_spy.called)
+
+    def test_ai_fallback_builds_multi_repo_from_classifier(self):
+        project = dict(TWO_REPO_PROJECT, ai_routing=True)
+        issue = make_issue(summary="语音列表接口和播放界面都要改")
+        fake = {
+            "repository": "org/app-server",
+            "confidence": 85,
+            "reason": "接口",
+            "matches": [
+                {"repository": "org/app-server", "confidence": 85, "reason": "接口"},
+                {"repository": "org/app-web", "confidence": 80, "reason": "界面"},
+            ],
+            "basis": "ai classification (multi-repo): 接口+界面",
+        }
+        with mock.patch.dict(
+            "os.environ", {"AI_BASE_URL": "https://x", "AI_API_KEY": "k"}
+        ), mock.patch(
+            "src.repo_profiler.classify_issue", return_value=fake
+        ):
+            decision = jira_connector._ai_fallback(
+                issue, project, ["org/app-web", "org/app-server"]
+            )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.repository, "org/app-server")
+        self.assertEqual(decision.confidence, 85)
+        self.assertEqual(decision.repositories, ["org/app-server", "org/app-web"])
+
+    def test_single_repo_classifier_result_wraps_to_list(self):
+        project = dict(TWO_REPO_PROJECT, ai_routing=True)
+        issue = make_issue(summary="只改界面")
+        fake = {
+            "repository": "org/app-web",
+            "confidence": 90,
+            "reason": "界面",
+            "matches": [
+                {"repository": "org/app-web", "confidence": 90, "reason": "界面"}
+            ],
+            "basis": "ai classification (confidence 90): 界面",
+        }
+        with mock.patch.dict(
+            "os.environ", {"AI_BASE_URL": "https://x", "AI_API_KEY": "k"}
+        ), mock.patch(
+            "src.repo_profiler.classify_issue", return_value=fake
+        ):
+            decision = jira_connector._ai_fallback(
+                issue, project, ["org/app-web", "org/app-server"]
+            )
+        self.assertEqual(decision.repositories, ["org/app-web"])
+
+
 if __name__ == "__main__":
     unittest.main()

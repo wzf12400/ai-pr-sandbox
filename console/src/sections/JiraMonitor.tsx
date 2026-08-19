@@ -378,7 +378,10 @@ function IssueRow({
         </span>
         {issue.repository && (
           <span className="hidden max-w-44 truncate font-mono text-[11px] text-muted-foreground md:inline">
-            → {issue.repository}
+            →{" "}
+            {issue.repositories && issue.repositories.length > 1
+              ? `前后端都要改：${issue.repositories.join(" + ")}`
+              : issue.repository}
           </span>
         )}
         {dispatched ? (

@@ -85,6 +85,8 @@ class RouteDecision:
     basis: str = ""
     confidence: int = 0
     candidates: List[str] = field(default_factory=list)
+    # 需求涉及多个仓库（前后端都要改）时这里是完整列表，repository 是置信度最高的主仓
+    repositories: List[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -390,15 +392,20 @@ def _routing_cache_hit(
         return None
     if entry.get("signature") != _issue_signature(issue):
         return None  # 需求内容变了，重新判
-    repo = entry.get("repository")
-    if repo not in candidates:
+    repos = entry.get("repositories")
+    if not isinstance(repos, list) or not repos:
+        repo = entry.get("repository")
+        repos = [repo] if repo else []
+    repos = [str(r) for r in repos]
+    if not repos or any(r not in candidates for r in repos):
         return None  # 项目绑定的仓库变了，旧结论作废
     return RouteDecision(
         "RESOLVED",
-        repository=repo,
+        repository=repos[0],
         basis=str(entry.get("basis") or "")[:240],
         confidence=int(entry.get("confidence") or 0),
         candidates=candidates,
+        repositories=repos,
     )
 
 
@@ -412,6 +419,7 @@ def _routing_cache_store(
     cache["issues"][key] = {
         "signature": _issue_signature(issue),
         "repository": decision.repository,
+        "repositories": list(decision.repositories) or [decision.repository],
         "basis": decision.basis,
         "confidence": decision.confidence,
         "at": datetime.now(timezone.utc).isoformat(),
@@ -493,12 +501,15 @@ def _ai_fallback(
         return None
     if ai_decision is None:
         return None
+    matches = ai_decision.get("matches") or []
+    repositories = [m["repository"] for m in matches] or [ai_decision["repository"]]
     return RouteDecision(
         "RESOLVED",
         repository=ai_decision["repository"],
         basis=ai_decision["basis"][:240],
         confidence=ai_decision["confidence"],
         candidates=candidates,
+        repositories=repositories,
     )
 
 
@@ -756,6 +767,8 @@ def dispatch_issue(
             "severity": intake["severity"],
             "decision": decision.status,
             "repository": decision.repository,
+            "repositories": list(decision.repositories)
+            or ([decision.repository] if decision.repository else []),
             "basis": decision.basis,
             "confidence": decision.confidence,
             "dispatch": outcome,
@@ -840,6 +853,8 @@ def poll(
                 "severity": intake["severity"],
                 "decision": decision.status,
                 "repository": decision.repository,
+                "repositories": list(decision.repositories)
+                or ([decision.repository] if decision.repository else []),
                 "basis": decision.basis,
                 "confidence": decision.confidence,
             }

@@ -21,6 +21,7 @@ export type JiraScannedIssue = {
   severity: string;
   decision: JiraDecision;
   repository: string;
+  repositories?: string[];
   basis: string;
   confidence: number;
   dispatch?: JiraDispatchResult;
