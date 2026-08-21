@@ -80,6 +80,33 @@ def _click_dingtalk_login() -> bool:
     return bool(_evaluate(code))
 
 
+def _native_form_present() -> bool:
+    return bool(_evaluate("!!document.querySelector('#login-form-username')"))
+
+
+def _await_login_page(base: str) -> str:
+    """等 login.jsp 就绪，返回 "form" | "logged_in" | "timeout"。
+
+    login.jsp 可能被 SSO 网关重定向到钉钉授权页（2026-08-19 实测翻车点）：
+    此时自动点"立即登录"，利用浏览器里的钉钉登录态跳回 login.jsp 的原生表单；
+    如果 SSO 直接放行到 Jira 内部页，说明已经登录，无需再填表单。
+    """
+    deadline = time.time() + LOGIN_WAIT_SECONDS
+    while time.time() < deadline:
+        time.sleep(2)
+        url = _current_url()
+        if not url:
+            continue
+        if url.startswith(base) and "login" not in url:
+            return "logged_in"
+        if "login.dingtalk.com" in url:
+            _click_dingtalk_login()
+            continue
+        if url.startswith(base) and _native_form_present():
+            return "form"
+    return "timeout"
+
+
 def _extract_cookies() -> str:
     data = _bridge("cdp", {"method": "Network.getAllCookies", "params": {}})
     cookies = [
@@ -156,24 +183,31 @@ def _refresh_session_inner(env_path: Path = ENV_PATH) -> str:
     password = os.environ.get("JIRA_PASSWORD", "").strip()
 
     if username and password:
-        # 首选：Jira 原生表单登录（确定性高，不依赖钉钉 SSO 页面结构）
+        # 首选：Jira 原生表单登录。login.jsp 可能被 SSO 网关重定向到钉钉
+        # 授权页，_await_login_page 会自动点"立即登录"回到原生表单再填。
         _bridge(
             "navigate",
             {"url": f"{base}/login.jsp", "newTab": True,
              "group_title": "Jira 会话自动续期"},
         )
-        time.sleep(4)
-        _bridge("fill", {"selector": "#login-form-username", "value": username})
-        _bridge("fill", {"selector": "#login-form-password", "value": password})
-        _bridge("click", {"selector": "#login-form-submit"})
-        deadline = time.time() + LOGIN_WAIT_SECONDS
-        while time.time() < deadline:
-            time.sleep(3)
-            url = _current_url()
-            if url.startswith(base) and "login" not in url:
-                break
-        else:
-            raise SessionRefreshError("原生登录后未跳转，可能密码错误或需验证码")
+        state = _await_login_page(base)
+        if state == "timeout":
+            raise SessionRefreshError(
+                "登录页未出现原生表单：SSO 重定向后未回到 login.jsp，可能需人工处理"
+            )
+        if state == "form":
+            _bridge("fill", {"selector": "#login-form-username", "value": username})
+            _bridge("fill", {"selector": "#login-form-password", "value": password})
+            _bridge("click", {"selector": "#login-form-submit"})
+            deadline = time.time() + LOGIN_WAIT_SECONDS
+            while time.time() < deadline:
+                time.sleep(3)
+                url = _current_url()
+                if url.startswith(base) and "login" not in url:
+                    break
+            else:
+                raise SessionRefreshError("原生登录后未跳转，可能密码错误或需验证码")
+        # state == "logged_in"：SSO 直接放行，无需填表单
     else:
         # 兜底：钉钉 SSO 一键登录（依赖浏览器里的钉钉登录态）
         _bridge(
@@ -182,14 +216,13 @@ def _refresh_session_inner(env_path: Path = ENV_PATH) -> str:
              "group_title": "Jira 会话自动续期"},
         )
         deadline = time.time() + LOGIN_WAIT_SECONDS
-        clicked = False
         while time.time() < deadline:
             time.sleep(3)
             url = _current_url()
             if url.startswith(base) and "login" not in url:
                 break
-            if "login.dingtalk.com" in url and not clicked:
-                clicked = _click_dingtalk_login()
+            if "login.dingtalk.com" in url:
+                _click_dingtalk_login()  # 每次轮询重试点按，点一次没跳走就再点
         else:
             raise SessionRefreshError("等待 SSO 登录跳转超时")
 

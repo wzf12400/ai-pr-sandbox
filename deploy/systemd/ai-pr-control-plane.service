@@ -1,0 +1,15 @@
+[Unit]
+Description=AI PR Sandbox - Control Plane (8080)
+After=network-online.target mysql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@
+EnvironmentFile=@ROOT@/.env
+ExecStart=@ROOT@/scripts/run-control-plane.sh
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

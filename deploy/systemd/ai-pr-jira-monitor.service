@@ -1,0 +1,15 @@
+[Unit]
+Description=AI PR Sandbox - Jira Monitor (8098)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@
+EnvironmentFile=@ROOT@/.env
+ExecStart=@ROOT@/scripts/run-jira-monitor.sh
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
