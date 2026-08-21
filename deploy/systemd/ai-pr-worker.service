@@ -1,0 +1,15 @@
+[Unit]
+Description=AI PR Sandbox - Task Worker
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@
+EnvironmentFile=@ROOT@/.env
+ExecStart=@ROOT@/scripts/run-worker.sh
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
