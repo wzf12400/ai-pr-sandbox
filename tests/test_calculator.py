@@ -1,6 +1,6 @@
 import unittest
 
-from src.calculator import add, subtract
+from src.calculator import add, divide, subtract
 
 
 class CalculatorTest(unittest.TestCase):
@@ -9,6 +9,13 @@ class CalculatorTest(unittest.TestCase):
 
     def test_subtract(self) -> None:
         self.assertEqual(subtract(7, 4), 3)
+
+    def test_divide(self) -> None:
+        self.assertEqual(divide(10, 2), 5)
+
+    def test_divide_rejects_zero_divisor(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot divide by zero"):
+            divide(10, 0)
 
     def test_allows_operands_equal_to_50(self) -> None:
         self.assertEqual(add(50, 0), 50)
