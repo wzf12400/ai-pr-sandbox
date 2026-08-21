@@ -909,6 +909,8 @@ def execute_issue_code_workflow(
         _body_for_localization(issue.body, policy.repository),
         top_k=10,
     )
+    approval["rules"]["localization_has_candidates"] = bool(location["candidates"])
+    approval["approved"] = all(approval["rules"].values())
     branch = issue_work_branch_name(policy, issue)
     report: Dict[str, Any] = {
         "schema_version": REPORT_SCHEMA_VERSION,
