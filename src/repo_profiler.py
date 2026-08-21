@@ -63,14 +63,17 @@ CLASSIFY_PROMPT = """你是资深工程师，负责把 Jira 需求分配到正�
 {profiles}
 
 要求：
-1. 逐条对比需求内容与各仓库画像，判断需求最可能需要改哪个仓库的代码
-2. 只输出 JSON，不要任何其他文字：
+1. 逐条对比需求内容与各仓库画像，判断需求需要改哪些仓库的代码
+2. 需求明显只涉及一个仓库时只返回一个；前后端都要改时（例如既要改接口
+   又要改界面），把涉及的仓库全部列出，每个仓库单独给置信度和理由
+3. 只输出 JSON，不要任何其他文字：
 {{
-  "repository": "最匹配的仓库全名，如果实在无法判断填 null",
-  "confidence": 0-100 的整数置信度,
-  "reason": "一句中文理由，说明判断依据"
+  "repositories": [
+    {{"repository": "候选列表中的仓库全名", "confidence": 0-100 的整数置信度, "reason": "一句中文理由，说明这个仓库要改什么"}}
+  ],
+  如果实在无法判断，"repositories" 返回空数组
 }}
-3. 拿不准就降低 confidence，不要硬猜"""
+4. 拿不准就降低 confidence，不要硬猜；宁缺毋滥，不确定的仓库不要列"""
 
 
 def _github_get(url: str, token: str) -> Any:
@@ -235,7 +238,10 @@ def classify_issue(
     profiles_path: Path = PROFILES_PATH,
     min_confidence: int = 70,
 ) -> Optional[Dict[str, Any]]:
-    """用画像给 Jira 需求分类。置信度不足或失败返回 None（上层标待人工）。"""
+    """用画像给 Jira 需求分类，可返回多个仓库（前后端都要改的场景）。
+
+    置信度不足或失败返回 None（上层标待人工）。
+    """
     all_profiles = load_profiles(profiles_path)
     candidates = [all_profiles[r] for r in candidate_repos if r in all_profiles]
     if not candidates:
@@ -256,19 +262,55 @@ def classify_issue(
     )
     if not payload:
         return None
-    repo = payload.get("repository")
-    confidence = payload.get("confidence")
-    if not repo or repo not in candidate_repos:
+    raw_matches = payload.get("repositories")
+    if raw_matches is None and payload.get("repository"):
+        # 兼容旧版单仓库回答格式
+        raw_matches = [
+            {
+                "repository": payload.get("repository"),
+                "confidence": payload.get("confidence"),
+                "reason": payload.get("reason"),
+            }
+        ]
+    if not isinstance(raw_matches, list):
         return None
-    try:
-        confidence = int(confidence)
-    except (TypeError, ValueError):
+    matches: List[Dict[str, Any]] = []
+    seen: set = set()
+    for item in raw_matches:
+        if not isinstance(item, dict):
+            continue
+        repo = item.get("repository")
+        if not repo or repo not in candidate_repos or repo in seen:
+            continue
+        try:
+            confidence = int(item.get("confidence"))
+        except (TypeError, ValueError):
+            continue
+        if confidence < min_confidence:
+            continue
+        seen.add(repo)
+        matches.append(
+            {
+                "repository": repo,
+                "confidence": confidence,
+                "reason": str(item.get("reason") or ""),
+            }
+        )
+    if not matches:
         return None
-    if confidence < min_confidence:
-        return None
+    matches.sort(key=lambda m: -int(m["confidence"]))
+    top = matches[0]
+    if len(matches) == 1:
+        basis = f"ai classification (confidence {top['confidence']}): {top['reason']}"
+    else:
+        basis = "ai classification (multi-repo): " + "；".join(
+            f"{m['repository']} (confidence {m['confidence']}): {m['reason']}"
+            for m in matches
+        )
     return {
-        "repository": repo,
-        "confidence": confidence,
-        "reason": str(payload.get("reason") or ""),
-        "basis": f"ai classification (confidence {confidence}): {payload.get('reason')}",
+        "repository": top["repository"],
+        "confidence": top["confidence"],
+        "reason": top["reason"],
+        "matches": matches,
+        "basis": basis,
     }
