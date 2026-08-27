@@ -129,6 +129,14 @@ def extract_anchors(text: str, endpoints: List[str], services: List[str]) -> Lis
     return anchors[:MAX_ANCHORS]
 
 
+def _service_anchors(services: List[str]) -> List[str]:
+    return list(dict.fromkeys(
+        service.strip()
+        for service in services or []
+        if SERVICE_NAME_PATTERN.fullmatch(service.strip())
+    ))[:MAX_ANCHORS]
+
+
 def _load_cache(path: Path = CACHE_PATH) -> Dict[str, Any]:
     try:
         if path.is_file() and path.stat().st_size <= 1_000_000:
@@ -269,7 +277,13 @@ def route_incident(
     authorized = _load_authorized_repositories(scope_path)
     if not authorized:
         return None
-    anchors = extract_anchors(summary, endpoints, services)
+    service_anchors = _service_anchors(services)
+    anchors = service_anchors + [
+        anchor
+        for anchor in extract_anchors(summary, endpoints, services)
+        if anchor not in service_anchors
+    ]
+    anchors = anchors[:MAX_ANCHORS]
     if not anchors:
         return None
     orgs = sorted({repo.split("/", 1)[0] for repo in authorized})
@@ -284,4 +298,15 @@ def route_incident(
             queries += 1
         except SearchBudgetExceeded:
             break
+        if queries == len(service_anchors):
+            service_decision = decide(
+                {
+                    anchor: hits_per_anchor[anchor]
+                    for anchor in service_anchors
+                    if anchor in hits_per_anchor
+                },
+                authorized,
+            )
+            if service_decision:
+                return service_decision
     return decide(hits_per_anchor, authorized)

@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 INCIDENT_SCHEMA_VERSION = "sanitized-kibana-incident/v1"
 GROUPING_POLICY_VERSION = "kibana-incident-grouping/v1"
-ISSUE_SIGNATURE_POLICY_VERSION = "kibana-issue-signature/v2"
+ISSUE_SIGNATURE_POLICY_VERSION = "kibana-issue-signature/v3"
+LEGACY_ISSUE_SIGNATURE_POLICY_VERSION = "kibana-issue-signature/v2"
 FALLBACK_WINDOW_SECONDS = 5.0
 
 EXCEPTION_PATTERN = re.compile(
@@ -29,6 +30,14 @@ JAVA_STACK_FRAME_PATTERN = re.compile(
     r"\.(?P<method>[A-Za-z_$][\w$]*)\([^\r\n)]*\)"
 )
 REQUEST_PATH_PATTERN = re.compile(r"\brequest_path\s*=\s*(?P<path>/[^\s?;,|]+)")
+ISO_TIMESTAMP_PATTERN = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\b"
+)
+DURATION_VALUE_PATTERN = re.compile(
+    r"\b\d+(?:\.\d+)?(?=\s*(?:milliseconds?|ms|seconds?|secs?|minutes?)\b)",
+    re.IGNORECASE,
+)
 SYSTEM_ANCHORS = {
     "s3": re.compile(r"(?i)\b(?:amazon\s+)?s3\b"),
     "dynamodb": re.compile(r"(?i)\bdynamodb\b"),
@@ -77,6 +86,28 @@ def _event_time(event: Dict[str, Any]) -> Optional[datetime]:
 
 def _simple_name(value: str) -> str:
     return value.rsplit(".", 1)[-1].lower()
+
+
+def stable_message_template(summary: str) -> str:
+    """Normalize bounded runtime values without changing stored log evidence."""
+    normalized = ISO_TIMESTAMP_PATTERN.sub("<timestamp>", _text(summary))
+    normalized = DURATION_VALUE_PATTERN.sub("<duration>", normalized)
+    return " ".join(normalized.casefold().split())[:500]
+
+
+def _code_location(event: Dict[str, Any]) -> str:
+    target = _mapping(event.get("target"))
+    business_class = _text(target.get("business_class"))
+    business_method = _text(target.get("business_method"))
+    if business_class:
+        simple = _simple_name(business_class)
+        return f"{simple}.{business_method.casefold()}" if business_method else simple
+    logger_class = _text(target.get("logger_class"))
+    if not logger_class:
+        return ""
+    line = target.get("logger_line")
+    suffix = f":{line}" if isinstance(line, int) and line > 0 else ""
+    return f"{_simple_name(logger_class)}{suffix}"
 
 
 def event_signatures(event: Dict[str, Any]) -> Set[str]:
@@ -131,8 +162,16 @@ def issue_signature(incident: Dict[str, Any]) -> Dict[str, Any]:
     exceptions: Set[str] = set()
     systems: Set[str] = set()
     top_frames: Set[str] = set()
+    code_locations: Set[str] = set()
+    message_templates: Set[str] = set()
     for member in members:
         summary = _text(_mapping(member.get("event")).get("summary"))
+        location = _code_location(member)
+        template = stable_message_template(summary)
+        if location:
+            code_locations.add(location)
+        if template:
+            message_templates.add(template)
         paths.update(match.group("path") for match in REQUEST_PATH_PATTERN.finditer(summary))
         signatures = event_signatures(member)
         exceptions.update(
@@ -158,6 +197,8 @@ def issue_signature(incident: Dict[str, Any]) -> Dict[str, Any]:
         "exceptions": sorted(exceptions),
         "systems": sorted(systems),
         "top_frames": sorted(top_frames),
+        "code_locations": sorted(code_locations),
+        "message_templates": sorted(message_templates),
     }
     endpoint_error = (
         len(services) == 1
@@ -167,9 +208,16 @@ def issue_signature(incident: Dict[str, Any]) -> Dict[str, Any]:
     semantic_dimensions = sum(
         bool(values) for values in (paths, exceptions, systems, top_frames)
     )
-    eligible = endpoint_error or (
+    exact_semantic_signature = (
         len(services) == 1 and semantic_dimensions >= 2
     )
+    location_message_template = (
+        len(services) == 1
+        and len(code_locations) == 1
+        and len(message_templates) == 1
+        and len(next(iter(message_templates), "")) >= 12
+    )
+    eligible = endpoint_error or exact_semantic_signature or location_message_template
     if endpoint_error:
         fingerprint_components = {
             "services": services,
@@ -177,14 +225,30 @@ def issue_signature(incident: Dict[str, Any]) -> Dict[str, Any]:
             "exceptions": sorted(exceptions),
         }
         aggregation_mode = "same_service_endpoint_and_error"
-    else:
-        fingerprint_components = components
+        fingerprint_policy_version = LEGACY_ISSUE_SIGNATURE_POLICY_VERSION
+    elif exact_semantic_signature:
+        fingerprint_components = {
+            "services": services,
+            "paths": sorted(paths),
+            "exceptions": sorted(exceptions),
+            "systems": sorted(systems),
+            "top_frames": sorted(top_frames),
+        }
         aggregation_mode = "exact_semantic_signature"
+        fingerprint_policy_version = LEGACY_ISSUE_SIGNATURE_POLICY_VERSION
+    else:
+        fingerprint_components = {
+            "services": services,
+            "code_locations": sorted(code_locations),
+            "message_templates": sorted(message_templates),
+        }
+        aggregation_mode = "same_service_location_and_message_template"
+        fingerprint_policy_version = ISSUE_SIGNATURE_POLICY_VERSION
     fingerprint = ""
     if eligible:
         encoded = json.dumps(
             {
-                "policy_version": ISSUE_SIGNATURE_POLICY_VERSION,
+                "policy_version": fingerprint_policy_version,
                 **fingerprint_components,
             },
             sort_keys=True,
@@ -202,7 +266,11 @@ def issue_signature(incident: Dict[str, Any]) -> Dict[str, Any]:
             (
                 "same_endpoint_and_exception"
                 if endpoint_error
-                else "at_least_two_semantic_dimensions"
+                else (
+                    "at_least_two_semantic_dimensions"
+                    if exact_semantic_signature
+                    else "same_code_location_and_normalized_message"
+                )
             ),
             "exact_fingerprint_component_equality",
         ],

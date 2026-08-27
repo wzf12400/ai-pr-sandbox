@@ -1,6 +1,0 @@
-#!/bin/sh
-set -eu
-
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-cd "$ROOT"
-exec python3 -m src.repository_routing_pilot "$@"

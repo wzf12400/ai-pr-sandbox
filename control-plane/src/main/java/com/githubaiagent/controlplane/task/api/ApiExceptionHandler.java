@@ -1,5 +1,9 @@
 package com.githubaiagent.controlplane.task.api;
 
+import com.githubaiagent.controlplane.monitoring.MonitorScanCoordinationNotFoundException;
+import com.githubaiagent.controlplane.monitoring.MonitorScanLeaseConflictException;
+import com.githubaiagent.controlplane.configuration.ConfigurationProfileNotFoundException;
+import com.githubaiagent.controlplane.configuration.ConfigurationProfileVersionConflictException;
 import com.githubaiagent.controlplane.task.InvalidTaskTransitionException;
 import com.githubaiagent.controlplane.task.TaskNotFoundException;
 import com.githubaiagent.controlplane.worker.TaskClaimConflictException;
@@ -12,8 +16,12 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 @RestControllerAdvice
 public class ApiExceptionHandler {
 
-    @ExceptionHandler(TaskNotFoundException.class)
-    public ProblemDetail notFound(TaskNotFoundException exception) {
+    @ExceptionHandler({
+            TaskNotFoundException.class,
+            MonitorScanCoordinationNotFoundException.class,
+            ConfigurationProfileNotFoundException.class
+    })
+    public ProblemDetail notFound(RuntimeException exception) {
         return problem(HttpStatus.NOT_FOUND, exception.getMessage());
     }
 
@@ -22,8 +30,12 @@ public class ApiExceptionHandler {
         return problem(HttpStatus.BAD_REQUEST, exception.getMessage());
     }
 
-    @ExceptionHandler(TaskClaimConflictException.class)
-    public ProblemDetail conflict(TaskClaimConflictException exception) {
+    @ExceptionHandler({
+            TaskClaimConflictException.class,
+            MonitorScanLeaseConflictException.class,
+            ConfigurationProfileVersionConflictException.class
+    })
+    public ProblemDetail conflict(RuntimeException exception) {
         return problem(HttpStatus.CONFLICT, exception.getMessage());
     }
 

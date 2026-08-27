@@ -66,6 +66,13 @@ HIGH_ENTROPY_REDACTION = "[REDACTED:unclassified_high_entropy]"
 DATA_VIEW_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 INDEX_PATTERN = re.compile(r"^[A-Za-z0-9._*,-]{1,500}$")
 RELATIVE_TIME_PATTERN = re.compile(r"^now(?:-\d+[mhdw])?$|^now$")
+SUPPORTED_EXACT_SELECTOR_FIELDS = {
+    "kubernetes.container_name.keyword",
+    "kubernetes.labels.app_kubernetes_io/name.keyword",
+}
+EXACT_SELECTOR_VALUE_PATTERN = re.compile(
+    r"[a-z0-9](?:[a-z0-9.-]{0,126}[a-z0-9])?"
+)
 
 
 @dataclass(frozen=True)
@@ -520,10 +527,39 @@ class OpenSearchDashboardsClient:
         *,
         time_from: Optional[str] = None,
         time_to: Optional[str] = None,
+        exact_selector_field: Optional[str] = None,
+        exact_selector_value: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if not 1 <= fetch_size <= MAX_INITIAL_SCAN_HITS:
             raise ValueError(
                 f"initial scan size must be between 1 and {MAX_INITIAL_SCAN_HITS}"
+            )
+        if (exact_selector_field is None) != (exact_selector_value is None):
+            raise ValueError("exact log selector field and value must be provided together")
+        if exact_selector_field is not None:
+            if exact_selector_field not in SUPPORTED_EXACT_SELECTOR_FIELDS:
+                raise ValueError("unsupported exact log selector field")
+            if not EXACT_SELECTOR_VALUE_PATTERN.fullmatch(exact_selector_value or ""):
+                raise ValueError("invalid exact log selector value")
+        filters: List[Dict[str, Any]] = [
+            {
+                "range": {
+                    time_field: {
+                        "gte": time_from or self.target.time_from,
+                        "lte": time_to or self.target.time_to,
+                    }
+                }
+            },
+            {
+                "query_string": {
+                    "query": ERROR_QUERY,
+                    "analyze_wildcard": True,
+                }
+            },
+        ]
+        if exact_selector_field is not None:
+            filters.append(
+                {"term": {exact_selector_field: exact_selector_value}}
             )
         payload = {
             "size": fetch_size,
@@ -541,22 +577,7 @@ class OpenSearchDashboardsClient:
             ],
             "query": {
                 "bool": {
-                    "filter": [
-                        {
-                            "range": {
-                                time_field: {
-                                    "gte": time_from or self.target.time_from,
-                                    "lte": time_to or self.target.time_to,
-                                }
-                            }
-                        },
-                        {
-                            "query_string": {
-                                "query": ERROR_QUERY,
-                                "analyze_wildcard": True,
-                            }
-                        },
-                    ]
+                    "filter": filters
                 }
             },
             "sort": [
@@ -574,6 +595,44 @@ class OpenSearchDashboardsClient:
             payload,
         )
         return self._hits(response)
+
+    def exact_selector_exists(
+        self,
+        index_pattern: str,
+        time_field: str,
+        selector_field: str,
+        selector_value: str,
+    ) -> bool:
+        if selector_field not in SUPPORTED_EXACT_SELECTOR_FIELDS:
+            raise ValueError("unsupported exact log selector field")
+        if not EXACT_SELECTOR_VALUE_PATTERN.fullmatch(selector_value):
+            raise ValueError("invalid exact log selector value")
+        response = self._console_request(
+            "POST",
+            f"{index_pattern}/_search",
+            {
+                "size": 0,
+                "track_total_hits": 1,
+                "terminate_after": 1,
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {
+                                "range": {
+                                    time_field: {
+                                        "gte": self.target.time_from,
+                                        "lte": self.target.time_to,
+                                    }
+                                }
+                            },
+                            {"term": {selector_field: selector_value}},
+                        ]
+                    }
+                },
+            },
+        )
+        total = (response.get("hits") or {}).get("total")
+        return isinstance(total, dict) and int(total.get("value") or 0) > 0
 
 
 def _scan_source_sha256(

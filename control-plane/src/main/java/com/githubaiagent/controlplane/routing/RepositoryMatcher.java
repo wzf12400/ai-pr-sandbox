@@ -7,4 +7,9 @@ public interface RepositoryMatcher {
     default boolean isAuthorized(String repository) {
         return false;
     }
+
+    /** Whether one authorized repository may request an independent task in another repository. */
+    default boolean isAuthorizedDependency(String sourceRepository, String targetRepository) {
+        return false;
+    }
 }

@@ -48,9 +48,9 @@ class CodeExecutionPreapprovalPolicy:
     def labels_for(self, source_type: str, publication_status: str) -> tuple[str, ...]:
         if source_type not in self.allowed_source_types:
             return ()
-        # Reused Issues keep their existing approval state. Automatic approval is
-        # deliberately limited to the exact Issue created by this invocation.
-        if publication_status != "created":
+        # "resumed" is an Issue already attached to this exact durable task after
+        # a post-publication failure; unrelated deduplicated Issues remain unchanged.
+        if publication_status not in {"created", "resumed"}:
             return ()
         return self.required_labels
 
@@ -83,6 +83,15 @@ def load_code_execution_preapproval_policy(
         raise ValueError("code preapproval policy must contain valid JSON") from exc
     if not isinstance(payload, dict):
         raise ValueError("code preapproval policy must be an object")
+    return _parse_policy(payload, digest, issue_publication_raw, issue_code_policy_path)
+
+
+def _parse_policy(
+    payload: Mapping[str, Any],
+    digest: str,
+    issue_publication_raw: bytes,
+    issue_code_policy_path: Path,
+) -> CodeExecutionPreapprovalPolicy:
     required = (
         "schema_version",
         "policy_id",
@@ -134,4 +143,83 @@ def load_code_execution_preapproval_policy(
         allowed_source_types=source_types,
         required_labels=labels,
         max_issues_per_run=1,
+    )
+
+
+MANIFEST_SCHEMA_VERSION = "code-preapproval-manifest/v1"
+REPOSITORY_KEY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+
+def load_preapproval_policy_for_repository(
+    manifest_path: Path,
+    confirmed_manifest_sha256: str,
+    repository: str,
+    issue_publication_policy_path: Path,
+    issue_code_policy_path: Path | None,
+) -> CodeExecutionPreapprovalPolicy:
+    """多仓模式：环境变量钉 manifest 的 SHA，manifest 再钉每个仓的策略文件 SHA。
+
+    链式校验：env SHA → manifest → 单仓策略 SHA → 策略 → 该仓代码策略 SHA，
+    任一环节被改动都 fail-closed。
+    """
+    if manifest_path.is_symlink() or issue_publication_policy_path.is_symlink():
+        raise ValueError("code preapproval policies must not be symbolic links")
+    try:
+        raw = manifest_path.read_bytes()
+        issue_publication_raw = issue_publication_policy_path.read_bytes()
+    except OSError as exc:
+        raise ValueError("unable to read code preapproval policy inputs") from exc
+    if not raw or len(raw) > MAX_POLICY_BYTES:
+        raise ValueError("code preapproval manifest size is invalid")
+    digest = hashlib.sha256(raw).hexdigest()
+    if not SHA256_PATTERN.fullmatch(confirmed_manifest_sha256) or digest != confirmed_manifest_sha256:
+        raise ValueError("code preapproval manifest SHA-256 confirmation does not match")
+    try:
+        manifest = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("code preapproval manifest must contain valid JSON") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("code preapproval manifest must be an object")
+    _exact_keys(manifest, ("schema_version", "policies"), "code preapproval manifest")
+    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+        raise ValueError(f"code preapproval manifest must use {MANIFEST_SCHEMA_VERSION}")
+    policies = manifest.get("policies")
+    if not isinstance(policies, dict) or not policies:
+        raise ValueError("code preapproval manifest requires a nonempty policies object")
+    if not REPOSITORY_KEY_PATTERN.fullmatch(repository or ""):
+        raise ValueError("repository key is invalid")
+    entry = policies.get(repository)
+    if not isinstance(entry, dict):
+        raise ValueError("no code preapproval policy is pinned for this repository")
+    _exact_keys(entry, ("policy_path", "sha256"), "code preapproval manifest entry")
+    entry_path_raw = _text(entry.get("policy_path"))
+    entry_sha = _text(entry.get("sha256"))
+    if not SHA256_PATTERN.fullmatch(entry_sha):
+        raise ValueError("code preapproval manifest entry sha256 is invalid")
+    entry_path = Path(entry_path_raw)
+    if entry_path.is_absolute() or ".." in entry_path.parts:
+        raise ValueError("code preapproval manifest entry path must stay in the workspace")
+    if entry_path.is_symlink():
+        raise ValueError("code preapproval policies must not be symbolic links")
+    try:
+        policy_raw = entry_path.read_bytes()
+    except OSError as exc:
+        raise ValueError("unable to read code preapproval policy inputs") from exc
+    if not policy_raw or len(policy_raw) > MAX_POLICY_BYTES:
+        raise ValueError("code preapproval policy size is invalid")
+    policy_digest = hashlib.sha256(policy_raw).hexdigest()
+    if policy_digest != entry_sha:
+        raise ValueError("code preapproval policy SHA-256 confirmation does not match")
+    try:
+        payload = json.loads(policy_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("code preapproval policy must contain valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("code preapproval policy must be an object")
+    if _text(payload.get("repository")) != repository:
+        raise ValueError("code preapproval policy repository does not match the manifest key")
+    if issue_code_policy_path is None:
+        raise ValueError("no Issue code policy path is pinned for this repository")
+    return _parse_policy(
+        payload, policy_digest, issue_publication_raw, issue_code_policy_path
     )

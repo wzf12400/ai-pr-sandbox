@@ -1,0 +1,51 @@
+{
+  "schema_version": "issue-code-policy/v1",
+  "policy_id": "kikatech-kika-global-studio-copilot-v1",
+  "repository": "KikaTech/kika-global-studio",
+  "provider": "github-copilot-cloud-agent",
+  "base_branch": "master",
+  "branch_prefix": "codex/copilot",
+  "required_labels": [
+    "ai-code-approved"
+  ],
+  "allowed_models": [
+    "claude-sonnet-4.6",
+    "claude-opus-4.6",
+    "gpt-5.2-codex",
+    "gpt-5.3-codex",
+    "gpt-5.4",
+    "claude-sonnet-4.5",
+    "claude-opus-4.5"
+  ],
+  "default_model": "gpt-5.4",
+  "allowed_write_paths": [
+    "src/main/**",
+    "src/test/**"
+  ],
+  "blocked_write_paths": [
+    ".github/**",
+    ".git/**",
+    "deploy/**",
+    "infrastructure/**",
+    "pom.xml",
+    "src/main/resources/**",
+    "src/test/resources/**"
+  ],
+  "test_commands": [
+    [
+      "mvn",
+      "-q",
+      "-DskipTests",
+      "compile"
+    ]
+  ],
+  "limits": {
+    "max_changed_files": 10,
+    "max_added_lines": 300,
+    "max_deleted_lines": 150,
+    "copilot_timeout_seconds": 1800,
+    "test_timeout_seconds": 1800
+  },
+  "draft_pr_only": true,
+  "auto_merge": false
+}

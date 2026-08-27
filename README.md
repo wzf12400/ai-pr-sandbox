@@ -1,496 +1,56 @@
-# AI PR Sandbox
+# AI Agent Automation Platform
 
-This repository is a small, controlled target for testing an AI-assisted
-GitHub workflow:
+面向 Jira 需求和日志事件的自动化处理平台。系统负责采集、脱敏、仓库路由、创建
+GitHub Issue，并在策略允许时调用 GitHub Copilot Cloud Agent 生成 Draft PR。
 
-1. Turn a natural-language request into a structured issue.
-2. Create a branch and implement the requested change.
-3. Run automated tests in GitHub Actions.
-4. Open a draft pull request for human review.
+## 服务
 
-## Run tests
+| 服务 | 默认地址 | 作用 |
+| --- | --- | --- |
+| Console | `127.0.0.1:7100` | 任务、日志、Jira 和配置管理 |
+| Control Plane | `127.0.0.1:8080` | 任务状态、路由、配置和审计 |
+| Jira Monitor | `127.0.0.1:8098` | Jira 扫描与派发 |
+| Log Monitor | `127.0.0.1:8099` | 日志扫描与聚合 |
+| Worker | 后台进程 | Issue、Cloud Agent 和 Draft PR 流程 |
 
-```bash
-python3 -m unittest discover -s tests -v
-```
+运行依赖 MySQL、Redis、Python 3、Java 21 和 Node.js 22。
 
-The initial calculator supports addition and subtraction. New behavior should
-be introduced through GitHub issues and pull requests.
+## 本地启动
 
-## Generate a local Issue draft
-
-The deterministic draft command uses synthetic, sanitized input only. It does
-not call an AI model, Jira, Kibana, or the GitHub API.
-
-Three sample sources are available under `examples/`:
-
-- `manual.json`
-- `jira.json`
-- `kibana.json`
-
-Generate a local Markdown draft:
+复制 `.env.example` 为 `.env.local`，填写数据库、Redis、GitHub、Jira 和 AI 服务配置，
+然后分别启动：
 
 ```bash
-python3 -m src.issue_draft examples/jira.json \
-  --output drafts/jira-CALC-101.md
+./scripts/run-control-plane.sh
+./scripts/run-worker.sh
+./scripts/run-jira-monitor.sh
+./scripts/run-log-monitor.sh
+./scripts/run-console.sh
 ```
 
-The command validates required fields, scans for common secret and personal
-data patterns, and records the source reference in `.issue-draft-state.json`.
-Running the same source record twice is rejected. Generated drafts and local
-state are ignored by Git.
+启动脚本默认读取 `.env.local`。测试环境设置 `APP_ENV=staging` 后读取
+`.env.staging`，生产环境设置 `APP_ENV=production` 后读取 `.env.production`。
+敏感值只允许保存在这些已被 Git 忽略的环境文件或部署 Secret 管理系统中。
 
-The internal JSON keeps detailed evidence for later retrieval, while the
-generated Issue renders eight compact sections. Log and stack excerpts are
-limited to 50 lines, and request or response summaries are limited to 4,000
-characters each.
-
-## Sanitize a raw Kibana event
-
-`examples/kibana_raw.json` is fully synthetic but follows the expected
-Elasticsearch hit shape. Set a local HMAC key and generate an AI-safe event:
+## 构建
 
 ```bash
-export LOG_SANITIZER_HMAC_KEY="<local-test-key-at-least-32-bytes>"
-python3 -m src.kibana_sanitizer examples/kibana_raw.json \
-  --output sanitized/kibana-event.json
+python3 -m compileall -q src
+mvn -q -f control-plane/pom.xml -DskipTests package
+npm --prefix console ci
+npm --prefix console run build
 ```
 
-The sanitizer parses the Java log envelope, removes secret and identifier
-fields, converts event and trace identifiers to HMAC references, omits internal
-container identifiers, and performs a final secret scan. Unclassified
-high-entropy values block downstream AI and Issue processing. Recognized
-traceback/source paths are normalized first: machine and user prefixes are
-removed, opaque path segments are redacted, and only the useful code suffix is
-retained. Short business identifiers assigned to transaction, order, payment,
-purchase, receipt, or trade-number fields are redacted by semantic key even
-when their length or entropy would not trigger the generic detector.
+## 部署
 
-## Run the phase-one flow
+部署说明和 systemd 模板位于 [`deploy/`](deploy/)。对外只暴露 Console 的统一入口；
+Control Plane、Jira Monitor、Log Monitor、MySQL 和 Redis 应保持在受控内网。
 
-Run the complete local path from one raw Kibana hit to a sanitized event and,
-only for an eligible error, a guarded triage draft:
+仓库授权、Issue 发布和代码执行分别受以下配置约束：
 
-```bash
-export LOG_SANITIZER_HMAC_KEY="<local-key-at-least-32-bytes>"
-python3 -m src.phase_one kibana examples/kibana_raw.json \
-  --sanitized-output sanitized/kibana-event.json \
-  --draft-output drafts/kibana-error.md
-```
+- `control-plane/config/repository-search-scope.json`
+- `control-plane/config/repository-auto-publish-policy.json`
+- `control-plane/config/code-policies/`
+- `control-plane/config/code-preapproval-manifest.json`
 
-The draft always includes object, interface, and error sections. Information
-that is not present in the log is listed as missing instead of being invented.
-Non-error events are skipped, blocked events stay blocked, and publication is
-disabled until the required context and security review gates are complete.
-
-Locate a real GitHub Issue in a checked-out repository:
-
-```bash
-python3 -m src.phase_one locate-github-issue .trial-data/issue.json \
-  --repo .trial-repos/project \
-  --output reports/location.json
-```
-
-The locator scans tracked source files without executing repository code. It
-combines bounded lexical retrieval with Python AST class-inheritance analysis
-and returns ranked files, symbols, lines, and human-readable evidence.
-
-Repository selection is a separate, earlier step. The proposed resolver uses a
-maintainable allowlist of repositories as its search boundary, then applies
-deterministic evidence scoring instead of a service-to-repository routing map.
-Only one high-confidence `resolved` result may proceed to target-repository
-Issue matching; ambiguous and unknown drafts remain unpublished. See
-[`docs/repository-resolution-design.md`](docs/repository-resolution-design.md)
-for the design, versioned JSON Schemas, and company-neutral examples.
-
-Resolve one locally validated AI Issue result against a reviewed repository
-scope:
-
-```bash
-./bin/resolve-issue-repository reports/ai-issue.json \
-  --scope .issue-entry-state/repository-search-scope.json \
-  --output reports/repository-resolution.json
-```
-
-The initial read-only adapter uses the authenticated GitHub CLI and searches
-only grounded qualified-class and class/method evidence. It enforces one total
-query budget across the enabled scope, keeps GitHub file paths in memory only,
-and emits `resolved`, `ambiguous`, `unknown`, or `blocked`. It does not create
-or update Issues by itself.
-
-For newly created synthetic repositories that have not entered GitHub's code
-search index, `--adapter github-tree-probe` provides an explicit test-only
-path. It fails closed above 1 MB or 500 tree entries, reads only matching Java
-files up to 256 KB, and is not the default for real repositories.
-
-## Evaluate repository routing with SWE-bench
-
-The SWE-bench adaptation separates minimized predictor inputs from private
-gold repository labels, masks answer-bearing repository strings and GitHub
-URLs, supports derived out-of-scope `unknown` cases, and computes routing
-precision, false-route rate, coverage, recall, safe abstention, macro metrics,
-per-repository results, and Wilson confidence intervals.
-
-```bash
-./bin/prepare-swebench-routing swebench.jsonl \
-  --dataset-revision '<pinned-dataset-commit>' \
-  --inputs-output .benchmark-output/inputs.jsonl \
-  --labels-output .benchmark-output/labels.jsonl \
-  --summary-output .benchmark-output/preparation.json \
-  --derive-out-of-scope
-
-./bin/predict-swebench-routing \
-  .benchmark-output/inputs.jsonl \
-  --snapshots .benchmark-output/snapshots.json \
-  --output .benchmark-output/predictions.jsonl \
-  --audit-output .benchmark-output/prediction-audit.json
-
-./bin/evaluate-repository-routing \
-  .benchmark-output/labels.jsonl \
-  .benchmark-output/predictions.jsonl \
-  --output-json .benchmark-output/evaluation.json \
-  --output-md .benchmark-output/evaluation.md
-```
-
-The local predictor scans bounded, exact-commit source snapshots without
-executing repository code or loading private labels. The held-out
-current-head pilot achieved 62.22% correct-route recall with no wrong automatic
-routes on full Issue text; after masking project/package aliases, recall was
-47.62%, two positive cases selected the wrong repository, and three
-out-of-scope cases used an unsafe fallback. This is not yet safe for unattended
-publication and is not a historical SWE-bench result. See
-[`docs/swebench-routing-benchmark.md`](docs/swebench-routing-benchmark.md) for
-the leakage boundary, prediction contract, metric definitions, exact pilot
-method, and remaining work. The machine-readable and Markdown summaries are
-under `reports/swebench-routing-heldout-20260724.*`. A company-neutral source
-fixture is available at
-[`examples/swebench-routing-source.example.jsonl`](examples/swebench-routing-source.example.jsonl).
-
-### Prepare SWE-bench code-fix tests
-
-The code-fix adaptation is a separate offline layer. It gives an agent only
-the target repository, pinned pre-fix commit, public problem statement, and
-bounded environment metadata. Original instance IDs, fail-to-pass and
-pass-to-pass tests, and gold/test patch digests remain in a physically separate
-private label file.
-
-```bash
-./bin/prepare-swebench-codefix swebench-verified.jsonl \
-  --dataset-revision '<pinned-dataset-commit>' \
-  --max-instances 5 \
-  --tasks-output .benchmark-output/codefix-tasks.jsonl \
-  --labels-output .benchmark-output/codefix-labels.jsonl \
-  --summary-output .benchmark-output/codefix-preparation.json
-
-./bin/import-swebench-harness-results \
-  .benchmark-output/codefix-labels.jsonl \
-  logs/run_evaluation/<run-id>/<model-name> \
-  --output .benchmark-output/codefix-results.jsonl
-
-./bin/evaluate-swebench-codefix \
-  .benchmark-output/codefix-labels.jsonl \
-  .benchmark-output/codefix-results.jsonl \
-  --output-json .benchmark-output/codefix-evaluation.json \
-  --output-md .benchmark-output/codefix-evaluation.md
-```
-
-The harness importer maps official per-instance `report.json` files back to
-opaque case references and fails closed on incomplete or conflicting private
-test coverage. The evaluator marks a case resolved only when every F2P test
-passes and every P2P test remains passing. Preparation, importing, and scoring
-do not download repositories, run Docker, call Copilot, create Issues, or
-publish PRs. See
-[`docs/swebench-codefix-benchmark.md`](docs/swebench-codefix-benchmark.md).
-
-## Run the natural-language to GitHub Issue flow
-
-`bin/natural-language-to-issue` composes the existing AI Issue generator with
-repository resolution, target-repository Issue matching, deterministic policy
-approval, and optional unattended publication. The operator approves the
-scope and policy bytes once by supplying the policy SHA-256 through the
-environment; AI output, Codex, repository names, and the input text cannot
-authorize publication.
-
-The default remains a dry run. After reviewing the scope and policy, run:
-
-```bash
-export REPOSITORY_AUTO_POLICY_SHA256="<reviewed-policy-sha256>"
-
-./bin/natural-language-to-issue \
-  --description 'com.example.routing.SyntheticRoutingController.routeIssue 抛出 SyntheticRoutingException' \
-  --prompt-api-key \
-  --auto-publish
-```
-
-The command uses these local ignored defaults:
-
-- `.issue-entry-state/repository-search-scope.json`
-- `.issue-entry-state/repository-auto-publish-policy.json`
-
-It creates at most one Issue per invocation. Before writing, it requires a
-valid reviewed AI result, no credential-security review, one uniquely resolved
-repository, an allowed adapter, an unchanged policy/scope digest, and no
-ambiguous existing Issue. A deterministic fingerprint prevents a rerun from
-creating a duplicate. Existing Issues are never appended automatically.
-
-Copy
-[`examples/repository-auto-publish-policy.example.json`](examples/repository-auto-publish-policy.example.json)
-when creating a new environment-specific policy. Real repository names and
-approved digests belong only in ignored local configuration or a secret/config
-manager.
-
-The first real-project benchmark uses SymPy Issue #20567 and its fixing PR.
-See [`docs/real-project-trial.md`](docs/real-project-trial.md) for the pinned
-inputs, safety boundary, reproduction commands, and measured result. The
-machine-readable output is stored in
-[`reports/real-project-sympy-20567.json`](reports/real-project-sympy-20567.json).
-
-## Modify code from an approved Issue with Copilot CLI
-
-The guarded downstream command uses the current employee's locally
-authenticated GitHub Copilot CLI. It requires an open, fingerprinted GitHub
-Issue with the repository policy's approval label and a clean checkout whose
-tracked `.github/issue-code-policy.json` matches the target repository.
-
-Run a read-only preflight first:
-
-```bash
-./bin/modify-approved-issue \
-  https://github.com/OWNER/REPOSITORY/issues/123 \
-  --repo /path/to/repository \
-  --output .issue-code-output/issue-123-preflight.json
-```
-
-`--execute` creates an Issue-bound local branch, asks Copilot to make bounded
-changes, validates the diff, and runs only the policy test commands.
-`--publish-pr` additionally commits, pushes, and creates a Draft PR after all
-gates pass. Neither mode can merge or deploy.
-
-Every employee installs `copilot` and runs `copilot login` with their own
-company-authorized GitHub account. The workflow never shares user credentials,
-never invokes `--allow-all`/`--yolo`, and does not persist the raw prompt or
-Copilot transcript. See
-[`docs/copilot-cli-code-modification.md`](docs/copilot-cli-code-modification.md)
-for policy fields, commands, audit output, and current limitations.
-
-## Watch approved Issues and dispatch code work
-
-The local watcher connects approved GitHub Issues to the existing code
-modifier. It polls one repository once, revalidates the Issue and tracked code
-policy, rejects existing claims, work branches, or Draft PRs, and dispatches at
-most one candidate. Start with a read-only preflight:
-
-```bash
-./bin/watch-approved-issues \
-  --repo /path/to/repository \
-  --once \
-  --dry-run \
-  --output /path/to/repository/.issue-code-output/dispatch-preflight.json
-```
-
-After reviewing that report, `--once --execute` creates a conflict-detecting
-remote claim for the exact Issue snapshot, calls the current employee's
-Copilot CLI, validates the bounded diff, and runs only policy-listed tests:
-
-```bash
-./bin/watch-approved-issues \
-  --repo /path/to/repository \
-  --once \
-  --execute \
-  --output /path/to/repository/.issue-code-output/dispatch-execution.json
-```
-
-The claim is retained as an idempotency record. Execution leaves the tested
-code changes on a local work branch. An explicit `--once --publish-pr` mode
-uses the same claim and gates, then commits, pushes, and creates a Draft PR.
-Neither mode retries, merges, deploys, or runs as a background service. See
-[`docs/approved-issue-dispatcher.md`](docs/approved-issue-dispatcher.md) for the
-selection, snapshot, idempotency, audit, and next-stage claim boundaries.
-
-## Run the terminal agent
-
-`bin/ai-agent` provides one Codex-style terminal flow. It reads the current
-GitHub and Copilot CLI identities, validates the configured repository and its
-tracked `.github/issue-code-policy.json`, and then offers two inputs:
-
-- one-line natural-language change request;
-- bounded OpenSearch Dashboards log intake.
-
-Start it from the project checkout:
-
-```bash
-./bin/ai-agent
-```
-
-With no arguments, the terminal shows a compact color pixel-art bovine mascot
-derived from the operator-provided reference and goes directly to the input
-prompt. It uses ANSI 256-color half-blocks in an interactive terminal and a
-Unicode silhouette when color is disabled. The natural-language, log, inbox,
-incident-review, and exit entries appear only after `help`. `logs`, `/logs`,
-and `日志` are equivalent; command-like input is classified locally before any
-Issue-generation call. A nearest-neighbor preview of the embedded palette is
-kept at [`assets/terminal-mascot-pixel.png`](assets/terminal-mascot-pixel.png).
-This interactive session remains open after completed operations and
-recoverable errors. Use `exit`/`退出` or Ctrl-D to close it. Explicit CLI
-commands remain one-shot for automation.
-
-Natural-language input is recorded as an explicit requested change, so feature,
-refactor, and documentation requests do not need to invent an error or current
-behavior. Bug, performance, and security reports still require an observed
-problem. For natural-language requests and explicit revisions, exactly one
-enabled repository remains an operator-approved target without requiring class
-names or a GitHub code search. Sanitized log evidence never uses that shortcut:
-it must resolve through evidence-grounded code search even when only one
-repository is enabled. Multiple enabled repositories still require
-evidence-grounded resolution. After sanitization, independent Issue generation/review, and
-repository resolution, the terminal shows the exact Issue body and one combined
-approval. Approval publishes the Issue, applies repository-owned approval
-labels, claims the exact Issue snapshot, runs Copilot and policy tests, and
-creates a Draft PR. It never merges or deploys.
-Selected Kibana evidence is re-sanitized immediately before the Issue model,
-including incidents already stored in the local inbox. A non-JSON Copilot
-response is retried once with the same safe prompt; neither invalid response is
-persisted or included in the next request. A renewed scan that still finds
-unclassified data remains blocked.
-
-Only an OPEN exact-fingerprint Issue can be reused for code work. A closed
-exact match is reported as already completed before approval, rather than
-failing later in the dispatcher. The same terminal screen offers an `r`
-revision path that requires a concrete unfinished item, new behavior, or new
-acceptance criterion. A revision receives parent-bound fingerprint lineage and
-a completely new human approval; it does not reopen the closed Issue or reuse
-its claim, branch, or PR. Each approved code run creates an ignored, per-run
-checkout from the latest `origin/main`; the configured source checkout is never
-switched, reset, or cleaned, so a branch left by an earlier run does not become
-the next run's execution base.
-
-The persistent log path starts with `./bin/ai-agent watch --once` or
-`./bin/ai-agent watch`. It stores only parsed non-secret connection settings,
-sanitized artifacts, and deduplicated inbox state. In the interactive terminal,
-`log setup` stores the source and username locally and delegates one hidden
-password prompt to macOS Keychain; later scans load it automatically without
-putting it in JSON or a command argument. Interactive reads use a 60-second
-request timeout and make at most two short retries for transient timeouts,
-connection failures, rate limits, or gateway failures; exhaustion leaves both
-log cursors unchanged. `log more` uses a separate backward
-cursor to continue through older non-empty five-minute windows without changing
-the normal forward cursor. Same-service events with the same normalized request
-path and exception type share one deterministic statistics record across
-scans. Exact incident references prevent overlap rescans from double-counting.
-The inbox and generated log Issue distinguish current-scan events from
-historical matching events and record first/last observation, affected
-endpoints, and privacy-safe affected-user bounds plus identifier coverage.
-Raw user identifiers and their HMAC references are not persisted.
-`./bin/ai-agent inbox` lists incidents and
-`./bin/ai-agent review INCIDENT_ID` displays the exact Issue preview. Action
-`a` approves Issue publication through Copilot, tests, and Draft PR; action `i`
-publishes only the Issue and cannot authorize code work. The watcher runs in
-the foreground, while the inbox survives terminal restarts.
-
-Use `./bin/ai-agent --configure` to replace the local repository configuration,
-`--request '...'` to supply a request directly, `--logs` for log mode, or
-`--preview-only` to stop before all remote writes. See
-[`docs/terminal-control-center.md`](docs/terminal-control-center.md).
-
-## Generate an Issue with AI
-
-The AI command accepts a sanitized `issue-intake/v1` record, a
-`sanitized-kibana-event/v1` event, or a public GitHub Issue API response. Raw
-Jira and Kibana payloads are not accepted at the model boundary.
-
-Configure an OpenAI-compatible Chat Completions gateway locally. Never commit
-the real values from `.env`:
-
-```bash
-export AI_BASE_URL="https://example.invalid/api/v1"
-export AI_API_KEY="<local-secret>"
-export AI_MODEL="ailemac/gpt-5-mini"
-export AI_REVIEW_MODEL="ailemac/gpt-5-mini"
-export AI_SAFETY_IDENTIFIER="<local-stable-identifier>"
-```
-
-Generate and review a local draft:
-
-```bash
-python3 -m src.phase_one ai-issue .trial-data/issue.json \
-  --output-json reports/ai-issue.json \
-  --output-md drafts/ai-issue.md
-```
-
-The gateway request uses strict JSON Schema and `max_completion_tokens`. A
-second model call reviews claims against the minimized evidence. Local code
-then rejects extra fields, unknown evidence paths, unsupported claims, and
-sensitive output. The persisted result contains an input hash instead of the
-raw source. Phase one always requires human confirmation and keeps both GitHub
-publication and AI implementation disabled.
-
-The live public-project AI trial uses SymPy Issue #20567. See
-[`docs/ai-issue-trial.md`](docs/ai-issue-trial.md) for its safety boundary,
-observed blocked iterations, final guarded result, and limitations.
-
-## Create an Issue from natural language and a log
-
-The terminal entry accepts a UTF-8 description plus one raw Kibana hit or
-plain-text log. It sanitizes and minimizes both inputs, runs the guarded AI
-generator and reviewer, and writes local audit artifacts under
-`.issue-entry-output/`:
-
-```bash
-export LOG_SANITIZER_HMAC_KEY="<local-key-at-least-32-bytes>"
-export AI_BASE_URL="https://example.invalid/api/v1"
-export AI_MODEL="ailemac/gpt-5-mini"
-
-./bin/issue-entry \
-  --description-file examples/natural_request.txt \
-  --log examples/kibana_error_raw.json \
-  --prompt-api-key
-```
-
-Review the generated `issue.md`. To create the Issue in the repository, first
-authenticate `gh`, then make the human publication decision explicit:
-
-```bash
-gh auth login
-./bin/issue-entry \
-  --description-file examples/natural_request.txt \
-  --log examples/kibana_error_raw.json \
-  --repository wzf12400/ai-pr-sandbox \
-  --prompt-api-key --publish --confirm
-```
-
-`--prompt-api-key` reads the secret without echoing it and does not save it to
-the repository. `AI_API_KEY` may still be supplied as an environment variable
-for non-interactive automation.
-
-For gateways that implement the older Chat Completions parameter names, set
-`AI_API_MODE=compatible`. This sends `max_tokens` and JSON object mode; the
-same strict local schema and evidence validation still run before publication.
-
-The command rejects blocked AI output and prevents publication when credentials
-were present in the source, even after redaction. It never uses model output as
-authorization to modify code.
-
-## Pull error candidates from OpenSearch Dashboards
-
-`bin/kibana-to-issues` accepts a complete Discover URL, resolves its data view,
-and performs a bounded read-only error search. The default run only writes
-sanitized local incident candidates. Deterministic grouping runs before the
-candidate limit and before AI: equal HMAC trace references take priority, while
-trace-less fallback grouping requires the same service, a bounded time window,
-and auditable software-semantic signatures.
-
-```bash
-export LOG_SANITIZER_HMAC_KEY="<stable-local-secret-at-least-32-bytes>"
-
-./bin/kibana-to-issues \
-  --discover-url '<full-discover-url>' \
-  --prompt-password
-```
-
-Add `--generate --prompt-api-key` for locally reviewed AI drafts. Publishing
-also requires `--publish --confirm`, a GitHub repository, and a maximum of
-three candidates per run. Raw OpenSearch responses, passwords, and AI keys are
-not persisted.
-
-See [`docs/kibana-connector.md`](docs/kibana-connector.md) for access
-requirements, the complete commands, safety gates, and current phase boundary.
+所有代码修改只生成 Draft PR，合并仍需人工审核。

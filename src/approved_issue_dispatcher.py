@@ -367,6 +367,8 @@ def _run_modifier(
     *,
     publish_pr: bool = False,
     model: str = "",
+    trusted_external_policy_sha256: str = "",
+    allow_missing_human_context: bool = False,
 ) -> Mapping[str, Any]:
     return execute_issue_code_workflow(
         issue_url,
@@ -378,6 +380,8 @@ def _run_modifier(
         publish_pr=publish_pr,
         model=model,
         publisher=GitHubCLIDraftPRPublisher() if publish_pr else None,
+        trusted_external_policy_sha256=trusted_external_policy_sha256,
+        allow_missing_human_context=allow_missing_human_context,
     )
 
 
@@ -429,6 +433,8 @@ def dispatch_once(
     target_issue_url: str = "",
     retained_claim_commit: str = "",
     expected_issue_snapshot_sha256: str = "",
+    trusted_external_policy_sha256: str = "",
+    allow_missing_human_context: bool = False,
     claimer: Optional[DispatchClaimer] = None,
     workflow_runner: Optional[WorkflowRunner] = None,
 ) -> Dict[str, Any]:
@@ -446,7 +452,12 @@ def dispatch_once(
     if execute and claimer is None and not retained_claim_commit:
         raise ValueError("execute mode requires an atomic dispatcher claimer")
     policy = load_issue_code_policy(policy_path)
-    repository = validate_repository(repo, policy_path, policy)
+    repository = validate_repository(
+        repo,
+        policy_path,
+        policy,
+        trusted_external_policy_sha256=trusted_external_policy_sha256,
+    )
     if target_issue_url:
         _validate_target_issue_url(target_issue_url, policy.repository)
         urls = [target_issue_url]
@@ -511,7 +522,11 @@ def dispatch_once(
     }
     for issue_url in urls:
         issue = issue_client.fetch(issue_url)
-        approval = evaluate_issue_approval(issue, policy)
+        approval = evaluate_issue_approval(
+            issue,
+            policy,
+            allow_missing_human_context=allow_missing_human_context,
+        )
         approval["rules"]["requested_url_matches_snapshot"] = issue.url == issue_url
         if expected_issue_snapshot_sha256:
             approval["rules"]["retained_snapshot_matches"] = (
@@ -595,6 +610,8 @@ def dispatch_once(
                     execute,
                     publish_pr=publish_pr,
                     model=model,
+                    trusted_external_policy_sha256=trusted_external_policy_sha256,
+                    allow_missing_human_context=allow_missing_human_context,
                 )
             else:
                 modifier_report = workflow_runner(

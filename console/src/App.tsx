@@ -10,13 +10,23 @@ import { AppSidebar } from "@/sections/AppSidebar";
 import { ChatView } from "@/sections/ChatView";
 import { JiraMonitor } from "@/sections/JiraMonitor";
 import { LogMonitor } from "@/sections/LogMonitor";
+import { useProjectSettings } from "@/hooks/useProjectSettings";
 
 export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(() => {
     const hash = window.location.hash;
     return hash.startsWith("#task-") ? hash.slice(6) : null;
   });
+  const [selectedRepository, setSelectedRepository] = useState("all");
   const { tasks, connected, lastRefresh, refresh } = useTasks();
+  const {
+    settings,
+    loading: settingsLoading,
+    error: settingsError,
+    saveSettings,
+    connectJira,
+    refreshSettings,
+  } = useProjectSettings();
 
   async function handleDelete(id: string) {
     const task = tasks.find((t) => t.id === id);
@@ -43,6 +53,14 @@ export default function App() {
             onSelect={setSelectedId}
             onDelete={handleDelete}
             connected={connected}
+            settings={settings}
+            settingsLoading={settingsLoading}
+            settingsError={settingsError}
+            onRefreshSettings={refreshSettings}
+            onSaveSettings={saveSettings}
+            onConnectJira={connectJira}
+            repositoryFilter={selectedRepository}
+            onRepositoryFilterChange={setSelectedRepository}
           />
         </ResizablePanel>
         <ResizableHandle withHandle className="w-1 bg-transparent hover:bg-sky-200 data-[resize-handle-state=drag]:bg-sky-300" />
@@ -54,6 +72,9 @@ export default function App() {
               connected={connected}
               lastRefresh={lastRefresh}
               onRefresh={refresh}
+              repositoryHint={
+                selectedRepository === "all" ? null : selectedRepository
+              }
             />
             <div className="pointer-events-none absolute right-3 top-3 z-20 flex w-60 flex-col gap-2">
               <LogMonitor />

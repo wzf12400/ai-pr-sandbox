@@ -20,6 +20,8 @@ export type IncidentMember = {
 export type IncidentView = {
   incidentRef: string;
   eventCount: number;
+  currentScanEventCount?: number;
+  incidentGroupCount?: number;
   firstSeenAt: string;
   lastSeenAt: string;
   strategy: string;
@@ -66,10 +68,12 @@ export type LogMonitorScan = {
   projectsScanned?: number;
   namespaces?: NamedCount[];
   services?: NamedCount[];
+  logErrors?: NamedCount[];
   errorEvents?: number;
   blockedEvents?: number;
   skippedNonError?: number;
   incidentGroups?: number;
+  retainedIncidentGroups?: number;
   window?: { from: string | null; to: string | null };
   incidents?: IncidentView[];
   automation?: AutomationInfo;

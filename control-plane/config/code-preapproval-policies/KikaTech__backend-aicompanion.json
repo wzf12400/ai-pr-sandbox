@@ -1,0 +1,16 @@
+{
+  "schema_version": "code-execution-preapproval-policy/v1",
+  "policy_id": "kikatech-backend-aicompanion-preapproval-v1",
+  "repository": "KikaTech/backend-aicompanion",
+  "issue_publication_policy_sha256": "2b853c1e8aa2ceceb08124f7909460e23fd2a4ac51b5c994edbeb8ab2283a43d",
+  "issue_code_policy_sha256": "48c0538420a9d7c406a5e274c1efedc073b4bd77a1825708793d75dbe1a5c72f",
+  "allowed_source_types": [
+    "LOG",
+    "JIRA",
+    "NATURAL_LANGUAGE"
+  ],
+  "required_labels": [
+    "ai-code-approved"
+  ],
+  "max_issues_per_run": 1
+}

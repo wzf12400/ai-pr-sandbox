@@ -6,7 +6,9 @@ if lsof -iTCP:8099 -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
-set -a
-. ./.env
-set +a
-exec .venv/bin/python3 -m src.log_monitor_api
+PYTHON="$ROOT/.venv/bin/python3"
+if [ ! -x "$PYTHON" ]; then
+    PYTHON="$(command -v python3)"
+fi
+exec "$PYTHON" "$ROOT/scripts/run-with-env.py" -- \
+    "$PYTHON" -m src.log_monitor_api

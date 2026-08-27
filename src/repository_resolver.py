@@ -34,7 +34,7 @@ REPOSITORY_PATTERN = re.compile(
 )
 SCOPE_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 BRANCH_PATTERN = re.compile(r"[^\s~^:?*\[\]\\]{1,255}")
-LABEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+LABEL_PATTERN = re.compile(r"\w[\w._-]{0,63}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 BLOB_SHA_PATTERN = re.compile(r"[0-9a-f]{40,64}")
 FQCN_PATTERN = re.compile(

@@ -39,6 +39,9 @@ public class AutomationJob {
     @Column(name = "source_reference", length = 128)
     private String sourceReference;
 
+    @Column(name = "log_route_id", length = 36)
+    private String logRouteId;
+
     @Column(name = "first_seen_at")
     private Instant firstSeenAt;
 
@@ -94,6 +97,21 @@ public class AutomationJob {
     @Column(name = "issue_url", length = 512)
     private String issueUrl;
 
+    @Column(name = "agent_task_id", length = 160)
+    private String agentTaskId;
+
+    @Column(name = "agent_task_url", length = 512)
+    private String agentTaskUrl;
+
+    @Column(name = "agent_submission_key", length = 64)
+    private String agentSubmissionKey;
+
+    @Column(name = "agent_issue_sha256", length = 64)
+    private String agentIssueSha256;
+
+    @Column(name = "agent_policy_sha256", length = 64)
+    private String agentPolicySha256;
+
     @Column(name = "pr_number")
     private Long prNumber;
 
@@ -105,6 +123,15 @@ public class AutomationJob {
 
     @Column(name = "blocked_reason", length = 1000)
     private String blockedReason;
+
+    @Column(name = "parent_task_id", length = 36)
+    private String parentTaskId;
+
+    @Column(name = "dependency_reason_code", length = 64)
+    private String dependencyReasonCode;
+
+    @Column(name = "dependency_summary", length = 1000)
+    private String dependencySummary;
 
     @Column(name = "retry_count", nullable = false)
     private int retryCount;
@@ -136,6 +163,7 @@ public class AutomationJob {
             String inputSummary,
             String normalizedRequirement,
             String sourceReference,
+            String logRouteId,
             Instant firstSeenAt,
             Instant lastSeenAt,
             Integer currentScanEventCount,
@@ -164,6 +192,7 @@ public class AutomationJob {
         this.inputSummary = inputSummary;
         this.normalizedRequirement = normalizedRequirement;
         this.sourceReference = sourceReference;
+        this.logRouteId = logRouteId;
         this.firstSeenAt = firstSeenAt;
         this.lastSeenAt = lastSeenAt;
         this.currentScanEventCount = currentScanEventCount;
@@ -203,6 +232,11 @@ public class AutomationJob {
         this.updatedAt = now;
     }
 
+    public void bindLogRoute(String routeId, Instant now) {
+        this.logRouteId = routeId;
+        this.updatedAt = now;
+    }
+
     public void transitionTo(TaskStatus nextStatus, String detail, Instant now) {
         this.status = nextStatus;
         this.updatedAt = now;
@@ -239,6 +273,113 @@ public class AutomationJob {
         return true;
     }
 
+    public boolean attachAgentTask(String taskId, String url, Instant now) {
+        if (agentSubmissionKey == null
+                || agentIssueSha256 == null
+                || agentPolicySha256 == null) {
+            throw new IllegalStateException(
+                    "cloud-agent task requires a durable submission reservation"
+            );
+        }
+        if (agentTaskId != null || agentTaskUrl != null) {
+            if (taskId.equals(agentTaskId) && url.equals(agentTaskUrl)) {
+                return false;
+            }
+            throw new IllegalArgumentException(
+                    "task already references a different cloud-agent task"
+            );
+        }
+        this.agentTaskId = taskId;
+        this.agentTaskUrl = url;
+        this.updatedAt = now;
+        return true;
+    }
+
+    public boolean reserveAgentTask(
+            String submissionKey,
+            String issueSha256,
+            String policySha256,
+            Instant now
+    ) {
+        if (agentSubmissionKey != null
+                || agentIssueSha256 != null
+                || agentPolicySha256 != null) {
+            if (submissionKey.equals(agentSubmissionKey)
+                    && issueSha256.equals(agentIssueSha256)
+                    && policySha256.equals(agentPolicySha256)) {
+                return false;
+            }
+            throw new IllegalArgumentException(
+                    "task already has a different cloud-agent submission reservation"
+            );
+        }
+        this.agentSubmissionKey = submissionKey;
+        this.agentIssueSha256 = issueSha256;
+        this.agentPolicySha256 = policySha256;
+        this.updatedAt = now;
+        return true;
+    }
+
+    public boolean releaseAgentTaskReservation(Instant now) {
+        if (agentTaskId != null || agentTaskUrl != null) {
+            throw new IllegalStateException(
+                    "cloud-agent submission reservation cannot be released after task creation"
+            );
+        }
+        if (agentSubmissionKey == null
+                && agentIssueSha256 == null
+                && agentPolicySha256 == null) {
+            return false;
+        }
+        this.agentSubmissionKey = null;
+        this.agentIssueSha256 = null;
+        this.agentPolicySha256 = null;
+        this.updatedAt = now;
+        return true;
+    }
+
+    public boolean resetCompletedAgentTaskForRetry(Instant now) {
+        if (prNumber != null || prUrl != null) {
+            throw new IllegalStateException(
+                    "cloud-agent task cannot be reset after a Pull Request is attached"
+            );
+        }
+        if (agentTaskId == null && agentTaskUrl == null) {
+            return false;
+        }
+        if (agentTaskId == null || agentTaskUrl == null) {
+            throw new IllegalStateException(
+                    "cloud-agent task reference is incomplete"
+            );
+        }
+        this.agentTaskId = null;
+        this.agentTaskUrl = null;
+        this.agentSubmissionKey = null;
+        this.agentIssueSha256 = null;
+        this.agentPolicySha256 = null;
+        this.updatedAt = now;
+        return true;
+    }
+
+    public void heartbeat(Instant now) {
+        this.updatedAt = now;
+    }
+
+    public void attachDependencyParent(
+            String parentTaskId,
+            String reasonCode,
+            String summary,
+            Instant now
+    ) {
+        if (this.parentTaskId != null) {
+            throw new IllegalStateException("task already has a dependency parent");
+        }
+        this.parentTaskId = parentTaskId;
+        this.dependencyReasonCode = reasonCode;
+        this.dependencySummary = summary;
+        this.updatedAt = now;
+    }
+
     public boolean attachDraftPullRequest(
             long number,
             String url,
@@ -265,6 +406,7 @@ public class AutomationJob {
     public String getInputSummary() { return inputSummary; }
     public String getNormalizedRequirement() { return normalizedRequirement; }
     public String getSourceReference() { return sourceReference; }
+    public String getLogRouteId() { return logRouteId; }
     public Instant getFirstSeenAt() { return firstSeenAt; }
     public Instant getLastSeenAt() { return lastSeenAt; }
     public Integer getCurrentScanEventCount() { return currentScanEventCount; }
@@ -283,10 +425,18 @@ public class AutomationJob {
     public String getRoutingCandidates() { return routingCandidates; }
     public Long getIssueNumber() { return issueNumber; }
     public String getIssueUrl() { return issueUrl; }
+    public String getAgentTaskId() { return agentTaskId; }
+    public String getAgentTaskUrl() { return agentTaskUrl; }
+    public String getAgentSubmissionKey() { return agentSubmissionKey; }
+    public String getAgentIssueSha256() { return agentIssueSha256; }
+    public String getAgentPolicySha256() { return agentPolicySha256; }
     public Long getPrNumber() { return prNumber; }
     public String getPrUrl() { return prUrl; }
     public String getTestSummary() { return testSummary; }
     public String getBlockedReason() { return blockedReason; }
+    public String getParentTaskId() { return parentTaskId; }
+    public String getDependencyReasonCode() { return dependencyReasonCode; }
+    public String getDependencySummary() { return dependencySummary; }
     public int getRetryCount() { return retryCount; }
     public String getSubmittedBy() { return submittedBy; }
     public String getPolicyId() { return policyId; }

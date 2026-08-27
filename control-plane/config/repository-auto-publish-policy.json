@@ -1,8 +1,8 @@
 {
   "schema_version": "repository-auto-publish-policy/v1",
-  "policy_id": "local-ai-pr-sandbox-issue-publication-v1",
-  "scope_id": "local-ai-pr-sandbox",
-  "scope_sha256": "f012a9bc73b15066481d8aefa1b0e42d8d357fd0f6b72333c1aec35206fda24d",
+  "policy_id": "kikatech-test-environment-issue-publication-v1",
+  "scope_id": "kikatech-test-environment",
+  "scope_sha256": "24a4fa0a124d457b3477a6c0506e728e5a590674644192ac28ebe75b0b2a6795",
   "provider": "github_rest_api",
   "max_issues_per_run": 1,
   "allowed_generation_states": [

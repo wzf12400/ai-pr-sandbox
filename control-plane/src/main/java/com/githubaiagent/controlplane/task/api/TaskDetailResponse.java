@@ -4,9 +4,12 @@ import java.util.List;
 
 public record TaskDetailResponse(
         TaskResponse task,
-        List<TaskEventResponse> events
+        List<TaskEventResponse> events,
+        TaskResponse parentTask,
+        List<TaskResponse> childTasks
 ) {
     public TaskDetailResponse {
         events = List.copyOf(events);
+        childTasks = List.copyOf(childTasks);
     }
 }

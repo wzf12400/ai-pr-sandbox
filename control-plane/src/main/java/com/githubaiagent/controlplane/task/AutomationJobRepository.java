@@ -14,9 +14,25 @@ import java.util.Optional;
 public interface AutomationJobRepository extends JpaRepository<AutomationJob, String> {
     List<AutomationJob> findAllByOrderByCreatedAtDesc(Pageable pageable);
 
-    Optional<AutomationJob> findFirstBySourceReferenceOrderByCreatedAtAsc(
-            String sourceReference
+    List<AutomationJob> findAllBySourceTypeOrderByCreatedAtDesc(
+            SourceType sourceType,
+            Pageable pageable
     );
+
+    Optional<AutomationJob>
+            findFirstBySourceTypeAndSourceReferenceOrderByCreatedAtAsc(
+                    SourceType sourceType,
+                    String sourceReference
+            );
+
+    List<AutomationJob> findAllByParentTaskIdOrderByCreatedAtAsc(String parentTaskId);
+
+    Optional<AutomationJob> findFirstByParentTaskIdAndMatchedRepository(
+            String parentTaskId,
+            String matchedRepository
+    );
+
+    long countByParentTaskId(String parentTaskId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("""

@@ -1,6 +1,7 @@
 package com.githubaiagent.controlplane.task.api;
 
 import com.githubaiagent.controlplane.task.TaskService;
+import com.githubaiagent.controlplane.task.SourceType;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -9,6 +10,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -31,8 +33,10 @@ public class TaskController {
     }
 
     @GetMapping
-    public List<TaskResponse> list() {
-        return taskService.list();
+    public List<TaskResponse> list(
+            @RequestParam(required = false) SourceType sourceType
+    ) {
+        return taskService.list(sourceType);
     }
 
     @GetMapping("/{taskId}")

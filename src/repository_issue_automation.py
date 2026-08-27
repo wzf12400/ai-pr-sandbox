@@ -476,6 +476,8 @@ def _validate_issue_snapshot(
     body = payload.get("body")
     url = payload.get(url_field)
     state = payload.get("state")
+    updated_at = payload.get("updated_at")
+    raw_labels = payload.get("labels", [])
     expected_url = f"https://github.com/{repository}/issues/{number}"
     if (
         payload.get("number") != number
@@ -485,8 +487,18 @@ def _validate_issue_snapshot(
         or not body.strip()
         or url != expected_url
         or state not in {"open", "closed"}
+        or (updated_at is not None and not isinstance(updated_at, str))
+        or not isinstance(raw_labels, list)
     ):
         raise ValueError("GitHub Issue refetch returned an inconsistent snapshot")
+    labels: list[str] = []
+    for item in raw_labels:
+        if isinstance(item, str):
+            labels.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("name"), str):
+            labels.append(item["name"])
+        else:
+            raise ValueError("GitHub Issue refetch returned invalid labels")
     if find_sensitive_data({"title": title, "body": body}):
         raise ValueError("GitHub Issue snapshot failed sensitive-data validation")
     return {
@@ -495,6 +507,8 @@ def _validate_issue_snapshot(
         "body": body,
         "url": url,
         "state": state,
+        "labels": labels,
+        "updated_at": updated_at or "unknown",
         "repository_url": f"https://api.github.com/repos/{repository}",
     }
 
@@ -887,12 +901,9 @@ def automate_repository_issue(
         entry.repository: entry for entry in scope.enabled_repositories
     }
     if preselected_repository:
-        if (
-            preselected_repository not in enabled_repositories
-            or len(enabled_repositories) != 1
-        ):
+        if preselected_repository not in enabled_repositories:
             raise ValueError(
-                "preselected repository requires the exact single enabled scope"
+                "preselected repository is not in the enabled scope"
             )
         if (
             routing_mode == ROUTING_MODE_PRODUCTION_EVIDENCE
@@ -920,7 +931,7 @@ def automate_repository_issue(
                 "runner_up_score": 0,
                 "margin": 100,
                 "reasons": [
-                    "repository is bound by the operator-approved single-repository scope"
+                    "repository is bound by operator-approved routing within the enabled scope"
                 ],
             },
             "candidates": [

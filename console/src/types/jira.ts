@@ -2,6 +2,7 @@ export type JiraDecision =
   | "RESOLVED"
   | "NEEDS_CONTEXT"
   | "BLOCKED_SENSITIVE"
+  | "NOT_OPEN"
   | "WATERMARK_INIT";
 
 export type JiraDispatchResult = {
@@ -15,6 +16,7 @@ export type JiraScannedIssue = {
   ts: string;
   issue: string;
   project: string;
+  projectName?: string;
   summary: string;
   excerpt?: string;
   url?: string;
@@ -23,12 +25,16 @@ export type JiraScannedIssue = {
   repository: string;
   basis: string;
   confidence: number;
+  workflowStatus?: string;
+  workflowStatusCategory?: string;
+  automationEligible?: boolean;
   dispatch?: JiraDispatchResult;
   manual?: boolean;
 };
 
 export type JiraProjectView = {
   key: string;
+  name: string;
   enabled: boolean;
   autoDispatch: boolean;
   issueTypes: string[];
@@ -39,6 +45,8 @@ export type JiraProjectView = {
 export type JiraMonitorStatus = {
   status: "ok" | "config_error" | "error";
   detail?: string;
+  workflowStatusError?: string | null;
+  taskHistoryError?: string | null;
   issues?: JiraScannedIssue[];
   projects?: JiraProjectView[];
   watermarks?: Record<string, string>;

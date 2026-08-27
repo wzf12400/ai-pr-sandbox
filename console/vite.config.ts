@@ -1,12 +1,12 @@
 import path from "path"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
-import { inspectAttr } from 'kimi-plugin-inspect-react'
+import { settingsApiPlugin } from "./build/settings-api"
 
 // https://vite.dev/config/
 export default defineConfig({
   base: './',
-  plugins: [inspectAttr(), react()],
+  plugins: [settingsApiPlugin(), react()],
   server: {
     port: 7100,
     proxy: {
@@ -19,6 +19,10 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/issue': {
+        target: 'http://127.0.0.1:8099',
+        changeOrigin: true,
+      },
+      '/pull': {
         target: 'http://127.0.0.1:8099',
         changeOrigin: true,
       },

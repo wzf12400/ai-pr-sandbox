@@ -25,6 +25,9 @@ from src.repo_locator import locate_issue
 POLICY_SCHEMA_VERSION = "issue-code-policy/v1"
 REPORT_SCHEMA_VERSION = "issue-code-execution/v1"
 PROVIDER = "github-copilot-cli"
+SUPPORTED_PROVIDERS = frozenset(
+    {PROVIDER, "github-copilot-cloud-agent"}
+)
 FINGERPRINT_PATTERN = re.compile(
     r"<!-- repository-issue-fingerprint/v(?:1|2):(?P<digest>[0-9a-f]{64}) -->"
 )
@@ -164,8 +167,11 @@ def load_issue_code_policy(path: Path) -> IssueCodePolicy:
         raise ValueError("Issue code policy_id is invalid")
     if not REPOSITORY_PATTERN.fullmatch(repository):
         raise ValueError("Issue code repository is invalid")
-    if provider != PROVIDER:
-        raise ValueError(f"Issue code provider must be {PROVIDER}")
+    if provider not in SUPPORTED_PROVIDERS:
+        raise ValueError(
+            "Issue code provider must be github-copilot-cli or "
+            "github-copilot-cloud-agent"
+        )
     if not base_branch or "/" in base_branch or base_branch in {".", ".."}:
         raise ValueError("Issue code base_branch is invalid")
     if (
@@ -423,7 +429,11 @@ def _tracked_clean_policy(repo: Path, policy_path: Path) -> str:
 
 
 def validate_repository(
-    repo: Path, policy_path: Path, policy: IssueCodePolicy
+    repo: Path,
+    policy_path: Path,
+    policy: IssueCodePolicy,
+    *,
+    trusted_external_policy_sha256: str = "",
 ) -> Dict[str, Any]:
     if repo.is_symlink() or not repo.is_dir():
         raise ValueError("target repository path is invalid")
@@ -434,27 +444,49 @@ def validate_repository(
     if origin.casefold() != policy.repository.casefold():
         raise ValueError("target repository does not match the Issue code policy")
     branch = _git(repo, "branch", "--show-current")
-    if branch != policy.base_branch:
+    task_base_branch = re.fullmatch(
+        r"worker/task/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+        r"[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        branch,
+    )
+    if branch != policy.base_branch and task_base_branch is None:
         raise ValueError(f"target repository must start on {policy.base_branch}")
     if _git(repo, "status", "--porcelain", "--untracked-files=all"):
         raise ValueError("target repository must be clean before code automation")
     head = _git(repo, "rev-parse", "HEAD")
-    remote_head = _git(repo, "rev-parse", f"origin/{policy.base_branch}")
+    expected_base_ref = (
+        f"refs/worker/task/{branch.removeprefix('worker/task/')}/base"
+        if task_base_branch is not None
+        else f"origin/{policy.base_branch}"
+    )
+    remote_head = _git(repo, "rev-parse", expected_base_ref)
     if head != remote_head:
         raise ValueError("local base branch must match the known origin base commit")
-    policy_relative = _tracked_clean_policy(repo, policy_path)
+    if trusted_external_policy_sha256:
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", trusted_external_policy_sha256)
+            or policy.sha256 != trusted_external_policy_sha256
+        ):
+            raise ValueError("central Issue code policy SHA-256 confirmation does not match")
+        policy_reference = f"control-plane:{policy.sha256}"
+    else:
+        policy_reference = _tracked_clean_policy(repo, policy_path)
     return {
         "repository": origin,
         "path": str(root),
-        "base_branch": branch,
+        "base_branch": policy.base_branch,
+        "start_branch": branch,
         "base_commit": head,
-        "policy_path": policy_relative,
+        "policy_path": policy_reference,
         "clean": True,
     }
 
 
 def evaluate_issue_approval(
-    issue: ApprovedIssue, policy: IssueCodePolicy
+    issue: ApprovedIssue,
+    policy: IssueCodePolicy,
+    *,
+    allow_missing_human_context: bool = False,
 ) -> Dict[str, Any]:
     markers = FINGERPRINT_PATTERN.findall(issue.body)
     findings = find_sensitive_data({"title": issue.title, "body": issue.body})
@@ -477,6 +509,15 @@ def evaluate_issue_approval(
             re.IGNORECASE,
         )
     )
+    source_match = re.search(
+        r"(?im)^- Type:\s*(?P<source>[a-z0-9_-]+)\s*$",
+        issue.body,
+    )
+    source_type = source_match.group("source").casefold() if source_match else ""
+    centralized_intake = (
+        allow_missing_human_context
+        and source_type in {"kibana", "jira"}
+    )
     rules = {
         "repository_matches_policy": issue.repository.casefold()
         == policy.repository.casefold(),
@@ -488,8 +529,12 @@ def evaluate_issue_approval(
         "required_labels_present": set(policy.required_labels) <= set(issue.labels),
         "one_automation_fingerprint": len(markers) == 1,
         "no_sensitive_data_detected": not findings,
-        "review_does_not_need_clarification": not review_needs_clarification,
-        "acceptance_criteria_are_known": not acceptance_unknown,
+        "review_does_not_need_clarification": (
+            not review_needs_clarification or centralized_intake
+        ),
+        "acceptance_criteria_are_known": (
+            not acceptance_unknown or centralized_intake
+        ),
         "draft_pr_only": policy.draft_pr_only and not policy.auto_merge,
     }
     return {
@@ -874,12 +919,16 @@ def issue_work_branch_name(policy: IssueCodePolicy, issue: ApprovedIssue) -> str
     return f"{policy.branch_prefix}/issue-{issue.number}-{issue.sha256[:8]}"
 
 
-def _cleanup_empty_work_branch(repo: Path, policy: IssueCodePolicy, branch: str) -> bool:
+def _cleanup_empty_work_branch(
+    repo: Path,
+    start_branch: str,
+    branch: str,
+) -> bool:
     if _git(repo, "status", "--porcelain", "--untracked-files=all"):
         return False
     if _git(repo, "branch", "--show-current") != branch:
         return False
-    _git(repo, "switch", policy.base_branch)
+    _git(repo, "switch", start_branch)
     _git(repo, "branch", "-D", branch)
     return True
 
@@ -894,14 +943,27 @@ def execute_issue_code_workflow(
     publish_pr: bool = False,
     model: str = "",
     publisher: Optional[DraftPRPublisher] = None,
+    trusted_external_policy_sha256: str = "",
+    allow_missing_human_context: bool = False,
 ) -> Dict[str, Any]:
     policy = load_issue_code_policy(policy_path)
+    if policy.provider != PROVIDER:
+        raise ValueError("local Issue code workflow requires github-copilot-cli")
     selected_model = model or policy.default_model
     if selected_model not in policy.allowed_models:
         raise ValueError("selected Copilot model is not allowed by repository policy")
-    repository = validate_repository(repo, policy_path, policy)
+    repository = validate_repository(
+        repo,
+        policy_path,
+        policy,
+        trusted_external_policy_sha256=trusted_external_policy_sha256,
+    )
     issue = issue_client.fetch(issue_url)
-    approval = evaluate_issue_approval(issue, policy)
+    approval = evaluate_issue_approval(
+        issue,
+        policy,
+        allow_missing_human_context=allow_missing_human_context,
+    )
     copilot_version = modifier.version(repo)
     location = locate_issue(
         repo,
@@ -929,6 +991,11 @@ def execute_issue_code_workflow(
             "provider": policy.provider,
             "draft_pr_only": policy.draft_pr_only,
             "auto_merge": policy.auto_merge,
+            "authority": (
+                "control_plane_allowlist"
+                if trusted_external_policy_sha256
+                else "repository"
+            ),
         },
         "repository": {**repository, "work_branch": branch},
         "approval": approval,
@@ -967,7 +1034,9 @@ def execute_issue_code_workflow(
             "requested": True,
             "status": "blocked",
             "failure_reason": "copilot_cli_invocation_failed",
-            "work_branch_removed": _cleanup_empty_work_branch(repo, policy, branch),
+            "work_branch_removed": _cleanup_empty_work_branch(
+                repo, repository["start_branch"], branch
+            ),
         }
         return report
     report["modification"] = {
@@ -979,7 +1048,7 @@ def execute_issue_code_workflow(
         report["status"] = "blocked"
         report["modification"]["failure_reason"] = "copilot_cli_returned_failure"
         report["modification"]["work_branch_removed"] = _cleanup_empty_work_branch(
-            repo, policy, branch
+            repo, repository["start_branch"], branch
         )
         return report
 
@@ -989,7 +1058,9 @@ def execute_issue_code_workflow(
         report["status"] = "blocked"
         if not changes["paths"]:
             report["modification"]["work_branch_removed"] = (
-                _cleanup_empty_work_branch(repo, policy, branch)
+                _cleanup_empty_work_branch(
+                    repo, repository["start_branch"], branch
+                )
             )
         return report
 

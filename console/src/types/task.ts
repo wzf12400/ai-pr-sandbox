@@ -38,10 +38,15 @@ export type Task = {
   routingCandidates: string[];
   issueNumber: number | null;
   issueUrl: string | null;
+  agentTaskId: string | null;
+  agentTaskUrl: string | null;
   prNumber: number | null;
   prUrl: string | null;
   testSummary: string | null;
   blockedReason: string | null;
+  parentTaskId: string | null;
+  dependencyReasonCode: string | null;
+  dependencySummary: string | null;
   retryCount: number;
   submittedBy: string | null;
   policyId: string | null;
@@ -63,10 +68,13 @@ export type TaskEvent = {
 export type TaskDetail = {
   task: Task;
   events: TaskEvent[];
+  parentTask?: Task | null;
+  childTasks?: Task[];
 };
 
 export type CreateTaskInput = {
   sourceType: SourceType;
   input: string;
   logIncident?: Partial<LogIncident>;
+  repositoryHint?: string;
 };

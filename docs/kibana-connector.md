@@ -209,9 +209,8 @@ retrieval, modification, testing, and pull-request work.
 ## 4. Policy-approved automatic publication
 
 Unattended publication uses a secret-free routing policy rather than a
-hard-coded repository. Copy
-`examples/auto-publish-policy.example.json`, define exact sanitized service
-names and their target GitHub `owner/repository` values, then review the file.
+hard-coded repository. Create a reviewed policy file containing exact sanitized
+service names and their target GitHub `owner/repository` values.
 Only the `github_cli` provider exists today; other providers fail closed.
 
 Bind the command to the reviewed bytes of that policy:

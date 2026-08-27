@@ -22,6 +22,10 @@ public class NaturalLanguageSanitizer {
         String sanitized = EMAIL.matcher(input).replaceAll("[REDACTED_EMAIL]");
         sanitized = BEARER_TOKEN.matcher(sanitized).replaceAll("Bearer [REDACTED]");
         sanitized = NAMED_SECRET.matcher(sanitized).replaceAll("$1=[REDACTED]");
-        return WHITESPACE.matcher(sanitized).replaceAll(" ").trim();
+        return normalizeWhitespace(sanitized);
+    }
+
+    public String normalizeWhitespace(String input) {
+        return WHITESPACE.matcher(input).replaceAll(" ").trim();
     }
 }

@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Activity,
   ArrowUp,
   Bot,
   CircleAlert,
+  CodeXml,
   ExternalLink,
   FileText,
   GitBranch,
   GitPullRequest,
   Loader2,
+  Sparkles,
   User,
 } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -22,6 +25,7 @@ type Props = {
   connected: boolean | null;
   lastRefresh: Date | null;
   onRefresh: () => void;
+  repositoryHint: string | null;
 };
 
 export function ChatView({
@@ -30,6 +34,7 @@ export function ChatView({
   connected,
   lastRefresh,
   onRefresh,
+  repositoryHint,
 }: Props) {
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -116,7 +121,7 @@ export function ChatView({
             </div>
           )}
           {selectedId && !loading && detail && (
-            <Conversation detail={detail} />
+            <Conversation detail={detail} onSelect={onSelect} />
           )}
           {selectedId && !loading && !detail && (
             <p className="py-10 text-center text-xs text-muted-foreground">
@@ -132,6 +137,7 @@ export function ChatView({
         disabled={connected === false}
         selectedId={selectedId}
         selectedStatus={detail?.task.status ?? null}
+        repositoryHint={repositoryHint}
         onOptimistic={(text, expectReply) => {
           setPendingMessages((prev) => [...prev, text]);
           if (expectReply) setAwaitingReplyAt(Date.now());
@@ -220,8 +226,17 @@ function AgentBubble({ text, time }: { text: string; time: string }) {
   );
 }
 
-function Conversation({ detail }: { detail: TaskDetail }) {
+function Conversation({
+  detail,
+  onSelect,
+}: {
+  detail: TaskDetail;
+  onSelect: (id: string) => void;
+}) {
   const { task, events } = detail;
+  const active = task.status === "PROCESSING" || task.status === "TESTING";
+  const progressEvents = events.filter((event) => isExecutionEvent(event.eventType));
+  const latestProgressId = progressEvents.at(-1)?.id;
   return (
     <div className="space-y-5">
       {/* 初始需求 */}
@@ -236,7 +251,13 @@ function Conversation({ detail }: { detail: TaskDetail }) {
         <BotAvatar />
         <div className="min-w-0 flex-1 space-y-3">
           <TaskCard task={task} />
+          <RelatedTasks
+            parentTask={detail.parentTask ?? null}
+            childTasks={detail.childTasks ?? []}
+            onSelect={onSelect}
+          />
           {task.issueUrl && <IssueCard issueUrl={task.issueUrl} />}
+          {task.prUrl && <PullRequestChangesCard prUrl={task.prUrl} />}
         </div>
       </div>
 
@@ -255,10 +276,57 @@ function Conversation({ detail }: { detail: TaskDetail }) {
             <AgentBubble key={ev.id} text={ev.detail ?? ""} time={ev.createdAt} />
           ) : (
             <div key={ev.id} className="pl-10">
-              <EventLine event={ev} />
+              <EventLine
+                event={ev}
+                active={active && ev.id === latestProgressId}
+              />
             </div>
           )
         )}
+    </div>
+  );
+}
+
+function RelatedTasks({
+  parentTask,
+  childTasks,
+  onSelect,
+}: {
+  parentTask: Task | null;
+  childTasks: Task[];
+  onSelect: (id: string) => void;
+}) {
+  const related = [
+    ...(parentTask ? [{ task: parentTask, label: "上游任务" }] : []),
+    ...childTasks.map((task) => ({ task, label: "跨仓子任务" })),
+  ];
+  if (related.length === 0) return null;
+
+  return (
+    <div className="rounded-xl border border-sky-200 bg-sky-50/60 p-3">
+      <div className="mb-2 text-[11px] font-medium text-sky-900">
+        关联仓库任务
+      </div>
+      <div className="space-y-1.5">
+        {related.map(({ task, label }) => {
+          const meta = STATUS_META[task.status];
+          return (
+            <button
+              key={task.id}
+              type="button"
+              onClick={() => onSelect(task.id)}
+              className="flex w-full items-center gap-2 rounded-md border border-sky-100 bg-white px-2.5 py-2 text-left transition-colors hover:border-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
+            >
+              <span className={cn("h-2 w-2 rounded-full", meta.dot)} />
+              <span className="text-[11px] text-muted-foreground">{label}</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                {task.matchedRepository}
+              </span>
+              <span className="text-[11px] text-muted-foreground">{meta.label}</span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -316,8 +384,24 @@ function ThinkingBubble() {
   );
 }
 
+function blockedConfigPath(reason: string | null): string | null {
+  if (!reason) return null;
+  const match = reason.match(
+    /Pull Request path is not allowed:\s*([A-Za-z0-9_./-]+)/
+  );
+  if (!match) return null;
+  const path = match[1];
+  const file = path.split("/").at(-1) ?? path;
+  return /^(pom\.xml|package(?:-lock)?\.json|.*\.(?:xml|ya?ml|properties|toml|gradle|kts))$/i.test(
+    file
+  )
+    ? path
+    : null;
+}
+
 function TaskCard({ task }: { task: Task }) {
   const meta = STATUS_META[task.status];
+  const configPath = blockedConfigPath(task.blockedReason);
   return (
     <div className="rounded-xl border border-border bg-card p-4">
       <div className="flex items-center gap-2">
@@ -341,6 +425,16 @@ function TaskCard({ task }: { task: Task }) {
                 置信度 {task.routingConfidence}
               </span>
             )}
+            {task.routingCandidates.length > 1 && (
+              <p className="text-[11px] text-muted-foreground">
+                候选仓库：{task.routingCandidates.join("、")}
+              </p>
+            )}
+            {task.dependencySummary && (
+              <p className="rounded-md border border-sky-100 bg-sky-50 px-2 py-1.5 text-xs text-sky-800">
+                跨仓原因：{task.dependencySummary}
+              </p>
+            )}
           </div>
         )}
         {task.prUrl && (
@@ -355,7 +449,40 @@ function TaskCard({ task }: { task: Task }) {
             <ExternalLink className="h-3 w-3" />
           </a>
         )}
-        {task.blockedReason && (
+        {task.agentTaskUrl && (
+          <a
+            href={task.agentTaskUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-2 text-sky-700 hover:underline"
+          >
+            <Bot className="h-3.5 w-3.5" />
+            Cloud Agent task {task.agentTaskId?.slice(0, 12)}
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+        {configPath && (
+          <div
+            role="alert"
+            className="flex items-start gap-2.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-amber-950"
+          >
+            <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+            <div className="min-w-0">
+              <p className="text-xs font-semibold">配置文件变更已拦截</p>
+              <p className="mt-1 text-xs leading-relaxed text-amber-800">
+                Cloud Agent 尝试修改
+                <code className="mx-1 rounded bg-amber-100 px-1 py-0.5 font-mono text-[11px]">
+                  {configPath}
+                </code>
+                ，自动修复仅允许修改源码和测试源码。
+              </p>
+              <p className="mt-1 text-[11px] text-amber-700">
+                任务未进入合并或部署；配置调整需要单独人工审批。
+              </p>
+            </div>
+          </div>
+        )}
+        {task.blockedReason && !configPath && (
           <p className="text-xs text-orange-700">{task.blockedReason}</p>
         )}
         {task.status === "NEEDS_CONTEXT" && (
@@ -478,12 +605,229 @@ function IssueCard({ issueUrl }: { issueUrl: string }) {
   );
 }
 
-function EventLine({ event }: { event: TaskEvent }) {
+type PullChangeFile = {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  changes: number;
+  patch: string;
+  patchTruncated: boolean;
+};
+
+type PullChangeData = {
+  status: string;
+  detail?: string;
+  number?: number;
+  title?: string;
+  state?: string;
+  url?: string;
+  draft?: boolean;
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
+  baseRef?: string;
+  headRef?: string;
+  files?: PullChangeFile[];
+};
+
+function parsePullUrl(url: string): string | null {
+  const match = url.match(
+    /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)/
+  );
+  return match ? `/pull/${match[1]}/${match[2]}/${match[3]}` : null;
+}
+
+function diffLineClass(line: string): string {
+  if (line.startsWith("@@")) return "bg-sky-50 text-sky-800";
+  if (line.startsWith("+") && !line.startsWith("+++")) {
+    return "bg-emerald-50 text-emerald-900";
+  }
+  if (line.startsWith("-") && !line.startsWith("---")) {
+    return "bg-red-50 text-red-900";
+  }
+  return "text-zinc-300";
+}
+
+function PullRequestChangesCard({ prUrl }: { prUrl: string }) {
+  const [pull, setPull] = useState<PullChangeData | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    const path = parsePullUrl(prUrl);
+    if (!path) {
+      setFailed(true);
+      return;
+    }
+    let cancelled = false;
+    fetch(path, { headers: { Accept: "application/json" } })
+      .then((response) =>
+        response.ok
+          ? response.json()
+          : Promise.reject(new Error(String(response.status)))
+      )
+      .then((data: PullChangeData) => {
+        if (cancelled) return;
+        if (data.status === "ok") setPull(data);
+        else setFailed(true);
+      })
+      .catch(() => !cancelled && setFailed(true));
+    return () => {
+      cancelled = true;
+    };
+  }, [prUrl]);
+
+  if (failed) {
+    return (
+      <a
+        href={prUrl}
+        target="_blank"
+        rel="noreferrer"
+        className="flex items-center gap-2 rounded-xl border border-border bg-card px-4 py-3 text-[13px] text-violet-700 hover:underline"
+      >
+        <GitPullRequest className="h-3.5 w-3.5" />
+        在 GitHub 查看代码变更
+        <ExternalLink className="h-3 w-3" />
+      </a>
+    );
+  }
+  if (!pull) return <Skeleton className="h-28 w-full rounded-xl" />;
+
   return (
-    <div className="flex gap-2 text-[13px]">
-      <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-300" />
-      <div className="min-w-0">
-        <span className="font-medium">{event.eventType}</span>
+    <div className="overflow-hidden rounded-xl border border-border bg-card">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
+        <CodeXml className="h-4 w-4 text-violet-700" />
+        <span className="text-[13px] font-semibold">
+          代码变更 · {pull.changedFiles ?? 0} 个文件
+        </span>
+        <span className="font-mono text-[11px] text-emerald-700">
+          +{pull.additions ?? 0}
+        </span>
+        <span className="font-mono text-[11px] text-red-700">
+          −{pull.deletions ?? 0}
+        </span>
+        <span className="ml-auto max-w-56 truncate font-mono text-[10px] text-muted-foreground">
+          {pull.baseRef} ← {pull.headRef}
+        </span>
+      </div>
+      <div className="divide-y divide-border">
+        {(pull.files ?? []).map((file) => (
+          <details key={file.path} className="group">
+            <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 hover:bg-secondary/50">
+              <span className="rounded bg-secondary px-1.5 py-0.5 text-[9px] uppercase text-muted-foreground">
+                {file.status}
+              </span>
+              <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
+                {file.path}
+              </span>
+              <span className="font-mono text-[10px] text-emerald-700">
+                +{file.additions}
+              </span>
+              <span className="font-mono text-[10px] text-red-700">
+                −{file.deletions}
+              </span>
+            </summary>
+            <div className="max-h-96 overflow-auto border-t border-border bg-zinc-950 py-1">
+              {file.patch ? (
+                <pre className="min-w-max text-[11px] leading-5">
+                  {file.patch.split("\n").map((line, index) => (
+                    <div
+                      key={`${file.path}-${index}`}
+                      className={cn("px-3 font-mono", diffLineClass(line))}
+                    >
+                      {line || " "}
+                    </div>
+                  ))}
+                </pre>
+              ) : (
+                <p className="px-3 py-2 text-[11px] text-zinc-400">
+                  GitHub 未提供该文件的文本 Diff。
+                </p>
+              )}
+              {file.patchTruncated && (
+                <p className="border-t border-zinc-800 px-3 py-2 text-[10px] text-zinc-400">
+                  Diff 过长，已截断；完整内容请在 GitHub 查看。
+                </p>
+              )}
+            </div>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const EVENT_LABELS: Record<string, string> = {
+  TASK_CLAIMED: "接收任务",
+  DRAFTING_ISSUE: "生成 Issue 草稿",
+  VALIDATING_ISSUE: "校验 Issue",
+  PUBLISHING_ISSUE: "创建 GitHub Issue",
+  ISSUE_READY: "绑定 Issue 快照",
+  PREPARING_CODE_CHANGE: "校验代码策略",
+  CODING_AND_TESTING: "修改代码并运行检查",
+  CLOUD_AGENT_STATE: "Cloud Agent 远端状态",
+  VALIDATING_DRAFT_PR: "校验 Draft PR",
+  ISSUE_LINKED: "Issue 已关联",
+  CLOUD_AGENT_SUBMISSION_RESERVED: "Cloud Agent 任务已预留",
+  CLOUD_AGENT_TASK_LINKED: "Cloud Agent 任务已启动",
+  DRAFT_PR_LINKED: "Draft PR 已关联",
+  CROSS_REPO_DEPENDENCY_CREATED: "创建跨仓子任务",
+  CROSS_REPO_DEPENDENCY_REJECTED: "跨仓子任务未创建",
+  STATUS_CHANGED: "任务状态更新",
+  STALE_TASK_RECOVERED: "任务已恢复",
+  STALE_TASK_BLOCKED: "任务已暂停",
+};
+
+const EXECUTION_EVENTS = new Set([
+  "DRAFTING_ISSUE",
+  "VALIDATING_ISSUE",
+  "PUBLISHING_ISSUE",
+  "ISSUE_READY",
+  "PREPARING_CODE_CHANGE",
+  "CODING_AND_TESTING",
+  "CLOUD_AGENT_STATE",
+  "VALIDATING_DRAFT_PR",
+  "CROSS_REPO_DEPENDENCY_CREATED",
+  "CROSS_REPO_DEPENDENCY_REJECTED",
+]);
+
+function isExecutionEvent(eventType: string) {
+  return EXECUTION_EVENTS.has(eventType);
+}
+
+function EventLine({
+  event,
+  active,
+}: {
+  event: TaskEvent;
+  active: boolean;
+}) {
+  const executionEvent = isExecutionEvent(event.eventType);
+  return (
+    <div
+      className={cn(
+        "flex gap-2.5 text-[13px]",
+        executionEvent && "rounded-lg border border-sky-100 bg-sky-50/50 px-3 py-2"
+      )}
+    >
+      <span
+        className={cn(
+          "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
+          executionEvent ? "bg-sky-100 text-sky-700" : "bg-secondary text-muted-foreground"
+        )}
+      >
+        {active ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : executionEvent ? (
+          <Sparkles className="h-3 w-3" />
+        ) : (
+          <Activity className="h-3 w-3" />
+        )}
+      </span>
+      <div className="min-w-0 flex-1">
+        <span className="font-medium">
+          {EVENT_LABELS[event.eventType] ?? event.eventType}
+        </span>
         {event.toStatus && (
           <span
             className={cn(
@@ -513,10 +857,10 @@ function composerPlaceholder(
   status: TaskStatus | null
 ): string {
   if (disabled) return "控制面未连接…";
-  if (!selectedId) return "描述一个代码变更，例如：给计算器加乘法功能";
+  if (!selectedId) return "描述一个代码变更，例如：修复用户列表分页异常";
   switch (status) {
     case "NEEDS_CONTEXT":
-      return "补充信息，例如：这是 ai-pr-sandbox 仓库 calculator 模块的问题…";
+      return "补充项目、仓库、模块、接口或复现步骤等定位信息…";
     case "FAILED":
       return "补充信息或说明情况，我会重新路由并排队…";
     case "COMPLETED":
@@ -530,6 +874,7 @@ function Composer({
   disabled,
   selectedId,
   selectedStatus,
+  repositoryHint,
   onOptimistic,
   onOptimisticSettled,
   onSubmitted,
@@ -538,6 +883,7 @@ function Composer({
   disabled: boolean;
   selectedId: string | null;
   selectedStatus: TaskStatus | null;
+  repositoryHint: string | null;
   onOptimistic: (text: string, expectReply: boolean) => void;
   onOptimisticSettled: (text: string, ok: boolean) => void;
   onSubmitted: (task: Task) => void;
@@ -565,6 +911,7 @@ function Composer({
         const task = await createTask({
           sourceType: "NATURAL_LANGUAGE",
           input: text,
+          ...(repositoryHint ? { repositoryHint } : {}),
         });
         onOptimisticSettled(text, true);
         onSubmitted(task);

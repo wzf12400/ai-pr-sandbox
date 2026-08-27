@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=@ROOT@
-EnvironmentFile=@ROOT@/.env
+Environment=APP_ENV=@APP_ENV@
 ExecStart=@ROOT@/scripts/run-jira-monitor.sh
 Restart=always
 RestartSec=30

@@ -825,36 +825,84 @@ def _normalize_evidence_mappings(
 def _preserve_log_observed_behavior(
     draft: Dict[str, Any], evidence: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Copy a sanitized log summary when the model drops all observed behavior."""
+    """Bind log-only facts to deterministic evidence instead of model prose."""
     if issue_profile_for_evidence(evidence) != LOG_INCIDENT_ISSUE_PROFILE:
         return draft
+    target = draft.get("object")
     error = draft.get("error")
     problem = draft.get("problem")
+    facts = evidence.get("facts")
     event = evidence.get("event")
     if (
-        not isinstance(error, dict)
+        not isinstance(target, dict)
+        or not isinstance(error, dict)
         or not isinstance(problem, dict)
         or not isinstance(event, dict)
     ):
         return draft
-    if _known(error.get("message")) or _known(problem.get("current_behavior")):
-        return draft
+    if not isinstance(facts, dict):
+        facts = {}
     summary = event.get("summary")
-    if not _known(summary):
-        return draft
     mappings = draft.get("evidence")
-    if not isinstance(mappings, list) or len(mappings) >= MAX_EVIDENCE_ITEMS:
+    if not isinstance(mappings, list):
         return draft
+
+    forced_claims: Dict[str, str] = {}
+    normalized_target = dict(target)
+    repository = facts.get("repository")
+    if _known(repository):
+        normalized_target["repository"] = repository
+        forced_claims["$.object.repository"] = "$.facts.repository"
+
+    normalized_error = dict(error)
+    normalized_problem = dict(problem)
+    if _known(summary):
+        normalized_title = str(summary).strip()
+        if len(normalized_title) > MAX_TITLE_CHARS:
+            normalized_title = normalized_title[: MAX_TITLE_CHARS - 3].rstrip() + "..."
+        normalized_error["message"] = summary
+        normalized_problem["current_behavior"] = summary
+        forced_claims["$.title"] = "$.event.summary"
+        forced_claims["$.error.message"] = "$.event.summary"
+        forced_claims["$.problem.current_behavior"] = "$.event.summary"
+    else:
+        normalized_title = draft.get("title")
+
+    expected_paths = _explicit_expected_paths(evidence)
+    normalized_acceptance = draft.get("acceptance_criteria")
+    if not expected_paths:
+        normalized_problem["expected_behavior"] = "unknown"
+        normalized_acceptance = []
+        forced_claims["$.problem.expected_behavior"] = ""
+
+    normalized_mappings = [
+        mapping
+        for mapping in mappings
+        if not (
+            isinstance(mapping, dict)
+            and (
+                mapping.get("claim_path") in forced_claims
+                or (
+                    not expected_paths
+                    and isinstance(mapping.get("claim_path"), str)
+                    and mapping["claim_path"].startswith("$.acceptance_criteria[")
+                )
+            )
+        )
+    ]
+    normalized_mappings.extend(
+        {"claim_path": claim_path, "source_paths": [source_path]}
+        for claim_path, source_path in forced_claims.items()
+        if source_path
+    )
     return {
         **draft,
-        "problem": {**problem, "current_behavior": summary},
-        "evidence": [
-            *mappings,
-            {
-                "claim_path": "$.problem.current_behavior",
-                "source_paths": ["$.event.summary"],
-            },
-        ],
+        "title": normalized_title,
+        "object": normalized_target,
+        "error": normalized_error,
+        "problem": normalized_problem,
+        "acceptance_criteria": normalized_acceptance,
+        "evidence": normalized_mappings,
     }
 
 
@@ -1161,16 +1209,18 @@ def issue_profile_for_evidence(evidence: Mapping[str, Any]) -> str:
 
 
 def _actionable_log_draft(draft: Dict[str, Any]) -> bool:
-    """Require an explicit target, failure, outcome, and checks for unattended logs."""
+    """Require only the facts needed to file an aggregated log incident.
+
+    Expected behavior and acceptance criteria remain human context for the later
+    code-change gate. Unsupported claims and sensitive data still block here.
+    """
     target = draft.get("object")
     error = draft.get("error")
     problem = draft.get("problem")
-    acceptance = draft.get("acceptance_criteria")
     if (
         not isinstance(target, dict)
         or not isinstance(error, dict)
         or not isinstance(problem, dict)
-        or not isinstance(acceptance, list)
     ):
         return False
     has_target = any(
@@ -1180,12 +1230,7 @@ def _actionable_log_draft(draft: Dict[str, Any]) -> bool:
     has_observed_problem = _known(error.get("message")) or _known(
         problem.get("current_behavior")
     )
-    return (
-        has_target
-        and has_observed_problem
-        and _known(problem.get("expected_behavior"))
-        and any(isinstance(item, str) and item.strip() for item in acceptance)
-    )
+    return has_target and has_observed_problem
 
 
 def generate_issue(
@@ -1223,33 +1268,51 @@ def generate_issue(
     )
     validation_errors, validation_warnings = validate_draft(generated.content, compact)
 
-    reviewed = reviewer.complete(
-        system_prompt=REVIEW_SYSTEM_PROMPT,
-        user_payload={"evidence": compact, "draft": generated.content},
-        schema_name="ai_issue_review",
-        schema=REVIEW_SCHEMA,
-    )
-    review_schema_errors = _validate_schema(reviewed.content, REVIEW_SCHEMA)
-    validation_errors.extend(review_schema_errors)
-    unsupported = reviewed.content.get("unsupported_claim_paths", [])
-    actionable_unsupported = _actionable_unsupported_claims(generated.content, unsupported)
-    if actionable_unsupported:
-        validation_errors.append("AI reviewer found unsupported claims")
-    ignored_unsupported = sorted(set(unsupported) - set(actionable_unsupported))
-    if ignored_unsupported:
-        validation_warnings.append(
-            "AI reviewer marked classifications or unknown placeholders as unsupported"
+    if issue_profile == LOG_INCIDENT_ISSUE_PROFILE:
+        # 日志聚类故障：聚合证据本身就是全部上下文，跳过 AI 二审，
+        # 由确定性证据绑定校验 + 可执行性门禁兜底（owner 决策 2026-08-21：
+        # 接口与仓库已路由清楚时，日志类 Issue 不需要模型再审）
+        reviewed = None
+        review_content: Dict[str, Any] = {
+            "verdict": "pass",
+            "unsupported_claim_paths": [],
+            "missing_critical_fields": [],
+            "sensitive_data_detected": False,
+            "notes": [
+                "AI review skipped for the aggregated log incident profile; "
+                "deterministic evidence validation applies"
+            ],
+        }
+    else:
+        reviewed = reviewer.complete(
+            system_prompt=REVIEW_SYSTEM_PROMPT,
+            user_payload={"evidence": compact, "draft": generated.content},
+            schema_name="ai_issue_review",
+            schema=REVIEW_SCHEMA,
         )
-    if reviewed.content.get("sensitive_data_detected", False):
-        validation_errors.append("AI reviewer detected sensitive data")
+        review_content = reviewed.content
+        review_schema_errors = _validate_schema(reviewed.content, REVIEW_SCHEMA)
+        validation_errors.extend(review_schema_errors)
+        unsupported = reviewed.content.get("unsupported_claim_paths", [])
+        actionable_unsupported = _actionable_unsupported_claims(generated.content, unsupported)
+        if actionable_unsupported:
+            validation_errors.append("AI reviewer found unsupported claims")
+        ignored_unsupported = sorted(set(unsupported) - set(actionable_unsupported))
+        if ignored_unsupported:
+            validation_warnings.append(
+                "AI reviewer marked classifications or unknown placeholders as unsupported"
+            )
+        if reviewed.content.get("sensitive_data_detected", False):
+            validation_errors.append("AI reviewer detected sensitive data")
 
-    verdict = reviewed.content.get("verdict", "reject")
-    if validation_errors or verdict == "reject":
-        state = "blocked"
-    elif (
+    verdict = review_content.get("verdict", "reject")
+    log_actionable = (
         issue_profile == LOG_INCIDENT_ISSUE_PROFILE
         and _actionable_log_draft(generated.content)
-    ):
+    )
+    if validation_errors or (verdict == "reject" and not log_actionable):
+        state = "blocked"
+    elif log_actionable:
         state = "ready_for_human_review"
     elif (
         verdict == "needs_clarification"
@@ -1271,7 +1334,7 @@ def generate_issue(
         "observability": _log_observability(compact),
         "input_sha256": digest,
         "draft": generated.content,
-        "review": reviewed.content,
+        "review": review_content,
         "validation": {
             "valid": not validation_errors,
             "errors": validation_errors,
@@ -1293,11 +1356,15 @@ def generate_issue(
                 "request_id": generated.request_id,
                 "usage": generated.usage,
             },
-            "reviewer": {
-                "model": reviewed.model,
-                "request_id": reviewed.request_id,
-                "usage": reviewed.usage,
-            },
+            "reviewer": (
+                {
+                    "model": reviewed.model,
+                    "request_id": reviewed.request_id,
+                    "usage": reviewed.usage,
+                }
+                if reviewed is not None
+                else {"model": "skipped", "request_id": None, "usage": None}
+            ),
         },
     }
 

@@ -10,6 +10,7 @@ public record TaskClaimResponse(
         SourceType sourceType,
         ExecutionMode executionMode,
         IssueProfile issueProfile,
+        String inputSummary,
         String normalizedRequirement,
         String matchedRepository,
         String routingBasis,
@@ -17,7 +18,12 @@ public record TaskClaimResponse(
         String policyId,
         LogIncidentView logIncident,
         Long issueNumber,
-        String issueUrl
+        String issueUrl,
+        String agentTaskId,
+        String agentTaskUrl,
+        String agentSubmissionKey,
+        String agentIssueSha256,
+        String agentPolicySha256
 ) {
     public static TaskClaimResponse from(AutomationJob job) {
         return new TaskClaimResponse(
@@ -25,6 +31,7 @@ public record TaskClaimResponse(
                 job.getSourceType(),
                 job.getExecutionMode(),
                 job.getIssueProfile(),
+                job.getInputSummary(),
                 job.getNormalizedRequirement(),
                 job.getMatchedRepository(),
                 job.getRoutingBasis(),
@@ -32,7 +39,12 @@ public record TaskClaimResponse(
                 job.getPolicyId(),
                 LogIncidentView.from(job),
                 job.getIssueNumber(),
-                job.getIssueUrl()
+                job.getIssueUrl(),
+                job.getAgentTaskId(),
+                job.getAgentTaskUrl(),
+                job.getAgentSubmissionKey(),
+                job.getAgentIssueSha256(),
+                job.getAgentPolicySha256()
         );
     }
 }

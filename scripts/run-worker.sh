@@ -1,13 +1,14 @@
 #!/bin/bash
 # worker 启动包装：本地 / 服务器通用
-# GITHUB_ISSUE_TOKEN 优先取 .env；没有则退回本机 gh 登录态
+# GITHUB_ISSUE_TOKEN 优先取环境配置；未设置时复用 routing token，再回退 gh 登录态
+if ps -axo command= | grep -q '[s]rc.mock_task_worker'; then
+    exit 0
+fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
-set -a
-. ./.env
-set +a
-if [ -z "${GITHUB_ISSUE_TOKEN:-}" ]; then
-    GITHUB_ISSUE_TOKEN="$(gh auth token 2>/dev/null)"
-    export GITHUB_ISSUE_TOKEN
+PYTHON="$ROOT/.venv/bin/python3"
+if [ ! -x "$PYTHON" ]; then
+    PYTHON="$(command -v python3)"
 fi
-exec .venv/bin/python3 -m src.mock_task_worker --wait-timeout 5
+exec "$PYTHON" "$ROOT/scripts/run-with-env.py" --github-token-fallback -- \
+    "$PYTHON" -m src.mock_task_worker --wait-timeout 5

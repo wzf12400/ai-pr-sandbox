@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  CircleDot,
   KanbanSquare,
   Maximize2,
   Play,
@@ -28,7 +29,21 @@ const DECISION_META: Record<string, { label: string; cls: string }> = {
   RESOLVED: { label: "已匹配仓库", cls: "bg-emerald-50 text-emerald-700" },
   NEEDS_CONTEXT: { label: "待人工分诊", cls: "bg-amber-50 text-amber-700" },
   BLOCKED_SENSITIVE: { label: "敏感拦截", cls: "bg-red-50 text-red-700" },
+  NOT_OPEN: { label: "仅展示", cls: "bg-zinc-100 text-zinc-600" },
 };
+
+function projectDisplayName(project: JiraProjectView | undefined, fallback: string) {
+  return project?.name?.trim() || fallback;
+}
+
+function workflowStatusClass(issue: JiraScannedIssue) {
+  if (issue.automationEligible) return "bg-emerald-50 text-emerald-700";
+  const status = (issue.workflowStatus ?? "").toLocaleLowerCase();
+  if (status.includes("解决") || status.includes("resolved")) {
+    return "bg-sky-50 text-sky-700";
+  }
+  return "bg-zinc-100 text-zinc-600";
+}
 
 export function JiraMonitor() {
   const { status, reachable, scan, dispatch, saveRules } = useJiraMonitor();
@@ -54,6 +69,9 @@ export function JiraMonitor() {
   const live = status?.status === "ok";
   const counts = status?.counts ?? {};
   const issueTotal = status?.issues?.length ?? 0;
+  const autoReadyTotal = (status?.issues ?? []).filter(
+    (issue) => issue.automationEligible === true && issue.decision === "RESOLVED"
+  ).length;
   const enabledProjects = (status?.projects ?? []).filter((p) => p.enabled).length;
 
   return (
@@ -115,7 +133,7 @@ export function JiraMonitor() {
                   <div className="mt-1.5 flex gap-2 text-[10px] text-muted-foreground">
                     <span className="flex items-center gap-0.5">
                       <Zap className="h-2.5 w-2.5 text-emerald-500" />
-                      可自动 {counts["RESOLVED"] ?? 0}
+                      可自动 {autoReadyTotal}
                     </span>
                     <span className="flex items-center gap-0.5">
                       <ShieldAlert className="h-2.5 w-2.5 text-amber-500" />
@@ -130,6 +148,11 @@ export function JiraMonitor() {
                   {status?.autoScan?.lastError && (
                     <p className="mt-1 text-[10px] text-red-600">
                       自动扫描异常：{status.autoScan.lastError}
+                    </p>
+                  )}
+                  {status?.taskHistoryError && (
+                    <p className="mt-1 text-[10px] text-red-600">
+                      历史任务读取异常：{status.taskHistoryError}
                     </p>
                   )}
                   {scanError && (
@@ -216,11 +239,17 @@ function LiveDetail({
   saveRules: SaveRulesFn;
 }) {
   const [projectFilter, setProjectFilter] = useState<string>("");
-  const counts = status.counts ?? {};
   const allIssues = status.issues ?? [];
   const issues = projectFilter
     ? allIssues.filter((i) => i.project === projectFilter)
     : allIssues;
+  const openCount = issues.filter((issue) => issue.automationEligible === true).length;
+  const displayOnlyCount = issues.filter(
+    (issue) => issue.automationEligible === false
+  ).length;
+  const matchedOpenCount = issues.filter(
+    (issue) => issue.automationEligible === true && issue.decision === "RESOLVED"
+  ).length;
   const byProject = new Map<string, JiraScannedIssue[]>();
   for (const issue of issues) {
     const list = byProject.get(issue.project) ?? [];
@@ -233,9 +262,9 @@ function LiveDetail({
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <DetailStat label="已扫描需求" value={issues.length} />
-        <DetailStat label="已匹配仓库" value={counts["RESOLVED"] ?? 0} />
-        <DetailStat label="待人工分诊" value={counts["NEEDS_CONTEXT"] ?? 0} />
-        <DetailStat label="敏感拦截" value={counts["BLOCKED_SENSITIVE"] ?? 0} />
+        <DetailStat label="开放（可进入自动化）" value={openCount} />
+        <DetailStat label="非开放（仅展示）" value={displayOnlyCount} />
+        <DetailStat label="开放且已匹配仓库" value={matchedOpenCount} />
       </div>
 
       {status.lastScan && (
@@ -261,7 +290,11 @@ function LiveDetail({
           <option value="">全部项目（{allIssues.length}）</option>
           {projectKeys.map((key) => (
             <option key={key} value={key}>
-              {key}（{allIssues.filter((i) => i.project === key).length}）
+              {projectDisplayName(
+                (status.projects ?? []).find((project) => project.key === key),
+                key
+              )}
+              （{allIssues.filter((i) => i.project === key).length}）
             </option>
           ))}
         </select>
@@ -278,11 +311,15 @@ function LiveDetail({
       {[...byProject.entries()].map(([project, list]) => {
         const projectRepos =
           (status.projects ?? []).find((p) => p.key === project)?.repositories ?? [];
+        const projectName = projectDisplayName(
+          (status.projects ?? []).find((p) => p.key === project),
+          list[0]?.projectName ?? project
+        );
         return (
           <div key={project}>
-            <h3 className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              <span className="rounded bg-sky-50 px-1.5 py-0.5 font-mono text-[10px] text-sky-700">
-                {project}
+            <h3 className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+              <span className="rounded bg-sky-50 px-2 py-0.5 text-[11px] text-sky-700">
+                {projectName}
               </span>
               {list.length} 条
             </h3>
@@ -320,14 +357,19 @@ function IssueRow({
   const [open, setOpen] = useState(false);
   const [dispatching, setDispatching] = useState(false);
   const [result, setResult] = useState<string | null>(null);
-  const meta = DECISION_META[issue.decision] ?? {
-    label: issue.decision,
-    cls: "bg-secondary text-muted-foreground",
-  };
+  const meta =
+    issue.automationEligible === false
+      ? DECISION_META.NOT_OPEN
+      : DECISION_META[issue.decision] ?? {
+          label: issue.decision,
+          cls: "bg-secondary text-muted-foreground",
+        };
   const dispatched = issue.dispatch?.result === "created";
   const needsHuman = issue.decision === "NEEDS_CONTEXT";
   const dispatchable =
-    !dispatched && (issue.decision === "RESOLVED" || (needsHuman && !!fallbackRepo));
+    issue.automationEligible === true &&
+    !dispatched &&
+    (issue.decision === "RESOLVED" || (needsHuman && !!fallbackRepo));
 
   async function runDispatch(e: React.MouseEvent) {
     e.stopPropagation();
@@ -373,6 +415,15 @@ function IssueRow({
           {issue.issue}
         </span>
         <span className="min-w-0 flex-1 truncate text-[13px]">{issue.summary}</span>
+        <span
+          className={cn(
+            "flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
+            workflowStatusClass(issue)
+          )}
+        >
+          <CircleDot className="h-2.5 w-2.5" />
+          {issue.workflowStatus ?? "状态待同步"}
+        </span>
         <span className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px]", meta.cls)}>
           {meta.label}
         </span>
@@ -383,7 +434,7 @@ function IssueRow({
         )}
         {dispatched ? (
           <span className="shrink-0 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700">
-            已建任务
+            {issue.automationEligible === false ? "历史任务" : "已建任务"}
           </span>
         ) : (
           dispatchable && (
@@ -419,6 +470,11 @@ function IssueRow({
               {issue.excerpt?.trim() || "（该需求在 Jira 中没有填写描述）"}
             </p>
           </div>
+          {issue.automationEligible === false && (
+            <p className="mt-2 text-[11px] text-zinc-600">
+              当前为非开放状态，仅在此展示，不能自动或人工派发任务。
+            </p>
+          )}
           {issue.url && (
             <a
               href={issue.url}
@@ -475,8 +531,7 @@ function ProjectRules({
         <h3 className="text-[13px] font-semibold">接线项目</h3>
       </div>
       <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
-        「自动派发」开启后，命中路由且无歧义的需求会自动创建任务，进入 Issue →
-        Copilot → Draft PR 流水线；关闭则只在列表里标注，由你逐条点「建任务」。
+        只有 Jira 状态为「开放」的需求可以进入自动化。「自动派发」开启后，命中路由且无歧义的开放需求会自动创建任务；已解决、已关闭等非开放需求仅展示，也不能人工建任务。
       </p>
       <div className="mt-3 space-y-2">
         {projects.map((p) => (
@@ -484,8 +539,8 @@ function ProjectRules({
             key={p.key}
             className="flex flex-wrap items-center gap-2 rounded-md border border-border/70 px-3 py-2 text-[12px]"
           >
-            <span className="rounded bg-sky-50 px-1.5 py-0.5 font-mono text-[10px] text-sky-700">
-              {p.key}
+            <span className="rounded bg-sky-50 px-2 py-0.5 text-[11px] text-sky-700">
+              {projectDisplayName(p, p.key)}
             </span>
             <span className="text-muted-foreground">
               {(p.issueTypes ?? []).join(" / ") || "全部类型"}

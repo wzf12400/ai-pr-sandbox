@@ -7,6 +7,7 @@ import java.util.Arrays;
 import java.util.List;
 
 public record LogIncidentView(
+        String routeId,
         String sourceReference,
         Instant firstSeenAt,
         Instant lastSeenAt,
@@ -29,6 +30,7 @@ public record LogIncidentView(
                 ? List.of()
                 : Arrays.asList(job.getAffectedEndpoints().split("\\n"));
         return new LogIncidentView(
+                job.getLogRouteId(),
                 job.getSourceReference(),
                 job.getFirstSeenAt(),
                 job.getLastSeenAt(),

@@ -1,0 +1,21 @@
+{
+  "schema_version": "code-preapproval-manifest/v1",
+  "policies": {
+    "KikaTech/backend-aicompanion": {
+      "policy_path": "control-plane/config/code-preapproval-policies/KikaTech__backend-aicompanion.json",
+      "sha256": "d2f5f841f0d3544e478c3bea787df1a4f284aa341d5e03691af4ae5374788aa5"
+    },
+    "KikaTech/kika-global-studio": {
+      "policy_path": "control-plane/config/code-preapproval-policies/KikaTech__kika-global-studio.json",
+      "sha256": "b54a1a877ffc3a1ed980e835f4f7d10136ea5c5354c5adfd8240f9cec1f7fe7c"
+    },
+    "KikaTech/frontend-aicompanion": {
+      "policy_path": "control-plane/config/code-preapproval-policies/KikaTech__frontend-aicompanion.json",
+      "sha256": "4ffd55f7ceb468de3db7730baf7664c7a026b8e07826d686c2db4dc549ac3be6"
+    },
+    "KikaTech/kika-global-studio-front": {
+      "policy_path": "control-plane/config/code-preapproval-policies/KikaTech__kika-global-studio-front.json",
+      "sha256": "e5a6c8865b1ed0f6c4a4db72f924b2cfe16b072d9cc5ebb0d193e21188bd2492"
+    }
+  }
+}

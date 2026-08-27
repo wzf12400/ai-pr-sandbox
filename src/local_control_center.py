@@ -1741,7 +1741,7 @@ class ControlCenterWorkflow:
                         current_head != preview.get("base_commit")
                         or not _cleanup_empty_work_branch(
                             repo_path,
-                            policy,
+                            policy.base_branch,
                             str(preview.get("work_branch", "")),
                         )
                     ):

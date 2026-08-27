@@ -12,9 +12,9 @@
 ## Linux 服务器（上线测试）
 
 ```bash
-# 1. 克隆仓库、配好 .env、建好 .venv（pip install -r requirements.txt）
+# 1. 克隆仓库、配好 .env.staging、建好 .venv（pip install -r requirements.txt）
 # 2. 装服务（自动把仓库实际路径填进单元文件）
-sudo bash scripts/install-systemd.sh
+sudo bash scripts/install-systemd.sh staging
 
 # 3. 常用运维
 systemctl status ai-pr-jira-monitor     # 看状态
@@ -36,5 +36,5 @@ macOS 隐私保护禁止 launchd 后台服务访问桌面目录（已实测）�
 
 ## worker 的 GitHub token
 
-worker 需要 `GITHUB_ISSUE_TOKEN`：服务器上写进 `.env`；
-本地没写时自动退回 `gh auth token`（本机 gh 登录态）。
+worker 需要 GitHub token：优先使用 `GITHUB_ISSUE_TOKEN`，未设置时复用
+`GITHUB_ROUTING_TOKEN`；两者都没有时才回退 `gh auth token`（本机 gh 登录态）。

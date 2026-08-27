@@ -1,17 +1,8 @@
 {
   "schema_version": "repository-search-scope/v1",
-  "scope_id": "local-ai-pr-sandbox",
+  "scope_id": "kikatech-test-environment",
   "provider": "github",
   "repositories": [
-    {
-      "repository": "wzf12400/ai-pr-sandbox",
-      "enabled": true,
-      "default_branch": "main",
-      "labels": [
-        "calculator",
-        "sandbox"
-      ]
-    },
     {
       "repository": "KikaTech/backend-aicompanion",
       "enabled": true,

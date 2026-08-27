@@ -39,12 +39,57 @@ public class InternalTaskController {
         );
     }
 
+    @PostMapping("/{taskId}/progress")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void recordProgress(
+            @PathVariable String taskId,
+            @Valid @RequestBody TaskProgressRequest request
+    ) {
+        taskService.recordProgress(taskId, request.stage(), request.detail());
+    }
+
     @PostMapping("/{taskId}/issue")
     public TaskResponse attachIssue(
             @PathVariable String taskId,
             @Valid @RequestBody AttachIssueRequest request
     ) {
         return taskService.attachIssue(taskId, request.issueNumber(), request.issueUrl());
+    }
+
+    @PostMapping("/{taskId}/agent-task")
+    public TaskResponse attachAgentTask(
+            @PathVariable String taskId,
+            @Valid @RequestBody AttachAgentTaskRequest request
+    ) {
+        return taskService.attachAgentTask(
+                taskId,
+                request.agentTaskId(),
+                request.agentTaskUrl()
+        );
+    }
+
+    @PostMapping("/{taskId}/agent-task-reservation")
+    public TaskResponse reserveAgentTask(
+            @PathVariable String taskId,
+            @Valid @RequestBody ReserveAgentTaskRequest request
+    ) {
+        return taskService.reserveAgentTask(
+                taskId,
+                request.submissionKey(),
+                request.issueSha256(),
+                request.policySha256()
+        );
+    }
+
+    @PostMapping("/{taskId}/agent-task-reservation/release")
+    public TaskResponse releaseAgentTaskReservation(@PathVariable String taskId) {
+        return taskService.releaseAgentTaskReservation(taskId);
+    }
+
+    @PostMapping("/{taskId}/heartbeat")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void heartbeat(@PathVariable String taskId) {
+        taskService.heartbeat(taskId);
     }
 
     @PostMapping("/{taskId}/pull-request")
@@ -57,6 +102,17 @@ public class InternalTaskController {
                 request.prNumber(),
                 request.prUrl(),
                 request.testSummary()
+        );
+    }
+
+    @PostMapping("/{taskId}/dependencies")
+    @ResponseStatus(HttpStatus.CREATED)
+    public DependencyTasksResponse createDependencyTasks(
+            @PathVariable String taskId,
+            @Valid @RequestBody CreateDependencyTasksRequest request
+    ) {
+        return new DependencyTasksResponse(
+                taskService.createDependencyTasks(taskId, request.dependencies())
         );
     }
 

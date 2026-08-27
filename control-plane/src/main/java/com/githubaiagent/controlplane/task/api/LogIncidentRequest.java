@@ -4,6 +4,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 import java.time.Instant;
@@ -11,6 +12,9 @@ import java.util.List;
 
 public record LogIncidentRequest(
         @NotBlank String dataSafetyStatus,
+        @NotBlank
+        @Pattern(regexp = "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+        String routeId,
         @NotBlank @Size(max = 128) String sourceReference,
         @NotNull Instant firstSeenAt,
         @NotNull Instant lastSeenAt,

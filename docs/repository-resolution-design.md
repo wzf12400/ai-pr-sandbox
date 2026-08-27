@@ -192,9 +192,6 @@ discovered entries must pass the same schema and authorization checks.
 
 - Search scope: `schemas/repository-search-scope-v1.schema.json`
 - Resolution result: `schemas/repository-resolution-v1.schema.json`
-- Company-neutral examples:
-  - `examples/repository-search-scope.example.json`
-  - `examples/repository-resolution-result.example.json`
 
 ## Implementation sequence
 

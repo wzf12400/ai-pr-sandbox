@@ -9,9 +9,10 @@ Design contract (see HANDOFF.md):
   Any finding blocks the issue (fail-closed) and is only recorded in the shadow log.
 - Attachments are metadata-only (filename/mimeType/size/URL reference); content is
   never downloaded.
-- Routing is deterministic: explicit component/label bindings and keyword scoring
-  from control-plane/config/jira-projects.json. Ambiguity or signal conflict always
-  lands on NEEDS_CONTEXT; the connector never guesses.
+- Repository candidates and explicit component/label bindings come from the
+  control plane's jira_repository_route table. Project scan policy remains in
+  control-plane/config/jira-projects.json; ambiguity always lands on
+  NEEDS_CONTEXT rather than falling back to JSON repository bindings.
 - Default mode is shadow (dry-run): decisions are appended to the shadow log and
   nothing is dispatched. --dispatch only sends when the decision is auto-eligible
   and the control plane is a loopback address.
@@ -20,6 +21,7 @@ Design contract (see HANDOFF.md):
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -49,9 +51,13 @@ ISSUE_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,19}-\d{1,7}$")
 PROJECT_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,19}$")
 REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 MAX_SEARCH_RESULTS = 100
+MAX_SEEN_ISSUES_PER_PROJECT = 2000
 MAX_SUMMARY_CHARS = 400
 MAX_FIELD_CHARS = 4000
+MAX_TASK_SUPPLEMENT_CHARS = 1000
 MAX_ATTACHMENTS = 20
+MAX_JIRA_ROUTES = 200
+MAX_ROUTE_RESPONSE_BYTES = 256_000
 HTTP_TIMEOUT_SECONDS = 15
 MIN_INTERVAL_SECONDS = 60
 MAX_INTERVAL_SECONDS = 3600
@@ -60,6 +66,10 @@ KEYWORD_RESOLVED_SCORE = 50
 KEYWORD_MIN_MARGIN = 25
 AI_ROUTE_MIN_CONFIDENCE = 70
 ANCHOR_ROUTE_CONFIDENCE = 95
+JIRA_ROUTE_ID_PATTERN = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+)
+JIRA_ROUTE_MATCH_TYPES = {"PROJECT", "COMPONENT", "LABEL"}
 
 REQUEST_TYPE_MAP = {
     "bug": "Bug",
@@ -101,6 +111,133 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
     for key, project in projects.items():
         _validate_project(key, project)
     return payload
+
+
+def _load_jira_repository_routes() -> List[Dict[str, Any]]:
+    base = _loopback_control_plane_url()
+    if base is None:
+        raise RuntimeError("control plane URL must use loopback")
+    request = urllib.request.Request(
+        f"{base}/api/jira-repository-routes?enabledOnly=true",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        raw = response.read(MAX_ROUTE_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_ROUTE_RESPONSE_BYTES:
+        raise RuntimeError("Jira route response is too large")
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, list) or len(payload) > MAX_JIRA_ROUTES:
+        raise RuntimeError("Jira route response is invalid")
+    routes: List[Dict[str, Any]] = []
+    identities: set[tuple[str, str, str, str]] = set()
+    for value in payload:
+        if not isinstance(value, dict) or value.get("enabled") is not True:
+            raise RuntimeError("Jira route response contains an invalid route")
+        route_id = _text(value.get("id"), 36)
+        project_key = _text(value.get("projectKey"), 20)
+        project_name = _text(value.get("projectName"), 255)
+        match_type = _text(value.get("matchType"), 32)
+        match_value = _text(value.get("matchValue"), 255)
+        repository = _text(value.get("repository"), 255)
+        priority = value.get("priority")
+        version = value.get("version")
+        identity = (project_key, match_type, match_value, repository)
+        if (
+            not JIRA_ROUTE_ID_PATTERN.fullmatch(route_id)
+            or not PROJECT_KEY_PATTERN.fullmatch(project_key)
+            or not project_name
+            or match_type not in JIRA_ROUTE_MATCH_TYPES
+            or not match_value
+            or (match_type == "PROJECT" and match_value != "*")
+            or not REPOSITORY_PATTERN.fullmatch(repository)
+            or not isinstance(priority, int)
+            or not 0 <= priority <= 10_000
+            or not isinstance(version, int)
+            or version < 0
+            or identity in identities
+        ):
+            raise RuntimeError("Jira route response contains an invalid route")
+        identities.add(identity)
+        routes.append(
+            {
+                "id": route_id,
+                "projectKey": project_key,
+                "projectName": project_name,
+                "matchType": match_type,
+                "matchValue": match_value,
+                "repository": repository,
+                "priority": priority,
+                "version": version,
+            }
+        )
+    return routes
+
+
+def _apply_repository_routes(
+    config: Dict[str, Any], routes: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    routed = copy.deepcopy(config)
+    projects = routed["projects"]
+    for route in routes:
+        projects.setdefault(
+            route["projectKey"],
+            {
+                "name": route["projectName"],
+                "enabled": True,
+                "jql_extra": "",
+                "issue_types": [],
+                "severity_map": {},
+                "max_dispatch_per_poll": 1,
+                "auto_dispatch": False,
+                "strict_matching": True,
+                "ai_routing": False,
+                "repositories": [],
+            },
+        )
+        projects[route["projectKey"]]["name"] = route["projectName"]
+    for project in projects.values():
+        project["repositories"] = []
+    grouped: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for route in sorted(
+        routes,
+        key=lambda item: (
+            item["projectKey"],
+            item["priority"],
+            item["repository"],
+            item["matchType"],
+            item["matchValue"],
+        ),
+    ):
+        project_key = route["projectKey"]
+        if project_key not in projects:
+            continue
+        identity = (project_key, route["repository"])
+        entry = grouped.setdefault(
+            identity,
+            {
+                "repository": route["repository"],
+                "components": [],
+                "labels": [],
+                "keywords": [],
+                "project_binding": False,
+            },
+        )
+        if route["matchType"] == "PROJECT":
+            entry["project_binding"] = True
+        elif route["matchType"] == "COMPONENT":
+            entry["components"].append(route["matchValue"])
+        elif route["matchType"] == "LABEL":
+            entry["labels"].append(route["matchValue"])
+    for (project_key, _repository), entry in grouped.items():
+        projects[project_key]["repositories"].append(entry)
+    for project in projects.values():
+        project["repositories"].sort(key=lambda entry: entry["repository"])
+    return routed
+
+
+def load_routing_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
+    return _apply_repository_routes(load_config(path), _load_jira_repository_routes())
 
 
 def _validate_project(key: str, project: Dict[str, Any]) -> None:
@@ -254,7 +391,18 @@ def route_issue(issue: Dict[str, Any], project: Dict[str, Any]) -> RouteDecision
     repositories = project["repositories"]
     candidates = [entry["repository"] for entry in repositories]
 
-    if len(repositories) == 1 and not project.get("strict_matching"):
+    if not repositories:
+        return RouteDecision(
+            "NEEDS_CONTEXT",
+            basis="no enabled database repository mapping for Jira project",
+            candidates=[],
+        )
+
+    if (
+        len(repositories) == 1
+        and repositories[0].get("project_binding", True)
+        and not project.get("strict_matching")
+    ):
         return RouteDecision(
             "RESOLVED",
             repository=repositories[0]["repository"],
@@ -517,6 +665,8 @@ def route_issue_with_fallbacks(
     if decision.status != "NEEDS_CONTEXT":
         return decision
     candidates = [entry["repository"] for entry in project["repositories"]]
+    if not candidates:
+        return decision
     cached = _routing_cache_hit(issue, candidates, cache_path)
     if cached is not None:
         return cached
@@ -565,8 +715,9 @@ def issue_to_intake(issue: Dict[str, Any], base_url: str, project: Dict[str, Any
             + f" ({_text(attachment.get('mimeType'), 100)})"
         )
     comments = fields.get("comment") or {}
+    recent_comments = (comments.get("comments") or [])[-10:]
     comment_bodies = [
-        _text(c.get("body"), 500) for c in (comments.get("comments") or [])[:10] if isinstance(c, dict)
+        _text(c.get("body"), 500) for c in recent_comments if isinstance(c, dict)
     ]
     description = _text(fields.get("description"))
     return {
@@ -624,6 +775,21 @@ def _issue_type_allowed(issue: Dict[str, Any], project: Dict[str, Any]) -> bool:
     return name in include
 
 
+def issue_workflow_status(issue: Dict[str, Any]) -> Dict[str, Any]:
+    fields = issue.get("fields") or {}
+    status = fields.get("status") or {}
+    category = status.get("statusCategory") or {}
+    name = _text(status.get("name"), 80)
+    category_key = _text(category.get("key"), 40).lower()
+    normalized_name = name.casefold()
+    automation_eligible = normalized_name in {"open", "开放"}
+    return {
+        "workflowStatus": name or "未知状态",
+        "workflowStatusCategory": category_key or "unknown",
+        "automationEligible": automation_eligible,
+    }
+
+
 def _format_watermark(epoch_seconds: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(epoch_seconds))
 
@@ -659,13 +825,53 @@ def _loopback_control_plane_url() -> Optional[str]:
     return None
 
 
+def _task_requirement(intake: Dict[str, Any]) -> str:
+    """Preserve Jira context within the control plane's 4,000-character limit."""
+    summary = _text(intake.get("summary"), MAX_SUMMARY_CHARS)
+    problem = intake.get("problem")
+    description = _text(
+        problem.get("background") if isinstance(problem, dict) else ""
+    )
+    acceptance = intake.get("acceptance_criteria")
+    comments = intake.get("_comments_excerpt")
+    supplement_items = [
+        _text(item, 500)
+        for values in (
+            acceptance if isinstance(acceptance, list) else [],
+            comments if isinstance(comments, list) else [],
+        )
+        for item in values
+        if _text(item, 500)
+    ]
+    supplement = "\n".join(f"- {item}" for item in supplement_items)
+    supplement = supplement[:MAX_TASK_SUPPLEMENT_CHARS].rstrip()
+
+    requirement = f"标题：{summary}"
+    suffix = f"\n\n验收与补充信息：\n{supplement}" if supplement else ""
+    if description:
+        description_prefix = "\n\n描述："
+        description_budget = (
+            MAX_FIELD_CHARS
+            - len(requirement)
+            - len(description_prefix)
+            - len(suffix)
+        )
+        if description_budget > 0:
+            requirement += description_prefix + description[:description_budget]
+    return (requirement + suffix)[:MAX_FIELD_CHARS]
+
+
+def _find_intake_sensitive_data(intake: Dict[str, Any]) -> List[Any]:
+    return find_sensitive_data(intake)
+
+
 def _dispatch(intake: Dict[str, Any], decision: RouteDecision) -> Dict[str, Any]:
     base = _loopback_control_plane_url()
     if base is None:
         return {"result": "skipped", "detail": "control plane is not loopback"}
     payload = {
         "sourceType": "JIRA",
-        "input": intake["summary"][:MAX_SUMMARY_CHARS],
+        "input": _task_requirement(intake),
         "jiraIssue": {
             "dataSafetyStatus": "SANITIZED",
             "sourceReference": intake["source_reference"],
@@ -684,15 +890,34 @@ def _dispatch(intake: Dict[str, Any], decision: RouteDecision) -> Dict[str, Any]
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             body = json.loads(response.read().decode("utf-8"))
-    except Exception as exception:
-        return {"result": "failed", "detail": type(exception).__name__}
+    except urllib.error.HTTPError as exception:
+        detail = ""
+        try:
+            error_body = json.loads(exception.read(4096).decode("utf-8"))
+            if isinstance(error_body, dict) and isinstance(error_body.get("detail"), str):
+                detail = error_body["detail"].strip()[:300]
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+        return {
+            "result": "failed",
+            "detail": (
+                f"控制面拒绝建任务（HTTP {exception.code}）：{detail}"
+                if detail
+                else f"控制面拒绝建任务（HTTP {exception.code}）"
+            ),
+        }
+    except (urllib.error.URLError, TimeoutError, OSError) as exception:
+        return {
+            "result": "failed",
+            "detail": f"控制面连接失败：{type(exception).__name__}",
+        }
     task_id = body.get("id") if isinstance(body, dict) else None
     if not isinstance(task_id, str) or not task_id:
         return {"result": "failed", "detail": "invalid control-plane response"}
     return {"result": "created", "taskId": task_id, "taskStatus": body.get("status")}
 
 
-ISSUE_DETAIL_FIELDS = "summary,description,issuetype,priority,project,components,labels,created,updated,comment,attachment"
+ISSUE_DETAIL_FIELDS = "summary,description,issuetype,priority,project,status,components,labels,created,updated,comment,attachment"
 
 
 def fetch_issue(issue_key: str) -> Dict[str, Any]:
@@ -714,17 +939,23 @@ def dispatch_issue(
     repository_override to resolve a NEEDS_CONTEXT decision explicitly; the
     override must be one of the project's configured repositories.
     """
-    config = load_config(config_path)
+    config = load_routing_config(config_path)
     base, _cookie = _require_env()
     issue = fetch_issue(issue_key)
     project_key = ((issue.get("fields") or {}).get("project") or {}).get("key") or ""
     project = config["projects"].get(project_key)
     if project is None:
         return {"result": "failed", "detail": f"项目 {project_key} 未接入配置"}
+    workflow = issue_workflow_status(issue)
+    if not workflow["automationEligible"]:
+        return {
+            "result": "skipped",
+            "detail": (
+                f"Jira 状态为“{workflow['workflowStatus']}”，仅“开放”需求可进入自动化"
+            ),
+        }
     intake = issue_to_intake(issue, base, project)
-    findings = find_sensitive_data(
-        {name: value for name, value in intake.items() if not name.startswith("_")}
-    )
+    findings = _find_intake_sensitive_data(intake)
     if findings:
         return {
             "result": "failed",
@@ -771,11 +1002,17 @@ def poll(
     config_path: Path = CONFIG_PATH,
     state_path: Path = STATE_PATH,
     shadow_path: Path = SHADOW_LOG_PATH,
+    state: Optional[Dict[str, Any]] = None,
+    persist_state: bool = True,
+    return_checkpoint: bool = False,
 ) -> Dict[str, Any]:
-    config = load_config(config_path)
+    config = load_routing_config(config_path)
     base, _cookie = _require_env()
     _verify_session()
-    state = _load_state(state_path)
+    if state is None:
+        state = _load_state(state_path)
+    elif not isinstance(state.get("projects"), dict):
+        raise ValueError("invalid Jira scan checkpoint")
     results: List[Dict[str, Any]] = []
 
     for project_key, project in sorted(config["projects"].items()):
@@ -814,26 +1051,41 @@ def poll(
             key = issue.get("key", "")
             if not ISSUE_KEY_PATTERN.fullmatch(key):
                 continue
+            updated = _text((issue.get("fields") or {}).get("updated"), 40)
+            if updated:
+                epoch = _parse_jira_time(updated)
+                if epoch > project_state.get("watermark_epoch", 0):
+                    project_state["watermark_epoch"] = epoch
+                    project_state["watermark"] = _format_watermark(epoch)
             if key in project_state.get("seen", {}):
                 continue
             if not _issue_type_allowed(issue, project):
                 continue
             intake = issue_to_intake(issue, base, project)
-            findings = find_sensitive_data(
-                {name: value for name, value in intake.items() if not name.startswith("_")}
-            )
-            if findings:
+            workflow = issue_workflow_status(issue)
+            if not workflow["automationEligible"]:
                 decision = RouteDecision(
-                    "BLOCKED_SENSITIVE",
-                    basis="sensitive data at: "
-                    + ", ".join(sorted(f"{f.path}" for f in findings))[:240],
+                    "NOT_OPEN",
+                    basis=(
+                        f"Jira status is {workflow['workflowStatus']}; "
+                        "display only"
+                    )[:240],
                 )
             else:
-                decision = route_issue_with_fallbacks(issue, project)
+                findings = _find_intake_sensitive_data(intake)
+                if findings:
+                    decision = RouteDecision(
+                        "BLOCKED_SENSITIVE",
+                        basis="sensitive data at: "
+                        + ", ".join(sorted(f"{f.path}" for f in findings))[:240],
+                    )
+                else:
+                    decision = route_issue_with_fallbacks(issue, project)
             record: Dict[str, Any] = {
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "issue": key,
                 "project": project_key,
+                "projectName": intake["target"]["product"],
                 "summary": intake["summary"][:120],
                 "excerpt": intake["problem"]["background"][:300],
                 "url": intake["source_url"],
@@ -842,14 +1094,11 @@ def poll(
                 "repository": decision.repository,
                 "basis": decision.basis,
                 "confidence": decision.confidence,
+                **workflow,
             }
             auto_eligible = (
-                decision.status == "RESOLVED"
-                and project.get("auto_dispatch")
-                and decision.confidence >= 100
-            )
-            auto_eligible = (
-                decision.status == "RESOLVED"
+                workflow["automationEligible"]
+                and decision.status == "RESOLVED"
                 and project.get("auto_dispatch")
                 and decision.confidence >= 100
             )
@@ -868,18 +1117,19 @@ def poll(
             project_state.setdefault("seen", {}).setdefault(
                 key, record["dispatch"].get("taskId") or record["dispatch"]["result"]
             )
+            while len(project_state["seen"]) > MAX_SEEN_ISSUES_PER_PROJECT:
+                del project_state["seen"][next(iter(project_state["seen"]))]
             _append_shadow(record, shadow_path)
             results.append(record)
-
-            updated = _text((issue.get("fields") or {}).get("updated"), 40)
-            if updated:
-                epoch = _parse_jira_time(updated)
-                if epoch > project_state.get("watermark_epoch", 0):
-                    project_state["watermark_epoch"] = epoch
-                    project_state["watermark"] = _format_watermark(epoch)
-
-    _atomic_write_json(state_path, state)
-    return {"polled": datetime.now(timezone.utc).isoformat(), "issues": results}
+    if persist_state:
+        _atomic_write_json(state_path, state)
+    response = {
+        "polled": datetime.now(timezone.utc).isoformat(),
+        "issues": results,
+    }
+    if return_checkpoint:
+        response["checkpoint"] = state
+    return response
 
 
 # ---------------------------------------------------------------------------

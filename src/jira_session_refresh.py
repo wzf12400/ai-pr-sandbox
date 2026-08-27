@@ -11,8 +11,10 @@ running process picks them up immediately.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import secrets
 import time
 import urllib.error
 import urllib.request
@@ -20,19 +22,23 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 WEBBRIDGE_URL = "http://127.0.0.1:10086/command"
-WEBBRIDGE_SESSION = "jira-session-refresh"
+WEBBRIDGE_SESSION_PREFIX = "jira-session-refresh"
 BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
 )
 LOGIN_WAIT_SECONDS = 45
-ENV_PATH = Path(".env")
+APP_ENV = os.environ.get("APP_ENV", "local").strip().lower()
+if APP_ENV not in {"local", "staging", "production"}:
+    raise ValueError("APP_ENV must be local, staging, or production")
+ENV_PATH = Path(f".env.{APP_ENV}")
 COOKIE_ENV = "JIRA_SESSION_COOKIE"
 BASE_URL_ENV = "JIRA_BASE_URL"
 
 # 同一进程内刷新冷却，避免认证失败时反复打开浏览器
 _last_attempt_at = 0.0
 _last_failure_at = 0.0
+_webbridge_session = f"{WEBBRIDGE_SESSION_PREFIX}-startup"
 REFRESH_COOLDOWN_SECONDS = 600
 FAILURE_RETRY_SECONDS = 120
 
@@ -45,7 +51,7 @@ def _bridge(action: str, args: Dict[str, Any], timeout: float = 30.0) -> Dict[st
     request = urllib.request.Request(
         WEBBRIDGE_URL,
         data=json.dumps(
-            {"action": action, "args": args, "session": WEBBRIDGE_SESSION}
+            {"action": action, "args": args, "session": _webbridge_session}
         ).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -59,6 +65,13 @@ def _bridge(action: str, args: Dict[str, Any], timeout: float = 30.0) -> Dict[st
         message = (payload.get("error") or {}).get("message", "unknown")
         raise SessionRefreshError(f"WebBridge {action} 失败: {message}")
     return payload.get("data") or {}
+
+
+def _start_bridge_session() -> None:
+    global _webbridge_session
+    _webbridge_session = (
+        f"{WEBBRIDGE_SESSION_PREFIX}-{os.getpid()}-{secrets.token_hex(6)}"
+    )
 
 
 def _evaluate(code: str) -> Any:
@@ -174,6 +187,7 @@ def refresh_session(env_path: Path = ENV_PATH) -> str:
 def _refresh_session_inner(env_path: Path = ENV_PATH) -> str:
     global _last_attempt_at
     _last_attempt_at = time.time()
+    _start_bridge_session()
 
     base = os.environ.get(BASE_URL_ENV, "").strip().rstrip("/")
     if not base:
@@ -235,3 +249,25 @@ def _refresh_session_inner(env_path: Path = ENV_PATH) -> str:
     _persist_env(cookie, env_path)
     os.environ[COOKIE_ENV] = cookie
     return cookie
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Refresh the local Jira session")
+    parser.add_argument("--env-file", type=Path, default=ENV_PATH)
+    args = parser.parse_args(argv)
+    try:
+        refresh_session(args.env_file)
+    except (SessionRefreshError, OSError, ValueError) as exc:
+        print(
+            json.dumps(
+                {"status": "error", "detail": str(exc)},
+                ensure_ascii=False,
+            )
+        )
+        return 1
+    print(json.dumps({"status": "connected"}, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

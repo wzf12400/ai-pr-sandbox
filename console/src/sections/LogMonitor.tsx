@@ -91,13 +91,13 @@ export function LogMonitor() {
                     {scan.errorEvents ?? 0}
                   </span>
                   <span className="text-[10px] text-muted-foreground">
-                    错误事件 / {scan.projectsScanned ?? 0} 个项目
+                    本次新增错误 / {scan.projectsScanned ?? 0} 个项目
                   </span>
                 </div>
                 <div className="mt-1.5 flex gap-2 text-[10px] text-muted-foreground">
                   <span className="flex items-center gap-0.5">
                     <Activity className="h-2.5 w-2.5 text-orange-500" />
-                    {scan.incidentGroups ?? 0} 组故障
+                    {scan.retainedIncidentGroups ?? scan.incidents?.length ?? 0} 个历史问题
                   </span>
                   <span className="flex items-center gap-0.5">
                     {(scan.blockedEvents ?? 0) > 0 ? (
@@ -193,8 +193,11 @@ function LiveDetail({
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <DetailStat label="扫描项目（命名空间）" value={scan.projectsScanned ?? 0} />
-        <DetailStat label="错误事件（已脱敏）" value={scan.errorEvents ?? 0} />
-        <DetailStat label="故障分组" value={scan.incidentGroups ?? 0} />
+        <DetailStat label="本次新增错误" value={scan.errorEvents ?? 0} />
+        <DetailStat
+          label="历史问题（近 7 天）"
+          value={scan.retainedIncidentGroups ?? scan.incidents?.length ?? 0}
+        />
         <DetailStat label="脱敏拦截" value={scan.blockedEvents ?? 0} />
       </div>
 
@@ -211,38 +214,29 @@ function LiveDetail({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
-        <div className="min-w-0">
-          <h3 className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            项目错误分布
-          </h3>
-          {(scan.namespaces ?? []).length === 0 ? (
-            <p className="text-xs text-muted-foreground">暂无数据</p>
-          ) : (
-            <CountBars items={scan.namespaces ?? []} />
-          )}
-        </div>
-        <div className="min-w-0">
-          <h3 className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            服务错误分布
-          </h3>
-          {(scan.services ?? []).length === 0 ? (
-            <p className="text-xs text-muted-foreground">暂无数据</p>
-          ) : (
-            <CountBars items={scan.services ?? []} />
-          )}
-        </div>
+      <div className="min-w-0">
+        <h3 className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          日志报错分布 · 近 7 天
+        </h3>
+        {(scan.logErrors ?? []).length === 0 ? (
+          <p className="text-xs text-muted-foreground">暂无数据</p>
+        ) : (
+          <CountBars items={scan.logErrors ?? []} />
+        )}
       </div>
 
       <AutomationPanel scan={scan} onSaved={onRulesSaved} />
 
       <div>
         <h3 className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-          故障分组明细
+          近期故障分组
+          <span className="ml-2 normal-case tracking-normal text-muted-foreground/70">
+            保留 7 天 · 最多展示 50 条
+          </span>
         </h3>
         {(scan.incidents ?? []).length === 0 ? (
           <p className="text-xs text-muted-foreground">
-            本批次未发现可分组的错误事件
+            近 7 天没有已保留的故障分组
           </p>
         ) : (
           <div className="space-y-1.5">
@@ -276,7 +270,7 @@ function IncidentRow({ incident }: { incident: IncidentView }) {
           {incident.services.join(", ") || "—"}
         </span>
         <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">
-          {incident.eventCount} 条
+          累计 {incident.eventCount} 条
         </span>
         <span className="shrink-0 text-[11px] text-muted-foreground">
           {timeAgo(incident.lastSeenAt)}
@@ -298,8 +292,11 @@ function IncidentRow({ incident }: { incident: IncidentView }) {
               <div className="mt-0.5 font-mono text-[11px]">{incident.strategy}</div>
             </div>
             <div>
-              <span className="text-muted-foreground">影响用户数</span>
-              <div className="mt-0.5">{incident.affectedUserCount ?? "—"}</div>
+              <span className="text-muted-foreground">本次新增 / 历史分组</span>
+              <div className="mt-0.5">
+                {incident.currentScanEventCount ?? 0} /{" "}
+                {incident.incidentGroupCount ?? 1}
+              </div>
             </div>
           </div>
           {incident.affectedEndpoints.length > 0 && (
