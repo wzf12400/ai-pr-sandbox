@@ -188,11 +188,6 @@ Future organization discovery can produce the same normalized scope from a
 GitHub App installation or an approved repository topic. Explicit entries and
 discovered entries must pass the same schema and authorization checks.
 
-## Versioned interfaces
-
-- Search scope: `backend/schemas/repository-search-scope-v1.schema.json`
-- Resolution result: `backend/schemas/repository-resolution-v1.schema.json`
-
 ## Implementation sequence
 
 1. Implement strict scope/result dataclasses and local schema-equivalent

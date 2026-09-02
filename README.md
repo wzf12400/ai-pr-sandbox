@@ -45,8 +45,7 @@ npm --prefix front run build
 ## 部署
 
 前端位于 [`front/`](front/)，可独立构建并发布静态资源。后端位于
-[`backend/`](backend/)，部署说明和 systemd 模板位于
-[`backend/deploy/`](backend/deploy/)。对外只暴露 Console 的统一入口；
+[`backend/`](backend/)，通过目录内启动脚本运行。对外只暴露 Console 的统一入口；
 Control Plane、Jira Monitor、Log Monitor、MySQL 和 Redis 应保持在受控内网。
 
 仓库授权、Issue 发布和代码执行分别受以下配置约束：

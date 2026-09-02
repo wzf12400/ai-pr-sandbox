@@ -26,4 +26,5 @@ python3 -m compileall -q src
 mvn -q -f control-plane/pom.xml -DskipTests package
 ```
 
-测试与生产部署见 [`deploy/README.md`](deploy/README.md)。
+测试与生产环境使用相同启动脚本，通过 `APP_ENV=staging` 或
+`APP_ENV=production` 选择对应环境文件。
