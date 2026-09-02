@@ -108,7 +108,7 @@ export function JiraMonitor() {
                 <p className="py-1 text-[11px] leading-snug text-muted-foreground">
                   监控服务未运行
                   <span className="mt-0.5 block font-mono text-[10px] text-muted-foreground/60">
-                    python3 -m src.jira_monitor_api
+                    cd backend && python3 -m src.jira_monitor_api
                   </span>
                 </p>
               )}
@@ -189,7 +189,7 @@ export function JiraMonitor() {
               {reachable === false && (
                 <EmptyHint
                   title="监控服务未运行"
-                  hint="python3 -m src.jira_monitor_api"
+                  hint="cd backend && python3 -m src.jira_monitor_api"
                 />
               )}
               {reachable !== false && !live && (

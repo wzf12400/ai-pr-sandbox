@@ -5,7 +5,7 @@
 Run:
 
 ```bash
-./bin/ai-agent
+./backend/bin/ai-agent
 ```
 
 The terminal displays the active GitHub account, Copilot model, validated
@@ -57,16 +57,16 @@ The preferred log path is a persistent local inbox:
 
 ```bash
 # Poll once while validating the connection and inbox behavior
-./bin/ai-agent watch --once
+./backend/bin/ai-agent watch --once
 
 # Keep polling in the foreground
-./bin/ai-agent watch
+./backend/bin/ai-agent watch
 
 # List safe, deduplicated incidents
-./bin/ai-agent inbox
+./backend/bin/ai-agent inbox
 
 # Generate the exact Issue preview and make the human decision
-./bin/ai-agent review INC-123456789ABC
+./backend/bin/ai-agent review INC-123456789ABC
 ```
 
 The first `watch` asks for:
@@ -203,28 +203,28 @@ high-entropy and credential checks.
 
 ```bash
 # Interactive source selection
-./bin/ai-agent
+./backend/bin/ai-agent
 
 # One natural-language request
-./bin/ai-agent --request '在计算器模块新增乘法功能，并添加正数、负数和零的测试。'
+./backend/bin/ai-agent --request '在计算器模块新增乘法功能，并添加正数、负数和零的测试。'
 
 # Read from the log platform
-./bin/ai-agent --logs
+./backend/bin/ai-agent --logs
 
 # Preferred persistent log inbox
-./bin/ai-agent watch --once
-./bin/ai-agent watch
-./bin/ai-agent inbox
-./bin/ai-agent review INC-123456789ABC
+./backend/bin/ai-agent watch --once
+./backend/bin/ai-agent watch
+./backend/bin/ai-agent inbox
+./backend/bin/ai-agent review INC-123456789ABC
 
 # Generate the preview and stop before all remote writes
-./bin/ai-agent --request '...' --preview-only
+./backend/bin/ai-agent --request '...' --preview-only
 
 # Deliberately resume an eligible run whose exact remote claim was retained
-./bin/ai-agent --resume 20260724T083021Z-542700c2
+./backend/bin/ai-agent --resume 20260724T083021Z-542700c2
 
 # Replace the configured repository
-./bin/ai-agent --configure
+./backend/bin/ai-agent --configure
 ```
 
 Resume is not a general retry switch. It is accepted only when the latest

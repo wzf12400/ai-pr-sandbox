@@ -14,25 +14,25 @@ import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
 import { parse, parseDocument } from "yaml";
 
-const CONSOLE_ROOT = path.resolve(
+const FRONT_ROOT = path.resolve(
   fileURLToPath(new URL("..", import.meta.url))
 );
-const REPOSITORY_ROOT = path.resolve(CONSOLE_ROOT, "..");
+const BACKEND_ROOT = path.resolve(FRONT_ROOT, "../backend");
 const APPLICATION_YML = path.join(
-  REPOSITORY_ROOT,
+  BACKEND_ROOT,
   "control-plane/src/main/resources/application.yml"
 );
 const APP_ENV = (process.env.APP_ENV ?? "local").trim().toLowerCase();
 if (!["local", "staging", "production"].includes(APP_ENV)) {
   throw new Error("APP_ENV must be local, staging, or production");
 }
-const ENV_FILE = path.join(REPOSITORY_ROOT, `.env.${APP_ENV}`);
+const ENV_FILE = path.join(BACKEND_ROOT, `.env.${APP_ENV}`);
 const CODE_POLICY_DIR = path.join(
-  REPOSITORY_ROOT,
+  BACKEND_ROOT,
   "control-plane/config/code-policies"
 );
 const REPOSITORY_SCOPE_FILE = path.join(
-  REPOSITORY_ROOT,
+  BACKEND_ROOT,
   "control-plane/config/repository-search-scope.json"
 );
 const MAX_BODY_BYTES = 64_000;
@@ -47,8 +47,8 @@ const CONTROL_PLANE_SETTINGS_URL =
   "http://127.0.0.1:8080/api/configuration-profiles/CONSOLE_SETTINGS";
 const JIRA_MONITOR_RELOAD_URL =
   "http://127.0.0.1:8098/jira-monitor/session/reload";
-const PYTHON = existsSync(path.join(REPOSITORY_ROOT, ".venv/bin/python3"))
-  ? path.join(REPOSITORY_ROOT, ".venv/bin/python3")
+const PYTHON = existsSync(path.join(BACKEND_ROOT, ".venv/bin/python3"))
+  ? path.join(BACKEND_ROOT, ".venv/bin/python3")
   : "python3";
 
 const ENV_DEFAULTS: Record<string, string> = {
@@ -315,7 +315,7 @@ function ghAccounts(): { activeAccount: string; accounts: string[] } {
       '.hosts["github.com"]',
     ],
     {
-      cwd: REPOSITORY_ROOT,
+      cwd: BACKEND_ROOT,
       encoding: "utf8",
       timeout: 10_000,
       maxBuffer: 64_000,
@@ -472,7 +472,7 @@ function verifyNewRepositories(
       "gh",
       ["api", `repos/${repository}`, "--jq", ".full_name"],
       {
-        cwd: REPOSITORY_ROOT,
+        cwd: BACKEND_ROOT,
         encoding: "utf8",
         timeout: 10_000,
         maxBuffer: 16_000,
@@ -628,7 +628,7 @@ async function verifyLogRoutes(
     const warnings: Record<string, string> = {};
     if (repositories.length === 0) return warnings;
     const result = spawnSync(PYTHON, ["-m", "src.log_route_verifier"], {
-      cwd: REPOSITORY_ROOT,
+      cwd: BACKEND_ROOT,
       encoding: "utf8",
       input: JSON.stringify(repositories.map(({ repository }) =>
         repositoryName(repository)
@@ -797,7 +797,7 @@ async function verifyAndBindJiraProjects(
     if (localEnv[key]) childEnv[key] = localEnv[key];
   }
   const result = spawnSync(PYTHON, ["-m", "src.jira_project_verifier"], {
-    cwd: REPOSITORY_ROOT,
+    cwd: BACKEND_ROOT,
     encoding: "utf8",
     input: JSON.stringify(names),
     env: childEnv,
@@ -1201,7 +1201,7 @@ function switchAccount(login: string) {
     "gh",
     ["auth", "switch", "--hostname", "github.com", "--user", login],
     {
-      cwd: REPOSITORY_ROOT,
+      cwd: BACKEND_ROOT,
       encoding: "utf8",
       timeout: 10_000,
       maxBuffer: 16_000,
@@ -1413,7 +1413,7 @@ async function connectJira(payload: unknown) {
     PYTHON,
     ["-m", "src.jira_session_refresh", "--env-file", ENV_FILE],
     {
-      cwd: REPOSITORY_ROOT,
+      cwd: BACKEND_ROOT,
       encoding: "utf8",
       env: {
         ...process.env,

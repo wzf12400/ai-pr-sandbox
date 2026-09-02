@@ -12,14 +12,14 @@ Redis Stream Outbox。MySQL 是任务事实来源，Redis 仅用于唤醒 Worker
 - `AI_BASE_URL`、`AI_API_KEY`
 - `GITHUB_ROUTING_TOKEN`
 
-完整变量模板见项目根目录 `.env.example`。敏感值不得写入 Git、日志或接口响应。
+完整变量模板见 `backend/.env.example`。敏感值不得写入 Git、日志或接口响应。
 
 ## 启动
 
 在仓库根目录运行：
 
 ```bash
-./scripts/run-control-plane.sh
+./backend/scripts/run-control-plane.sh
 ```
 
 默认监听 `127.0.0.1:8080`。健康状态和任务 API 应仅通过内网或统一网关访问。
@@ -27,7 +27,7 @@ Redis Stream Outbox。MySQL 是任务事实来源，Redis 仅用于唤醒 Worker
 ## 构建
 
 ```bash
-mvn -q -f control-plane/pom.xml -DskipTests package
+mvn -q -f backend/control-plane/pom.xml -DskipTests package
 ```
 
 数据库结构由 `src/main/resources/db/migration/` 中的 Flyway 迁移管理。

@@ -17,40 +17,43 @@ GitHub Issue，并在策略允许时调用 GitHub Copilot Cloud Agent 生成 Dra
 
 ## 本地启动
 
-复制 `.env.example` 为 `.env.local`，填写数据库、Redis、GitHub、Jira 和 AI 服务配置，
+复制 `backend/.env.example` 为 `backend/.env.local`，填写数据库、Redis、GitHub、Jira 和 AI 服务配置，
 然后分别启动：
 
 ```bash
-./scripts/run-control-plane.sh
-./scripts/run-worker.sh
-./scripts/run-jira-monitor.sh
-./scripts/run-log-monitor.sh
-./scripts/run-console.sh
+./backend/scripts/run-control-plane.sh
+./backend/scripts/run-worker.sh
+./backend/scripts/run-jira-monitor.sh
+./backend/scripts/run-log-monitor.sh
+./front/scripts/run-console.sh
 ```
 
-启动脚本默认读取 `.env.local`。测试环境设置 `APP_ENV=staging` 后读取
-`.env.staging`，生产环境设置 `APP_ENV=production` 后读取 `.env.production`。
+后端启动脚本默认读取 `backend/.env.local`。测试环境设置 `APP_ENV=staging` 后读取
+`backend/.env.staging`，生产环境设置 `APP_ENV=production` 后读取
+`backend/.env.production`。
 敏感值只允许保存在这些已被 Git 忽略的环境文件或部署 Secret 管理系统中。
 
 ## 构建
 
 ```bash
-python3 -m compileall -q src
-mvn -q -f control-plane/pom.xml -DskipTests package
-npm --prefix console ci
-npm --prefix console run build
+python3 -m compileall -q backend/src
+mvn -q -f backend/control-plane/pom.xml -DskipTests package
+npm --prefix front ci
+npm --prefix front run build
 ```
 
 ## 部署
 
-部署说明和 systemd 模板位于 [`deploy/`](deploy/)。对外只暴露 Console 的统一入口；
+前端位于 [`front/`](front/)，可独立构建并发布静态资源。后端位于
+[`backend/`](backend/)，部署说明和 systemd 模板位于
+[`backend/deploy/`](backend/deploy/)。对外只暴露 Console 的统一入口；
 Control Plane、Jira Monitor、Log Monitor、MySQL 和 Redis 应保持在受控内网。
 
 仓库授权、Issue 发布和代码执行分别受以下配置约束：
 
-- `control-plane/config/repository-search-scope.json`
-- `control-plane/config/repository-auto-publish-policy.json`
-- `control-plane/config/code-policies/`
-- `control-plane/config/code-preapproval-manifest.json`
+- `backend/control-plane/config/repository-search-scope.json`
+- `backend/control-plane/config/repository-auto-publish-policy.json`
+- `backend/control-plane/config/code-policies/`
+- `backend/control-plane/config/code-preapproval-manifest.json`
 
 所有代码修改只生成 Draft PR，合并仍需人工审核。
