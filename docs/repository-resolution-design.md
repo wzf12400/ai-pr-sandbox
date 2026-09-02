@@ -190,8 +190,8 @@ discovered entries must pass the same schema and authorization checks.
 
 ## Versioned interfaces
 
-- Search scope: `schemas/repository-search-scope-v1.schema.json`
-- Resolution result: `schemas/repository-resolution-v1.schema.json`
+- Search scope: `backend/schemas/repository-search-scope-v1.schema.json`
+- Resolution result: `backend/schemas/repository-resolution-v1.schema.json`
 
 ## Implementation sequence
 
@@ -211,7 +211,7 @@ milestone.
 
 ## Current implementation
 
-`bin/resolve-issue-repository` now implements the first read-only slice:
+`backend/bin/resolve-issue-repository` now implements the first read-only slice:
 
 - strict loading of `repository-search-scope/v1` and eligible, locally
   validated `ai-issue-generation/v1` results;
@@ -232,7 +232,7 @@ large-repository search strategy.
 Module/package, interface/business-object, service, and repository-metadata
 families are not yet implemented.
 
-`bin/natural-language-to-issue` now composes natural-language evidence,
+`backend/bin/natural-language-to-issue` now composes natural-language evidence,
 generator/reviewer validation, repository resolution, target-repository Issue
 matching, and deterministic automatic publication approval. Its policy is
 bound to both the reviewed policy bytes and the exact repository-scope bytes.

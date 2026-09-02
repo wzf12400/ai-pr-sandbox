@@ -12,7 +12,10 @@
 ## Linux 服务器（上线测试）
 
 ```bash
-# 1. 克隆仓库、配好 .env.staging、建好 .venv（pip install -r requirements.txt）
+cd backend
+
+# 1. 配好 .env.staging、建好 .venv
+#    （pip install -r requirements-worker.txt）
 # 2. 装服务（自动把仓库实际路径填进单元文件）
 sudo bash scripts/install-systemd.sh staging
 
@@ -32,7 +35,8 @@ macOS 隐私保护禁止 launchd 后台服务访问桌面目录（已实测）�
 （已注册进登录项，隐藏运行；脚本幂等，已在运行就不会重复启动）。
 重启后首次运行若弹「想访问桌面上的文件」，点允许后永久生效。
 
-也可以手动跑：`nohup scripts/run-jira-monitor.sh > /tmp/jira-monitor-8098.log 2>&1 &`
+也可以在 `backend` 目录手动跑：
+`nohup scripts/run-jira-monitor.sh > /tmp/jira-monitor-8098.log 2>&1 &`
 
 ## worker 的 GitHub token
 

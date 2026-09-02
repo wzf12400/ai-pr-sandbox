@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Compile Python services
-        run: python -m compileall -q src
+        run: python -m compileall -q backend/src
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
@@ -27,12 +27,12 @@ jobs:
           java-version: "21"
           cache: maven
       - name: Build control plane
-        run: mvn -q -f control-plane/pom.xml -DskipTests package
+        run: mvn -q -f backend/control-plane/pom.xml -DskipTests package
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: console/package-lock.json
+          cache-dependency-path: front/package-lock.json
       - name: Build console
-        run: npm --prefix console ci && npm --prefix console run build
+        run: npm --prefix front ci && npm --prefix front run build

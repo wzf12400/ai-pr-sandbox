@@ -1,6 +1,6 @@
 #!/bin/bash
 # 把四个 systemd 服务装进当前机器（Linux 服务器上线测试用）
-# 用法：sudo bash scripts/install-systemd.sh staging
+# 用法：在 backend 目录运行 sudo bash scripts/install-systemd.sh staging
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
