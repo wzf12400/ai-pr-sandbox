@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`backend/bin/modify-approved-issue` is the first guarded downstream implementation
+`bin/modify-approved-issue` is the first guarded downstream implementation
 slice after Issue creation and repository routing. It fetches one published
 GitHub Issue, validates a repository-owned policy, runs deterministic code
 localization, and can ask the current operating-system user's GitHub Copilot
@@ -107,7 +107,7 @@ different patch.
 Read-only preflight and localization:
 
 ```bash
-./backend/bin/modify-approved-issue \
+./bin/modify-approved-issue \
   https://github.com/OWNER/REPOSITORY/issues/123 \
   --repo /path/to/repository \
   --output .issue-code-output/issue-123-preflight.json
@@ -116,7 +116,7 @@ Read-only preflight and localization:
 Modify the local Issue branch and run tests, without a GitHub write:
 
 ```bash
-./backend/bin/modify-approved-issue \
+./bin/modify-approved-issue \
   https://github.com/OWNER/REPOSITORY/issues/123 \
   --repo /path/to/repository \
   --execute \
@@ -126,7 +126,7 @@ Modify the local Issue branch and run tests, without a GitHub write:
 Modify, test, commit, push, and create a Draft PR:
 
 ```bash
-./backend/bin/modify-approved-issue \
+./bin/modify-approved-issue \
   https://github.com/OWNER/REPOSITORY/issues/123 \
   --repo /path/to/repository \
   --publish-pr \

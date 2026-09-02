@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  backend:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -28,6 +28,12 @@ jobs:
           cache: maven
       - name: Build control plane
         run: mvn -q -f backend/control-plane/pom.xml -DskipTests package
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:

@@ -72,7 +72,7 @@ MAX_CODE_SEARCH_ANCHORS = 3
 MAX_CODE_CONTEXT_FILES = 4
 MAX_CODE_CONTEXT_CHARACTERS = 6_000
 CODE_FIX_SKILL_PATH = (
-    Path(__file__).resolve().parents[2]
+    Path(__file__).resolve().parent.parent
     / ".agents"
     / "skills"
     / "minimal-code-fix"

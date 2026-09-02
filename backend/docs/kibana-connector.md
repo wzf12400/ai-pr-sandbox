@@ -54,7 +54,7 @@ key changes event references and disables cross-run deduplication.
 ```bash
 export LOG_SANITIZER_HMAC_KEY="<stable-local-secret-at-least-32-bytes>"
 
-./backend/bin/kibana-to-issues \
+./bin/kibana-to-issues \
   --discover-url '<full-discover-url>' \
   --prompt-password \
   --timeout-seconds 60
@@ -176,7 +176,7 @@ retained.
 Configure the existing AI gateway variables, then run:
 
 ```bash
-./backend/bin/kibana-to-issues \
+./bin/kibana-to-issues \
   --discover-url '<full-discover-url>' \
   --prompt-password \
   --prompt-api-key \
@@ -193,7 +193,7 @@ still stops before publication.
 ## 3. Publish reviewed Issues
 
 ```bash
-./backend/bin/kibana-to-issues \
+./bin/kibana-to-issues \
   --discover-url '<full-discover-url>' \
   --prompt-password \
   --prompt-api-key \
@@ -218,7 +218,7 @@ Bind the command to the reviewed bytes of that policy:
 ```bash
 POLICY_SHA256=$(shasum -a 256 path/to/auto-publish-policy.json | awk '{print $1}')
 
-./backend/bin/kibana-to-issues \
+./bin/kibana-to-issues \
   --discover-url '<full-discover-url>' \
   --username "$OPENSEARCH_USERNAME" \
   --generate \
@@ -248,7 +248,7 @@ export OPENSEARCH_PASSWORD='<injected-secret>'
 export AI_API_KEY='<injected-secret>'
 export LOG_SANITIZER_HMAC_KEY='<stable-secret-at-least-32-bytes>'
 
-./backend/bin/kibana-issue-watch \
+./bin/kibana-issue-watch \
   --interval-seconds 300 \
   -- \
   --discover-url '<full-discover-url>' \

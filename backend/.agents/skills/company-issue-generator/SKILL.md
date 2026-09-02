@@ -24,7 +24,7 @@ Use `.github/ISSUE_TEMPLATE/feature.yml` as the canonical human-facing field con
 For a natural-language description plus one log file, prefer the repository entry point:
 
 ```bash
-./backend/bin/issue-entry \
+./bin/issue-entry \
   --description-file REQUEST.txt \
   --log LOG.json
 ```
@@ -47,7 +47,7 @@ Use the bounded connector when a complete Discover URL and a dedicated
 read-only Basic account are available:
 
 ```bash
-./backend/bin/kibana-to-issues \
+./bin/kibana-to-issues \
   --discover-url 'FULL_DISCOVER_URL' \
   --username READ_ONLY_USER \
   --prompt-password
@@ -79,7 +79,7 @@ lifecycle.
 Require `LOG_SANITIZER_HMAC_KEY` to contain at least 32 bytes. Run:
 
 ```bash
-cd backend && python3 -m src.phase_one kibana INPUT.json \
+python3 -m src.phase_one kibana INPUT.json \
   --sanitized-output sanitized/EVENT.json \
   --draft-output drafts/EVENT-triage.md
 ```
@@ -87,7 +87,7 @@ cd backend && python3 -m src.phase_one kibana INPUT.json \
 Continue only when the event is eligible. `INFO` events are skipped; blocked events stay blocked. To create an AI-reviewed draft from the sanitized event, run:
 
 ```bash
-cd backend && python3 -m src.phase_one ai-issue sanitized/EVENT.json \
+python3 -m src.phase_one ai-issue sanitized/EVENT.json \
   --output-json reports/EVENT-ai-issue.json \
   --output-md drafts/EVENT-ai-issue.md
 ```
@@ -103,7 +103,7 @@ Accept only one of these inputs:
 Run:
 
 ```bash
-cd backend && python3 -m src.phase_one ai-issue INPUT.json \
+python3 -m src.phase_one ai-issue INPUT.json \
   --output-json reports/ISSUE.json \
   --output-md drafts/ISSUE.md
 ```
@@ -152,7 +152,7 @@ Do not run code localization or modification from a local Issue draft. A later I
 The existing read-only locator can consume an approved GitHub Issue API object:
 
 ```bash
-cd backend && python3 -m src.phase_one locate-github-issue APPROVED_ISSUE.json \
+python3 -m src.phase_one locate-github-issue APPROVED_ISSUE.json \
   --repo /path/to/repository \
   --output reports/location.json \
   --top-k 10
@@ -163,7 +163,7 @@ Treat returned files, symbols, and lines as ranked candidates rather than facts.
 The first guarded local-user Issue-to-Code slice is available through:
 
 ```bash
-./backend/bin/modify-approved-issue \
+./bin/modify-approved-issue \
   https://github.com/OWNER/REPOSITORY/issues/123 \
   --repo /path/to/repository \
   --output .issue-code-output/issue-123-preflight.json
@@ -184,7 +184,7 @@ The local approved-Issue dispatcher connects repository-owned approval labels
 to that modifier:
 
 ```bash
-./backend/bin/watch-approved-issues \
+./bin/watch-approved-issues \
   --repo /path/to/repository \
   --once \
   --dry-run \

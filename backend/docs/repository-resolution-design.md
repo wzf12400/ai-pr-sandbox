@@ -206,7 +206,7 @@ milestone.
 
 ## Current implementation
 
-`backend/bin/resolve-issue-repository` now implements the first read-only slice:
+`bin/resolve-issue-repository` now implements the first read-only slice:
 
 - strict loading of `repository-search-scope/v1` and eligible, locally
   validated `ai-issue-generation/v1` results;
@@ -227,7 +227,7 @@ large-repository search strategy.
 Module/package, interface/business-object, service, and repository-metadata
 families are not yet implemented.
 
-`backend/bin/natural-language-to-issue` now composes natural-language evidence,
+`bin/natural-language-to-issue` now composes natural-language evidence,
 generator/reviewer validation, repository resolution, target-repository Issue
 matching, and deterministic automatic publication approval. Its policy is
 bound to both the reviewed policy bytes and the exact repository-scope bytes.

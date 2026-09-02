@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`backend/bin/watch-approved-issues` connects the approved-GitHub-Issue boundary to the
+`bin/watch-approved-issues` connects the approved-GitHub-Issue boundary to the
 existing guarded code modifier. It supports one foreground poll in either
 read-only or explicitly enabled execution mode:
 
@@ -26,7 +26,7 @@ policy, and reuses the modifier's repository and Issue gates.
 Run it from an up-to-date, clean checkout of the policy base branch:
 
 ```bash
-./backend/bin/watch-approved-issues \
+./bin/watch-approved-issues \
   --repo /path/to/repository \
   --once \
   --dry-run \
@@ -43,7 +43,7 @@ claim, invoke Copilot, or change the repository.
 After reviewing a dry-run report, explicitly enable local code modification:
 
 ```bash
-./backend/bin/watch-approved-issues \
+./bin/watch-approved-issues \
   --repo /path/to/repository \
   --once \
   --execute \
@@ -61,7 +61,7 @@ An explicit publication mode uses the same claim and gates, then creates a
 Draft PR after tests pass:
 
 ```bash
-./backend/bin/watch-approved-issues \
+./bin/watch-approved-issues \
   --repo /path/to/repository \
   --once \
   --publish-pr \
